@@ -11,6 +11,7 @@
 **In scope:**
 - Box-constrained continuous nonlinear minimization (Eq. 1–2 of the paper), no general linear or quadratic constraints yet.
 - A representative subset of the paper's 11 benchmark functions (not full reproduction of Tables 1/2), chosen to exercise the different structural cases: separable multimodal (Ackley or Rastrigin), coupled/dependency-heavy (Rosenbrock).
+- **Phase 0 validation target is Rosenbrock only** (see Section 11). Rosenbrock is purely polynomial (add/sub/mul/sqr), so it can be validated with hand-rolled interval ops and no cuinterval dependency. Rastrigin/Ackley need interval `cos`/`sin`, which requires tracking monotonic segments of a periodic function under interval inputs, real work, not a small hand-roll, and exactly what cuinterval already provides correctly. Deferred to post-Phase-1 rather than either hand-rolling interval trig or pulling cuinterval in ahead of schedule just for one function.
 - No derivative-based pruning (first-order necessary-condition check from the paper is dropped for now).
 - No division in the interval arithmetic (only `+`, `-`, `*`, and `sqr` as a distinct primitive).
 
@@ -182,7 +183,8 @@ This is documented now so the region struct and cycling logic aren't designed in
 |---|---|---|
 | `region.h/.cu` | Region struct, arena allocator, parent-pointer reconstruction | Build now |
 | `region_list.h/.cu` | Min-heap with lazy deletion, GLB tracking | Build now |
-| `interval_ops.h` | Adapter over cuinterval primitives used (`add`, `sub`, `mul`, `sqr`, `neg`, `mul_scalar`) | Build after driver loop |
+| `interval_ops_min.h` | Hand-rolled `{lo, hi}` struct, outward-rounded `add`/`sub`/`mul`/`sqr` for Rosenbrock only, via CUDA rounding intrinsics; same signatures as the Phase 1 adapter below | Build now (Phase 0) |
+| `interval_ops.h` | cuinterval-backed adapter, drop-in replacement for `interval_ops_min.h` once Phase 1 lands (`add`, `sub`, `mul`, `sqr`, `neg`, `mul_scalar`, plus transcendentals for Rastrigin/Ackley) | Build after driver loop |
 | `interval_vector.h/.cu` | `IntervalVector` type (SoA lo/hi arrays), elementwise ops, sum-reduction | Build after driver loop |
 | `sparse_matvec.cu` | Sparse interval mat-vec and lower-triangular interval quadratic form | Build after driver loop |
 | `tape.h/.cu` | Expression tape data structure, opcode enum, runtime interpreter kernel | Build now |
@@ -198,9 +200,11 @@ This is documented now so the region struct and cycling logic aren't designed in
 
 ## 11. Build sequence
 
-**Phase 0 (first)**: driver loop end to end with a hand-hardcoded objective function (no tape, no cuinterval adapter layer beyond whatever minimal interval type is needed to get the loop running). Covers region tree, arena allocator, reconstruction, min-heap with lazy deletion, variable-cycling partition kernel, sampling kernel, stopping criteria. Goal: one fully working iteration loop on a trivial function, isolating the one true unknown (does the overall loop converge and prune correctly) before introducing any other new subsystem.
+**Phase 0 (first)**: driver loop end to end with a hand-hardcoded Rosenbrock objective (no tape, no cuinterval adapter layer). Covers region tree, arena allocator, reconstruction, min-heap with lazy deletion, variable-cycling partition kernel, sampling kernel, stopping criteria. Goal: one fully working iteration loop, isolating the one true unknown (does the overall loop converge and prune correctly) before introducing any other new subsystem.
 
-**Phase 1**: cuinterval integration (Section 3.3, steps 1-3), adapter layer, primitive validation, dedicated `mul_scalar`. Can start once Phase 0's interval needs are understood, does not require Phase 0 to be fully complete, but should not be the first thing built.
+**On interval evaluation within Phase 0**: the pruning step genuinely needs a real interval-evaluated `lower_bound(f, region)`, this can't be faked with a plain floating-point evaluation at a corner or center, since that isn't a valid lower bound at all and would hide loop bugs behind bound bugs. Instead, hand-roll the small set of outward-rounded operations Rosenbrock actually needs (interval add, subtract, multiply, `sqr`) directly using CUDA's rounding-mode intrinsics (`__dadd_rd`/`__dadd_ru`, `__dmul_rd`/`__dmul_ru`, etc.) against a bespoke `{lo, hi}` struct, no library dependency yet. Give these hand-rolled functions the exact same signatures planned for `interval_ops.h` in Phase 1, so Phase 1 becomes a backend swap behind those signatures rather than a rewrite of every call site in the objective kernel.
+
+**Phase 1**: cuinterval integration (Section 3.3, steps 1-3), adapter layer, primitive validation, dedicated `mul_scalar`. Can start once Phase 0's interval needs are understood, does not require Phase 0 to be fully complete, but should not be the first thing built. Rastrigin/Ackley (and any other benchmark needing periodic transcendentals) become validation targets once this phase lands.
 
 **Phase 2**: matrix/vector layer on top of Phase 1 (Section 3.4, steps 4-7), `IntervalVector`, sparse mat-vec, lower-triangular interval quadratic form, validated against a small dense reference. Depends on Phase 1 only, independent of the tape interpreter.
 
@@ -214,10 +218,10 @@ Phases 1 and 2 can proceed in parallel with Phase 0 once Phase 0 is underway, si
 
 ## 12. Validation plan
 
-1. Unit-validate the interval primitives (`add`/`sub`/`mul`/`sqr`) against hand-computed enclosures on small test intervals.
-2. Validate the tape interpreter against direct hand-coded evaluation of one benchmark function (Rastrigin, separable case) on a handful of fixed intervals.
-3. Run the full driver loop on a low-dimension instance (`n = 2` or `n = 5`) of Rastrigin and Rosenbrock, and manually verify the output region(s) bracket the known global minimum.
-4. Scale to `n = 50, 100` and compare iteration count and enclosure against the paper's Table 1/2 figures for the corresponding functions, as a sanity check rather than full reproduction.
+1. Unit-validate the hand-rolled interval primitives (`add`/`sub`/`mul`/`sqr`) against hand-computed enclosures on small test intervals (Phase 0), then re-validate the cuinterval-backed versions the same way once Phase 1 lands.
+2. Run the full driver loop on a low-dimension Rosenbrock instance (`n = 2` or `n = 5`) using the Phase 0 hardcoded objective, and manually verify the output region(s) bracket the known global minimum.
+3. Once Phase 1 lands, validate the tape interpreter against direct hand-coded evaluation of a separable benchmark with periodic transcendentals (Rastrigin) on a handful of fixed intervals, then run the same low-dimension driver loop check against it.
+4. Scale Rosenbrock to `n = 50, 100` and compare iteration count and enclosure against the paper's Table 1/2 figures, as a sanity check rather than full reproduction; repeat for Rastrigin once Phase 1/3 land.
 5. Confirm Rosenbrock's cubic-to-quartic runtime scaling (vs. quadratic for separable functions) reproduces qualitatively, this is the paper's own signal that the dependency problem is being handled correctly rather than masked.
 
 ---
