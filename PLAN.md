@@ -27,36 +27,49 @@
 
 ### 2.1 Region
 
-A region is a node in an implicit tree, not a self-contained struct with coordinates.
+A live region does not store its own coordinates. It stores enough to look up its parent's already-materialized coordinates and take one step from there.
 
 ```
 struct Region {
     uint32_t subregion_idx;   // Sidx: index within parent's partition
-    uint32_t iteration_idx;   // iteration in which this region was created
-    uint16_t cycling_idx;     // which block of dimensions to split next
-    uint32_t parent_id;       // index into the region arena; root = sentinel
+    uint32_t iteration_idx;   // index into region_history: which selected
+                              // region is this region's direct parent
+    uint16_t cycling_idx;     // which block of dimensions was split to produce this region
     double   lower_bound;     // f's interval lower bound in this region
-    bool     alive;           // lazy-deletion flag (see 3.2)
+    bool     alive;           // lazy-deletion flag (see 2.3)
 };
 ```
 
-Stored in a growable arena (flat array), `parent_id` is an index into the same arena. No coordinate data is stored per region. This keeps the per-region footprint at ~24-32 bytes, matching the paper's stated RAM economy, at the cost of an O(depth) reconstruction walk when a region is selected (Section 2.2). Depth is bounded by iteration count, acceptable given CPU-side reconstruction happens once per iteration, not per thread.
+```
+struct RegionHistory {
+    // one entry per iteration, appended only when a region is selected
+    // and its full boundaries are computed as a side effect of running
+    // the sampling/rule-out kernels against it
+    std::vector<std::array<double, 2*n>> materialized_bounds;
+};
+```
 
-**Decision record**: parent-pointer tree chosen over path-encoded indices, for implementation simplicity. Revisit only if profiling shows the arena walk is a bottleneck at large region-list scale.
+**Decision record (revised from arena/parent-pointer design)**: cross-checked against the authors' own reference implementation (GPUGO, `rosenbrock50.py`). Their scheme does not use a parent-pointer tree at all. Instead, every *selected* region's full boundary array is materialized once (as a byproduct of reconstructing it to run that iteration's kernels) and appended to a `region_list`/`region_history` indexed by iteration. Every subregion produced during that iteration then only needs a **single hop** back to its parent's already-materialized entry, not a walk up an arbitrary-depth ancestor chain, because the parent was never itself left as an unresolved chain of indices, it was fully resolved the moment it was selected.
+
+This supersedes the original parent-pointer arena design. The original scheme kept every region's footprint minimal (no coordinates stored anywhere) at the cost of an `O(depth)` reconstruction walk. This scheme instead stores one full `n`-dimensional boundary array per **iteration** (not per region), which is a materially smaller cost than per-region storage (iteration count is orders of magnitude below the live region-list size at the scales in the paper's own tables), and gets `O(1)` reconstruction in exchange, a strictly better trade at this problem's actual access pattern (one selection per iteration, many subregions per selection).
 
 ### 2.2 Region -> boundary reconstruction
 
 CPU-side routine, invoked once per iteration on the single selected region:
 
-1. Walk from the queried region to the root via `parent_id`, collecting `(subregion_idx, cycling_idx)` at each level.
-2. Starting from the root's known domain bounds, apply the inverse of Eqs. 10-11 at each level in root-to-leaf order, updating only the dimensions active under that level's `cycling_idx`, leaving all other dimensions unchanged from the ancestor.
-3. Output: `X_lower[n]`, `X_upper[n]` for the selected region, transferred to GPU constant memory (or global memory if `n` is large enough that `2n` FP64 values exceed constant memory capacity, matching the paper's own fallback).
+1. Look up `region_history.materialized_bounds[region.iteration_idx]`, the parent's full `n`-dimensional boundary array (already computed, no walk required).
+2. Apply Eqs. 10-11 once, using `region.subregion_idx` and `region.cycling_idx`, to compute this region's own full boundary array from the parent's.
+3. **Append the result to `region_history`** (this region is now itself "selected" and materialized; its own future children will reference this new entry). Output: `X_lower[n]`, `X_upper[n]`, transferred to GPU constant memory (or global memory if `n` is large enough that `2n` FP64 values exceed constant memory capacity, matching the paper's own fallback).
+
+`region_history` grows by exactly one entry per iteration, bounded by total iteration count, not by the number of live regions in the priority list.
 
 ### 2.3 Region list (priority structure)
 
 - Binary min-heap over `(lower_bound, region_id)`, keyed by `lower_bound`.
 - **Lazy deletion**: removing a region when it's pruned (Section 5) just clears `alive`. The heap is not rebuilt. On pop, skip dead entries.
 - GLB computation (for output/reporting) must scan only `alive` entries, or maintain a running minimum incrementally as regions are inserted/killed to avoid a full scan.
+
+**Divergence from reference implementation, kept deliberately**: GPUGO's `rosenbrock50.py` does not use a heap at all, it selects the minimum via `np.argmin` over the full live-region array every iteration and physically deletes with `np.delete`, an `O(N)` operation per iteration rather than `O(log N)`. This is presumably adequate at the scales they report. The min-heap with lazy deletion is kept here as the better-scaling choice, this is a deliberate improvement over the reference, not an oversight, flagged so a later correctness comparison against GPUGO's behavior isn't surprised by the difference in selection mechanics (both should select the same region each iteration, just at different asymptotic cost).
 
 ---
 
@@ -181,7 +194,7 @@ This is documented now so the region struct and cycling logic aren't designed in
 
 | Module | Responsibility | Phase |
 |---|---|---|
-| `region.h/.cu` | Region struct, arena allocator, parent-pointer reconstruction | Build now |
+| `region.h/.cu` | Region struct, `region_history` (materialized parent boundaries, indexed by iteration), single-hop reconstruction | Build now |
 | `region_list.h/.cu` | Min-heap with lazy deletion, GLB tracking | Build now |
 | `interval_ops_min.h` | Hand-rolled `{lo, hi}` struct, outward-rounded `add`/`sub`/`mul`/`sqr` for Rosenbrock only, via CUDA rounding intrinsics; same signatures as the Phase 1 adapter below | Build now (Phase 0) |
 | `interval_ops.h` | cuinterval-backed adapter, drop-in replacement for `interval_ops_min.h` once Phase 1 lands (`add`, `sub`, `mul`, `sqr`, `neg`, `mul_scalar`, plus transcendentals for Rastrigin/Ackley) | Build after driver loop |
@@ -200,7 +213,7 @@ This is documented now so the region struct and cycling logic aren't designed in
 
 ## 11. Build sequence
 
-**Phase 0 (first)**: driver loop end to end with a hand-hardcoded Rosenbrock objective (no tape, no cuinterval adapter layer). Covers region tree, arena allocator, reconstruction, min-heap with lazy deletion, variable-cycling partition kernel, sampling kernel, stopping criteria. Goal: one fully working iteration loop, isolating the one true unknown (does the overall loop converge and prune correctly) before introducing any other new subsystem.
+**Phase 0 (first)**: driver loop end to end with a hand-hardcoded Rosenbrock objective (no tape, no cuinterval adapter layer). Covers `region_history` (iteration-indexed materialized parent boundaries), single-hop reconstruction, min-heap with lazy deletion, variable-cycling partition kernel, sampling kernel, stopping criteria. Goal: one fully working iteration loop, isolating the one true unknown (does the overall loop converge and prune correctly) before introducing any other new subsystem.
 
 **On interval evaluation within Phase 0**: the pruning step genuinely needs a real interval-evaluated `lower_bound(f, region)`, this can't be faked with a plain floating-point evaluation at a corner or center, since that isn't a valid lower bound at all and would hide loop bugs behind bound bugs. Instead, hand-roll the small set of outward-rounded operations Rosenbrock actually needs (interval add, subtract, multiply, `sqr`) directly using CUDA's rounding-mode intrinsics (`__dadd_rd`/`__dadd_ru`, `__dmul_rd`/`__dmul_ru`, etc.) against a bespoke `{lo, hi}` struct, no library dependency yet. Give these hand-rolled functions the exact same signatures planned for `interval_ops.h` in Phase 1, so Phase 1 becomes a backend swap behind those signatures rather than a rewrite of every call site in the objective kernel.
 
@@ -228,7 +241,7 @@ Phases 1 and 2 can proceed in parallel with Phase 0 once Phase 0 is underway, si
 
 ## 13. Open items to revisit later (not blocking this phase)
 
-- Parent-pointer arena vs. path-encoded region tree, revisit if RAM/traversal cost becomes a bottleneck at large region-list scale.
+- Linear-scan selection (matching GPUGO's reference behavior) vs. the min-heap chosen here, revisit only if profiling shows heap overhead isn't worth it at the scales actually tested.
 - Compile-time templated tape interpreter for the fixed benchmark set, once the runtime interpreter is validated.
 - Structure-aware bounds for quadratic forms (e.g. exploiting PSD-ness of `Q`), flagged as a known limitation of plain interval evaluation on quadratic forms.
-- Derivative-based pruning, dropped for this phase, would need interval-valued analytic derivatives per objective.
+- Derivative-based pruning, dropped for this phase, would need interval-valued analytic derivatives per objective. Note: GPUGO's reference implementation has this active by default (see Section 2.3), so comparisons against it may show tighter bounds/fewer iterations than this phase's engine until derivative pruning is added.
