@@ -1,0 +1,230 @@
+# GPU Interval-Analysis Global Optimization: Implementation Plan
+
+**Target**: reproduce the method and a representative subset of results from Zhang, Shan & Cagan (2026), *Global optimization tailored for graphics processing units*, PNAS Nexus.
+**Language**: C++/CUDA, single GPU, FP64.
+**Downstream driver**: the design must extend cleanly to MIQPs (QPLIB), without today's simplifications becoming architectural dead ends.
+
+---
+
+## 1. Scope for this phase
+
+**In scope:**
+- Box-constrained continuous nonlinear minimization (Eq. 1–2 of the paper), no general linear or quadratic constraints yet.
+- A representative subset of the paper's 11 benchmark functions (not full reproduction of Tables 1/2), chosen to exercise the different structural cases: separable multimodal (Ackley or Rastrigin), coupled/dependency-heavy (Rosenbrock).
+- No derivative-based pruning (first-order necessary-condition check from the paper is dropped for now).
+- No division in the interval arithmetic (only `+`, `-`, `*`, and `sqr` as a distinct primitive).
+
+**Explicitly stubbed, not built:**
+- General linear/quadratic constraint pruning.
+- Sparse coupling-term representation for large `Q` (structure defined now, backing implementation deferred).
+- Integer variable handling (hybrid branch-and-bound), design fixed, implementation deferred until the continuous engine is validated.
+- Compile-time/templated codegen backend for the objective tape (runtime interpreter only for now).
+
+---
+
+## 2. Problem representation
+
+### 2.1 Region
+
+A region is a node in an implicit tree, not a self-contained struct with coordinates.
+
+```
+struct Region {
+    uint32_t subregion_idx;   // Sidx: index within parent's partition
+    uint32_t iteration_idx;   // iteration in which this region was created
+    uint16_t cycling_idx;     // which block of dimensions to split next
+    uint32_t parent_id;       // index into the region arena; root = sentinel
+    double   lower_bound;     // f's interval lower bound in this region
+    bool     alive;           // lazy-deletion flag (see 3.2)
+};
+```
+
+Stored in a growable arena (flat array), `parent_id` is an index into the same arena. No coordinate data is stored per region. This keeps the per-region footprint at ~24-32 bytes, matching the paper's stated RAM economy, at the cost of an O(depth) reconstruction walk when a region is selected (Section 2.2). Depth is bounded by iteration count, acceptable given CPU-side reconstruction happens once per iteration, not per thread.
+
+**Decision record**: parent-pointer tree chosen over path-encoded indices, for implementation simplicity. Revisit only if profiling shows the arena walk is a bottleneck at large region-list scale.
+
+### 2.2 Region -> boundary reconstruction
+
+CPU-side routine, invoked once per iteration on the single selected region:
+
+1. Walk from the queried region to the root via `parent_id`, collecting `(subregion_idx, cycling_idx)` at each level.
+2. Starting from the root's known domain bounds, apply the inverse of Eqs. 10-11 at each level in root-to-leaf order, updating only the dimensions active under that level's `cycling_idx`, leaving all other dimensions unchanged from the ancestor.
+3. Output: `X_lower[n]`, `X_upper[n]` for the selected region, transferred to GPU constant memory (or global memory if `n` is large enough that `2n` FP64 values exceed constant memory capacity, matching the paper's own fallback).
+
+### 2.3 Region list (priority structure)
+
+- Binary min-heap over `(lower_bound, region_id)`, keyed by `lower_bound`.
+- **Lazy deletion**: removing a region when it's pruned (Section 5) just clears `alive`. The heap is not rebuilt. On pop, skip dead entries.
+- GLB computation (for output/reporting) must scan only `alive` entries, or maintain a running minimum incrementally as regions are inserted/killed to avoid a full scan.
+
+---
+
+## 3. Interval arithmetic
+
+### 3.1 Library
+
+Extend **cuinterval** (neilkichler.github.io/cuinterval) rather than writing from scratch.
+
+Confirmed available as correctly-rounded primitives: `add`, `sub`, `mul`, `fma`, `sqr` (all 0-ulp error, i.e. exact outward rounding), plus `neg`, `min`/`max`, comparison/set operations. No division needed for this phase; skip `div`/`recip` entirely, this sidesteps the zero-straddling-denominator complexity entirely for now.
+
+No matrix-level or batched operations exist in the library, everything is scalar interval-in, interval-out. Any quadratic-form or per-dimension reduction loop is hand-written on top of these scalar primitives, not provided.
+
+**Related work note**: the same author (Neil Kichler, RWTH Aachen STCE group) has a companion paper on GPU-parallel interval branch-and-bound for deterministic global optimization (arXiv 2507.20769), built on cuinterval itself. Already reviewed, confirmed to be a branch-and-bound method that uses interval analysis over each node's domain to derive its bound, i.e. the same general family as the paper being reproduced here. Worth keeping in view while building the matrix/vector layer below, in case parts of it are already solved there.
+
+### 3.2 Diagonal (squared) terms
+
+Use `sqr()` as a first-class primitive, not `mul(x, x)`. This is the closed-form tight bound (`[0, max(a²,b²)]` if the interval straddles zero, `[min(a²,b²), max(a²,b²)]` otherwise) and avoids the artificial width inflation of treating the two occurrences of `x_i` as independent.
+
+### 3.3 cuinterval integration steps
+
+1. **Vendor via adapter, not direct calls.** Pull cuinterval in as a git submodule or CMake `FetchContent`, but route every use through a project-owned `interval_ops.h` that wraps only the primitives actually used (`add`, `sub`, `mul`, `sqr`, `neg`, plus the dedicated `mul_scalar` below). No call site references the library's names directly. This is the fallback path if the from-scratch option is ever needed later: only this one file changes.
+2. **Validate primitives before building on them.** Hand-compute expected outward-rounded bounds for a handful of test intervals through `add`/`mul`/`sqr`, compare against library output. Cheap gate, catches silent corruption that a claimed 0-ulp error spec doesn't guarantee in practice.
+3. **Dedicated `mul_scalar(double c, Interval x)`.** Used constantly (QP coefficients, cycling-loop reduction weights) wherever one operand is a plain real rather than a general interval. Branches once on the sign of `c` and does two correctly-rounded multiplies, cheaper than promoting `c` to a degenerate interval `[c, c]` and paying for the full four-multiply general case. Built as a distinct primitive in `interval_ops.h`, not synthesized from `mul` at call sites.
+
+### 3.4 Matrix/vector interval operations (built on top of 3.3)
+
+4. **`IntervalVector` type.** Structure-of-arrays layout (separate `lo[]` and `hi[]` device arrays), not array-of-structures, for GPU coalescing. Supports elementwise add/sub and a sum-reduction over a vector of intervals, the latter shared by the `reduce_dim` operator (Section 4.1) and by sparse-term accumulation below.
+5. **Sparse interval mat-vec.** Given `(i, j, coeff)` triples (COO or CSR), compute `y_i = sum_j coeff_ij * x_j` via `add(acc, mul_scalar(coeff, x_j))` accumulated per row. Natural mapping: each thread (already holding its subregion's `x` bounds) loops over its row's nonzero list. This assumes roughly uniform nonzeros per row; if a QPLIB instance has very uneven row density, this same-thread-per-row mapping causes warp divergence. Flagged, deferred: don't build load-balancing (row reordering, segmented cross-thread reduction) until a real QPLIB instance is in hand to profile against.
+6. **Interval quadratic form, lower-triangle convention.** QPLIB stores `Q` as **lower-triangular** (diagonal plus entries with `i > j`), not upper-triangular. The form is:
+
+   ```
+   x^T Q x = sum_i Q_ii * sqr(x_i)   +   sum_{i > j} 2 * Q_ij * mul(x_i, x_j)
+   ```
+
+   Diagonal term uses `sqr()` directly. Off-diagonal term (`i > j` only, doubled for symmetry) is exactly the sparse mat-vec pattern from Step 5, specialized to a self dot-product. This plugs into the `sparse_terms` slot of the three-part objective (Section 4.1) with no new representation, just a QPLIB-specific filler for that slot that iterates the lower triangle as stored, rather than assuming upper-triangle storage.
+7. **Validate against a small dense reference before wiring in.** Small (`n = 5` to `10`) symmetric `Q` in lower-triangular form, hand-computed or CPU dense-loop reference interval quadratic form, compared against the sparse GPU kernel's output. Done before Step 8, isolating "is the sparse kernel correct" from "does the driver correctly consume it."
+8. **Wire into the objective interface.** Only after Steps 1-7 pass. Becomes the concrete backend behind `evaluate_objective_interval(region)` for QP-family problems, sitting alongside the tape interpreter backend behind the same `Objective` abstraction (Section 4).
+
+---
+
+## 4. Objective function representation
+
+### 4.1 Fixed three-part structure
+
+```
+f(x) = constant
+     + reduce_dim(op, per_dim_tape, {dims})      // separable part
+     + sum_{(i,j) in sparse_terms} coupling_tape(x_i, x_j, coeff_ij)
+```
+
+- **`per_dim_tape`**: a short expression tape (opcodes: `CONST`, `VAR`, `ADD`, `SUB`, `MUL`, `SQR`, plus transcendental ops `SIN`, `COS`, `EXP` as needed per benchmark function), evaluated once per dimension on that dimension's interval.
+- **`reduce_dim` operator**: `SUM` or `PRODUCT`, applied across the thread's assigned dimensions in the same loop the variable-cycling partition already requires.
+- **`sparse_terms`**: COO-style `(i, j, coeff)` triples with a small coupling tape (e.g. plain `MUL` for QP off-diagonal terms, the actual Rosenbrock neighbor-coupling expression for that function). For QP objectives sourced from QPLIB, `Q` is stored **lower-triangular** (`i > j` entries plus diagonal), matching the library's own convention, not upper-triangular; see Section 3.4 Step 6 for the resulting quadratic form.
+
+This single representation covers all 11 paper benchmarks and the QP quadratic form (diagonal -> `per_dim_tape = SQR`, off-diagonal -> `sparse_terms`), with no separate "QP mode" code path.
+
+**Decision record**: kept as a fixed three-part structure (not a fully general hypergraph of arbitrary-arity coupling terms). Every target function fits this decomposition and it maps directly onto the existing per-dimension cycling loop. Flagged as a mild structural assumption should a future objective not decompose this way.
+
+### 4.2 Execution model
+
+- **Tape storage**: constant memory, read-only, identical across all threads (same reasoning as the paper's own selected-region broadcast).
+- **Intermediate values during evaluation**: per-thread local storage, sized from the tape's max live-value count computed once at tape-build time on the CPU.
+- **Backend**: runtime interpreter only for this phase (walks the tape via a switch/dispatch loop). A compile-time templated interpreter (specialized per known tape, enabling register allocation instead of local memory) is a valid later optimization for the fixed 11-benchmark validation set, but is not built now. Same tape format supports both backends without a rewrite.
+
+### 4.3 Authoring the benchmark functions
+
+All benchmark functions used for validation are authored as tapes (constant + per-dim tape + reduce op + sparse terms), not hand-written CUDA kernels. This exercises the representation itself as part of validation: if a benchmark's structure cannot be cleanly expressed (Rosenbrock's pairwise coupling is the hardest case), that surfaces now rather than after QPLIB integration.
+
+---
+
+## 5. Pruning pipeline
+
+Structured as an ordered list of independent filters per region/subregion, not a single hard-coded objective comparison:
+
+1. **Objective-bound filter** (built now): drop if `lower_bound(f, region) > GUB`.
+2. **Constraint filters** (stubbed, empty list for now): drop if any constraint's interval evaluation over the region proves infeasibility (e.g. for `g(x) <= 0`, drop if `lower_bound(g, region) > 0`; for `h(x) = 0`, drop if `0 ∉ [lower_bound(h), upper_bound(h)]`). Evaluated via the same tape/interval machinery as the objective, just against a different function. Empty list is a no-op today, and the loop structure means adding a constraint later requires no change to the surrounding iteration logic.
+
+Derivative-based pruning (first-order necessary conditions) is not in this pipeline for this phase.
+
+---
+
+## 6. Variable cycling and partitioning
+
+- Selected region is split along a block of `k` dimensions determined by `cycling_idx` (paper's demonstration value: 10 dimensions, 4-way uniform split per dimension, giving `4^10` subregions per iteration; kept as a tunable parameter, not hardcoded).
+- Subregion index -> subinterval indices via the modulo/floor-division chain (Eqs. 8-9 generalized to `k` dimensions).
+- Subregion bounds computed on-device via the SPSD pattern (Eqs. 10-11): only the selected region's bounds (`2n` floats) are transferred to constant/global memory, each thread computes its own subregion's bounds from its block/thread index, no per-subregion data transfer from host.
+- After evaluation, only surviving subregion indices (one integer each) are written back to host, not full bound data, matching the paper's GPU-write minimization.
+
+---
+
+## 7. Sampling (GUB update)
+
+- Diagonal sampling as in the paper: 10 points equally spaced along the selected region's main diagonal.
+- Evaluated in plain floating point (not interval), since only an upper bound is needed here, not a rigorous enclosure.
+- Smallest observed value updates GUB if improved.
+
+---
+
+## 8. Integer variables (design only, not built this phase)
+
+**Hybrid branch-and-bound**, chosen over unifying integers into the interval-quartering scheme:
+
+- Region struct gains a per-dimension type tag (continuous vs. integer) when this is implemented, not part of the current build.
+- On a region containing a fractional integer variable, branch into two children (`x_i <= floor(v)`, `x_i >= ceil(v)`) rather than quartering.
+- Variable cycling applies only to the continuous sub-block; already-fixed integer dimensions are skipped by the cycling index logic.
+- Stopping criterion for integer dimensions is exact (width == 0 / single integer value), not the tolerance-based width criterion used for continuous dimensions.
+
+This is documented now so the region struct and cycling logic aren't designed in a way that has to be reworked when integers are added.
+
+---
+
+## 9. Sparse representation (design only, not built this phase)
+
+- `sparse_terms` in the objective (Section 4.1) already uses COO triples, this is the hook for sparsity, no dense `Q` matrix is ever assumed.
+- When QPLIB integration begins, the per-dimension tape handles the diagonal of `Q` and `sparse_terms` handles the off-diagonal, with cost `O(nnz)` rather than `O(n^2)`. Off-diagonal entries are ingested and iterated in **lower-triangular** form (`i > j`), matching QPLIB's own storage convention (Section 3.4 Step 6), not upper-triangular.
+- No dense matrix-vector kernel is planned; this is a hard constraint on the design, not an optimization to add later.
+
+---
+
+## 10. Module breakdown
+
+| Module | Responsibility | Phase |
+|---|---|---|
+| `region.h/.cu` | Region struct, arena allocator, parent-pointer reconstruction | Build now |
+| `region_list.h/.cu` | Min-heap with lazy deletion, GLB tracking | Build now |
+| `interval_ops.h` | Adapter over cuinterval primitives used (`add`, `sub`, `mul`, `sqr`, `neg`, `mul_scalar`) | Build after driver loop |
+| `interval_vector.h/.cu` | `IntervalVector` type (SoA lo/hi arrays), elementwise ops, sum-reduction | Build after driver loop |
+| `sparse_matvec.cu` | Sparse interval mat-vec and lower-triangular interval quadratic form | Build after driver loop |
+| `tape.h/.cu` | Expression tape data structure, opcode enum, runtime interpreter kernel | Build now |
+| `objective.h` | Three-part objective structure (constant / per-dim tape+reduce / sparse terms), benchmark function authoring | Build now |
+| `constraints.h` | Constraint filter interface, empty implementation | Stub |
+| `partition.cu` | Variable-cycling subregion index computation, SPSD kernel | Build now |
+| `sampling.cu` | Diagonal sampling kernel, GUB update | Build now |
+| `driver.cpp` | Host-side iteration loop: select, sample, prune, partition, insert, stopping check | Build now |
+| `integer_branch.h` | Integer branch-and-bound node type and splitting logic | Stub (design only) |
+| `sparse_qp.h` | Sparse `Q`/constraint Jacobian ingestion for QPLIB | Stub (design only) |
+
+---
+
+## 11. Build sequence
+
+**Phase 0 (first)**: driver loop end to end with a hand-hardcoded objective function (no tape, no cuinterval adapter layer beyond whatever minimal interval type is needed to get the loop running). Covers region tree, arena allocator, reconstruction, min-heap with lazy deletion, variable-cycling partition kernel, sampling kernel, stopping criteria. Goal: one fully working iteration loop on a trivial function, isolating the one true unknown (does the overall loop converge and prune correctly) before introducing any other new subsystem.
+
+**Phase 1**: cuinterval integration (Section 3.3, steps 1-3), adapter layer, primitive validation, dedicated `mul_scalar`. Can start once Phase 0's interval needs are understood, does not require Phase 0 to be fully complete, but should not be the first thing built.
+
+**Phase 2**: matrix/vector layer on top of Phase 1 (Section 3.4, steps 4-7), `IntervalVector`, sparse mat-vec, lower-triangular interval quadratic form, validated against a small dense reference. Depends on Phase 1 only, independent of the tape interpreter.
+
+**Phase 3**: tape interpreter (Section 4), built and validated standalone against a hand-coded reference evaluation before being wired into the driver loop from Phase 0.
+
+**Phase 4**: wire both the tape interpreter (Phase 3) and the quadratic-form kernel (Phase 2) behind the shared `Objective` interface, replacing Phase 0's hardcoded function in the driver loop.
+
+Phases 1 and 2 can proceed in parallel with Phase 0 once Phase 0 is underway, since neither depends on the driver loop being finished, only on knowing the interval type's shape.
+
+---
+
+## 12. Validation plan
+
+1. Unit-validate the interval primitives (`add`/`sub`/`mul`/`sqr`) against hand-computed enclosures on small test intervals.
+2. Validate the tape interpreter against direct hand-coded evaluation of one benchmark function (Rastrigin, separable case) on a handful of fixed intervals.
+3. Run the full driver loop on a low-dimension instance (`n = 2` or `n = 5`) of Rastrigin and Rosenbrock, and manually verify the output region(s) bracket the known global minimum.
+4. Scale to `n = 50, 100` and compare iteration count and enclosure against the paper's Table 1/2 figures for the corresponding functions, as a sanity check rather than full reproduction.
+5. Confirm Rosenbrock's cubic-to-quartic runtime scaling (vs. quadratic for separable functions) reproduces qualitatively, this is the paper's own signal that the dependency problem is being handled correctly rather than masked.
+
+---
+
+## 13. Open items to revisit later (not blocking this phase)
+
+- Parent-pointer arena vs. path-encoded region tree, revisit if RAM/traversal cost becomes a bottleneck at large region-list scale.
+- Compile-time templated tape interpreter for the fixed benchmark set, once the runtime interpreter is validated.
+- Structure-aware bounds for quadratic forms (e.g. exploiting PSD-ness of `Q`), flagged as a known limitation of plain interval evaluation on quadratic forms.
+- Derivative-based pruning, dropped for this phase, would need interval-valued analytic derivatives per objective.
