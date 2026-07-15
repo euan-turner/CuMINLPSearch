@@ -15,13 +15,13 @@ private:
   std::string m_name;
 };
 
-
 class driver
 {
 public:
   driver(uint32_t iter_limit = 1000000);
 
   auto solve() -> double;
+
 private:
   double GUB_;
   double GLB_;

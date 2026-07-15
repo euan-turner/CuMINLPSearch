@@ -2,6 +2,7 @@
 #include <string>
 
 #include "CuQCQPs/CuQCQPs.hpp"
+
 #include "CuQCQPs/region.hpp"
 
 library_stub::library_stub()
@@ -14,7 +15,6 @@ auto library_stub::name() const -> char const*
   return m_name.c_str();
 }
 
-
 driver::driver(uint32_t iter_limit)
     : GUB_(std::numeric_limits<double>::max())
     , GLB_(std::numeric_limits<double>::lowest())
@@ -26,15 +26,14 @@ driver::driver(uint32_t iter_limit)
 
 auto driver::solve() -> double
 {
-
   // 1. Initialise region list on CPU with a single region
   region::RegionList pending(1000);
   pending.regions[0] = {
-    .sr_idx = 0,
-    .iter_idx = 0,
-    .cycl_idx = 0,
-    .lb = std::numeric_limits<double>::lowest(),
-    .alive = true,
+      .sr_idx = 0,
+      .iter_idx = 0,
+      .cycl_idx = 0,
+      .lb = std::numeric_limits<double>::lowest(),
+      .alive = true,
   };
 
   // 50 dimensions for now, TODO
@@ -45,9 +44,8 @@ auto driver::solve() -> double
     // 3. Select and materialise region and send to GPU
 
     // Find region with least lower bound
-    
+
     // materialise_region()
- 
 
     // 4. Kernels
     // 4a. Sample points from within the region
@@ -65,7 +63,7 @@ auto driver::solve() -> double
     // 5. CPU reads regions, updates GUB and prunes
 
     // 6. Repeat until convergence
-    ++iter_idx_; 
+    ++iter_idx_;
   }
 
   return 0.0;

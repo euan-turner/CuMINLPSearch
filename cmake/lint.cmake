@@ -11,7 +11,7 @@ default(
     PATTERNS
     source/*.cpp source/*.hpp source/*.cu source/*.cuh
     include/*.hpp include/*.cuh
-    test/*.cpp test/*.hpp
+    test/*.cpp test/*.hpp test/*.cu test/*.cuh
 )
 default(FIX NO)
 
