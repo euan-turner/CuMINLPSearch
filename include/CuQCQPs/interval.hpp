@@ -35,12 +35,15 @@ struct Bounds
 template<typename T, std::size_t N>
 struct Interval
 {
-  // raw array, not std::array: std::array::operator[] is a constexpr
-  // host-only function as far as nvcc is concerned, and requires
-  // --expt-relaxed-constexpr to call from device code
   Bounds<T> bounds[N];
 
   Interval() = default;
+};
+
+template<typename T, std::size_t N>
+struct Point
+{
+  T elems[N];
 };
 
 }  // namespace interval

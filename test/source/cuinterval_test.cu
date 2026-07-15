@@ -8,6 +8,7 @@
 
 #include "CuQCQPs/cuinterval.cuh"
 #include "CuQCQPs/interval.hpp"
+#include "cpu_rounding.hpp"
 
 using namespace interval;
 
@@ -579,4 +580,94 @@ TEMPLATE_TEST_CASE("reduce_sum folds mixed-sign dimensions into a single bound",
       [&](Bounds<T>* out) { k_reduce_sum<T, n><<<1, 1>>>(a, out); });
 
   require_bounds<T>(r, -7.0L, 8.0L);
+}
+
+// ---- host (CpuRounding) path vs device (CudaRounding) path ----
+
+TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernels bit-for-bit",
+                   "[cuinterval][host]",
+                   float,
+                   double)
+{
+  using T = TestType;
+  auto const B = [](long double lo, long double hi) -> Bounds<T>
+  { return Bounds<T>(static_cast<T>(lo), static_cast<T>(hi)); };
+
+  Bounds<T> const pos = B(2.5L, 6.25L);
+  Bounds<T> const neg = B(-9.5L, -1.25L);
+  Bounds<T> const straddling = B(-3.75L, 4.5L);
+  T const scalar = static_cast<T>(2.0L);
+
+  SECTION("add_bounds")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_add_bounds<T><<<1, 1>>>(pos, straddling, out); });
+    auto const host = add_bounds<T, CpuRounding>(pos, straddling);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("sub_bounds")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_sub_bounds<T><<<1, 1>>>(neg, pos, out); });
+    auto const host = sub_bounds<T, CpuRounding>(neg, pos);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("mul_bounds")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_mul_bounds<T><<<1, 1>>>(straddling, neg, out); });
+    auto const host = mul_bounds<T, CpuRounding>(straddling, neg);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("sqr_bound")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_sqr_bound<T><<<1, 1>>>(straddling, out); });
+    auto const host = sqr_bound<T, CpuRounding>(straddling);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("scal_add_bound")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_scal_add_bound<T><<<1, 1>>>(pos, scalar, out); });
+    auto const host = scal_add_bound<T, CpuRounding>(pos, scalar);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("scal_sub_bound (bounds - scalar)")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_scal_sub_bound_bs<T><<<1, 1>>>(pos, scalar, out); });
+    auto const host = scal_sub_bound<T, CpuRounding>(pos, scalar);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("scal_sub_bound (scalar - bounds)")
+  {
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_scal_sub_bound_sb<T><<<1, 1>>>(scalar, pos, out); });
+    auto const host = scal_sub_bound<T, CpuRounding>(scalar, pos);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
+
+  SECTION("scal_mul_bound")
+  {
+    T const neg_scalar = static_cast<T>(-2.0L);
+    auto const device = run_kernel<Bounds<T>>(
+        [&](Bounds<T>* out) { k_scal_mul_bound<T><<<1, 1>>>(straddling, neg_scalar, out); });
+    auto const host = scal_mul_bound<T, CpuRounding>(straddling, neg_scalar);
+    CHECK(host.lower == device.lower);
+    CHECK(host.upper == device.upper);
+  }
 }

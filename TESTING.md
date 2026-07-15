@@ -19,6 +19,13 @@ cmake --build --preset=dev
 ctest --preset=dev
 ```
 
+> **Note**
+> `CuQCQPs_cuinterval_test` and `CuQCQPs_rosenbrock_test` launch real CUDA
+> kernels, so they (and configuring at all, since `CMAKE_CUDA_ARCHITECTURES`
+> defaults to `native`) require an actual CUDA-capable GPU. Their host-side
+> rounding oracle (`CpuRounding`) uses `<xmmintrin.h>`, so those two targets
+> are x86-only.
+
 ## Formatting
 
 Check formatting (fails and lists offending files if anything is
@@ -62,8 +69,7 @@ cmake --build --preset=dev
 > cppcheck versions older than ~2.x don't understand some of the flags in
 > this project's release compile options (e.g. `-U_FORTIFY_SOURCE`) and will
 > fail with `unrecognized command line option`. If that happens locally,
-> check `cppcheck --version`; CI (`ci-ubuntu` preset, GitHub Actions) uses a
-> current version and is unaffected.
+> check `cppcheck --version` and update it.
 
 ### Sanitizers (ASan/UBSan)
 
@@ -76,10 +82,10 @@ cmake --build build/sanitize -j2
 ctest --test-dir build/sanitize --output-on-failure
 ```
 
-## Everything CI runs
+## Combined preset
 
 `ci-ubuntu` bundles clang-tidy + cppcheck + the standard release flags in one
-preset, matching the `test` job in `.github/workflows/ci.yml`:
+preset:
 
 ```sh
 cmake --preset=ci-ubuntu
