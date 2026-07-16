@@ -7,7 +7,9 @@
 - [x] Test
 - [x] Hard-code rosenbrock kernel (pointwise and interval)
 - [x] Test
-- [ ] Interval sampling and partitioning (10 variable at a time, 4 regions per variable, so 4^10 subregions)
+- [x] Thread sub-interval selection on GPU
+- [x] Interval sampling and partitioning (10 variable at a time, 4 regions per variable, so 4^10 subregions)
+      Kernel should be able to use device functions to evaluate the function.
 
 ## Optimisation Loop
 
@@ -37,3 +39,6 @@
 ## Integer Constraints
 
 - [ ] Add support for integer variables as in PLAN.md
+- [ ] Use examples from MINLPlib
+
+## Parsing Programs
