@@ -10,7 +10,7 @@
 #include "CuQCQPs/interval.hpp"
 #include "cpu_rounding.hpp"
 
-using namespace interval;
+using namespace cuqcqps::interval;
 
 #define CUDA_CHECK(expr) \
   do { \

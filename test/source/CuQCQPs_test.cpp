@@ -4,7 +4,7 @@
 
 auto main() -> int
 {
-  auto const stub = library_stub {};
+  auto const stub = cuqcqps::library_stub {};
 
   return std::string("CuQCQPs") == stub.name() ? 0 : 1;
 }

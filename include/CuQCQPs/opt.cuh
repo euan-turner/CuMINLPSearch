@@ -2,6 +2,9 @@
 
 #include "interval.hpp"
 
+namespace cuqcqps::opt
+{
+
 // The bounding kernel receives a single parent interval, which is stored in constant memory
 // as materialising a subinterval per thread does not scale to the 10^6 variables required by QPLib
 // The bounds for each variable are computed on-demand by each thread, which is O(nnz(Q)).
@@ -74,4 +77,6 @@ __device__ void get_bounds(
     bound.upper = interval[dim].upper;
   }
 }
+
+}  // namespace cuqcqps::opt
 

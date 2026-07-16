@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <vector>
 
-namespace interval
+namespace cuqcqps::interval
 {
 
 // An interval is the explicit form of the bounds on an
@@ -53,4 +53,4 @@ struct Point
   std::vector<T> elems;
 };
 
-}  // namespace interval
+}  // namespace cuqcqps::interval

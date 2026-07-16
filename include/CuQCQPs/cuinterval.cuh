@@ -2,7 +2,7 @@
 
 #include "interval.hpp"
 
-namespace interval
+namespace cuqcqps::interval
 {
 
 // Interval analysis of QCQPs requires:
@@ -196,4 +196,4 @@ __host__ __device__ inline Bounds<T> reduce_sum(const Bounds<T> *a, std::size_t 
 // scale(x, b, scratch, n); reduce_sum(scratch, n)
 // loop i j, mul_bounds, scal_mul_bound for non-diagonal Q terms
 
-}  // namespace interval
+}  // namespace cuqcqps::interval

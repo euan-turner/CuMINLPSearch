@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace region
+namespace cuqcqps::region
 {
 
 // RegionHistory is append only, when a region is selected, the full 2*n
@@ -75,4 +75,4 @@ void materialise_region(const Region& region, ExplicitRegion<NDIMS>& out)
   }
 }
 
-}  // namespace region
+}  // namespace cuqcqps::region

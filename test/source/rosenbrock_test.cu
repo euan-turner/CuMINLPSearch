@@ -13,7 +13,8 @@
 #include "CuQCQPs/rosenbrock.cuh"
 #include "cpu_rounding.hpp"
 
-using namespace interval;
+using namespace cuqcqps::interval;
+using namespace cuqcqps::rosenbrock;
 
 // GPU arithmetic can contract multiply-adds differently than the host
 // compiler, so results are compared with a relative tolerance rather than

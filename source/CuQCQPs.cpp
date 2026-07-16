@@ -5,6 +5,9 @@
 
 #include "CuQCQPs/region.hpp"
 
+namespace cuqcqps
+{
+
 library_stub::library_stub()
     : m_name {"CuQCQPs"}
 {
@@ -68,3 +71,5 @@ auto driver::solve() -> double
 
   return 0.0;
 }
+
+}  // namespace cuqcqps

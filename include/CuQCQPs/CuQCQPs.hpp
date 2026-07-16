@@ -4,6 +4,9 @@
 
 #include "CuQCQPs/region.hpp"
 
+namespace cuqcqps
+{
+
 class library_stub
 {
 public:
@@ -29,3 +32,5 @@ private:
   uint32_t iter_idx_;
   uint16_t cycl_idx_;
 };
+
+}  // namespace cuqcqps

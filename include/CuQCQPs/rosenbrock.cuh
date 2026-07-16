@@ -12,6 +12,9 @@
 #include "cuinterval.cuh"
 #include "opt.cuh"
 
+namespace cuqcqps::rosenbrock
+{
+
 #define CEIL_DIV(x, y) (((x) + (y) - 1) / (y))
 
 #define CUDA_CHECK(expr) \
@@ -186,7 +189,7 @@ __global__ void sample_rosenbrock_kernel(interval::Bounds<T> *d_interval, T *thr
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= ipow<PartitionNum, CycleSize>()) return;
 
-  CycleContext<CycleSize> ctx = make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
+  opt::CycleContext<CycleSize> ctx = opt::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
 
   T ub = ::cuda::std::numeric_limits<T>::max(); // upper bound on the minimum of the Rosenbrock function, based on these sampled points
   for (std::size_t i = 0; i < SamplePoints; ++i) {
@@ -202,8 +205,8 @@ __global__ void sample_rosenbrock_kernel(interval::Bounds<T> *d_interval, T *thr
       interval::Bounds<T> int_xj;
       interval::Bounds<T> int_xj1;
 
-      get_bounds(ctx, d_interval, j, int_xj);
-      get_bounds(ctx, d_interval, j + 1, int_xj1);
+      opt::get_bounds(ctx, d_interval, j, int_xj);
+      opt::get_bounds(ctx, d_interval, j + 1, int_xj1);
 
       // point bounds for this sample point
       interval::Bounds<T> xj(int_xj.lower + i * (int_xj.upper - int_xj.lower) / (SamplePoints - 1));
@@ -291,7 +294,7 @@ __global__ void bound_rosenbrock_kernel(interval::Bounds<T> *d_interval, T gub, 
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid >= ipow<PartitionNum, CycleSize>()) return;
 
-  CycleContext<CycleSize> ctx = make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
+  opt::CycleContext<CycleSize> ctx = opt::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
   
   // Evaluate rosenbrock kernel over the current interval
   interval::Bounds<T> res(0);
@@ -300,8 +303,8 @@ __global__ void bound_rosenbrock_kernel(interval::Bounds<T> *d_interval, T gub, 
     interval::Bounds<T> xi;
     interval::Bounds<T> xi1;
 
-    get_bounds(ctx, d_interval, i, xi);
-    get_bounds(ctx, d_interval, i + 1, xi1);
+    opt::get_bounds(ctx, d_interval, i, xi);
+    opt::get_bounds(ctx, d_interval, i + 1, xi1);
 
     interval::Bounds<T> a = interval::sub_bounds<T>(interval::sqr_bound<T>(xi), xi1);
     interval::Bounds<T> b = interval::scal_sub_bound<T>(xi, static_cast<T>(1));
@@ -343,3 +346,5 @@ void launch_bound_rosenbrock(const interval::Interval<T>& interval, T gub, std::
   CUDA_CHECK(cudaFree(d_interval));
   CUDA_CHECK(cudaFree(d_prune_interval));
 }
+
+}  // namespace cuqcqps::rosenbrock
