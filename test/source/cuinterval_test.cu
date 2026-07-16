@@ -591,10 +591,11 @@ TEMPLATE_TEST_CASE("reduce_sum folds mixed-sign dimensions into a single bound",
 
 // ---- host (CpuRounding) path vs device (CudaRounding) path ----
 
-TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernels bit-for-bit",
-                   "[cuinterval][host]",
-                   float,
-                   double)
+TEMPLATE_TEST_CASE(
+    "CpuRounding host path matches the CudaRounding device kernels bit-for-bit",
+    "[cuinterval][host]",
+    float,
+    double)
 {
   using T = TestType;
   auto const B = [](long double lo, long double hi) -> Bounds<T>
@@ -608,7 +609,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   SECTION("add_bounds")
   {
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_add_bounds<T><<<1, 1>>>(pos, straddling, out); });
+        [&](Bounds<T>* out)
+        { k_add_bounds<T><<<1, 1>>>(pos, straddling, out); });
     auto const host = add_bounds<T, CpuRounding>(pos, straddling);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
@@ -626,7 +628,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   SECTION("mul_bounds")
   {
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_mul_bounds<T><<<1, 1>>>(straddling, neg, out); });
+        [&](Bounds<T>* out)
+        { k_mul_bounds<T><<<1, 1>>>(straddling, neg, out); });
     auto const host = mul_bounds<T, CpuRounding>(straddling, neg);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
@@ -644,7 +647,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   SECTION("scal_add_bound")
   {
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_scal_add_bound<T><<<1, 1>>>(pos, scalar, out); });
+        [&](Bounds<T>* out)
+        { k_scal_add_bound<T><<<1, 1>>>(pos, scalar, out); });
     auto const host = scal_add_bound<T, CpuRounding>(pos, scalar);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
@@ -653,7 +657,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   SECTION("scal_sub_bound (bounds - scalar)")
   {
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_scal_sub_bound_bs<T><<<1, 1>>>(pos, scalar, out); });
+        [&](Bounds<T>* out)
+        { k_scal_sub_bound_bs<T><<<1, 1>>>(pos, scalar, out); });
     auto const host = scal_sub_bound<T, CpuRounding>(pos, scalar);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
@@ -662,7 +667,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   SECTION("scal_sub_bound (scalar - bounds)")
   {
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_scal_sub_bound_sb<T><<<1, 1>>>(scalar, pos, out); });
+        [&](Bounds<T>* out)
+        { k_scal_sub_bound_sb<T><<<1, 1>>>(scalar, pos, out); });
     auto const host = scal_sub_bound<T, CpuRounding>(scalar, pos);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
@@ -672,7 +678,8 @@ TEMPLATE_TEST_CASE("CpuRounding host path matches the CudaRounding device kernel
   {
     T const neg_scalar = static_cast<T>(-2.0L);
     auto const device = run_kernel<Bounds<T>>(
-        [&](Bounds<T>* out) { k_scal_mul_bound<T><<<1, 1>>>(straddling, neg_scalar, out); });
+        [&](Bounds<T>* out)
+        { k_scal_mul_bound<T><<<1, 1>>>(straddling, neg_scalar, out); });
     auto const host = scal_mul_bound<T, CpuRounding>(straddling, neg_scalar);
     CHECK(host.lower == device.lower);
     CHECK(host.upper == device.upper);
