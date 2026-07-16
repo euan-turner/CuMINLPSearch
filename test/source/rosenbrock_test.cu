@@ -25,9 +25,10 @@ constexpr T rosenbrock_tolerance()
 
 // Independent CPU implementation of interval_rosenbrock_kernel (rosenbrock.cuh),
 // using CpuRounding instead of the kernel's CudaRounding.
-template<typename T, std::size_t DIMS>
-Bounds<T> interval_rosenbrock_cpu(Interval<T, DIMS> iv)
+template<typename T>
+Bounds<T> interval_rosenbrock_cpu(const Interval<T>& iv)
 {
+  std::size_t const DIMS = iv.bounds.size();
   Bounds<T> res(0);
   for (std::size_t i = 0; i < DIMS - 1; ++i) {
     Bounds<T> xi = iv.bounds[i];
@@ -57,19 +58,20 @@ TEMPLATE_TEST_CASE(
   std::mt19937 rng(12345);
   std::uniform_real_distribution<T> dist(static_cast<T>(-30), static_cast<T>(30));
 
-  std::vector<Point<T, DIMS>> points(N);
+  std::vector<Point<T>> points(N);
   for (auto& p : points) {
+    p.elems.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       p.elems[d] = dist(rng);
     }
   }
 
-  auto const gpu_res = launch_rosenbrock<T, DIMS>(points.data(), N);
+  auto const gpu_res = launch_rosenbrock<T>(points);
   REQUIRE(gpu_res.size() == N);
 
   auto const tol = rosenbrock_tolerance<T>();
   for (std::size_t i = 0; i < N; ++i) {
-    T const expected = rosenbrock<T, DIMS>(points[i]);
+    T const expected = rosenbrock<T>(points[i]);
     CAPTURE(i);
     REQUIRE(gpu_res[i] == Catch::Approx(expected).epsilon(tol));
   }
@@ -89,8 +91,9 @@ TEMPLATE_TEST_CASE(
   std::mt19937 rng(54321);
   std::uniform_real_distribution<T> dist(static_cast<T>(-30), static_cast<T>(30));
 
-  std::vector<Interval<T, DIMS>> intervals(N);
+  std::vector<Interval<T>> intervals(N);
   for (auto& iv : intervals) {
+    iv.bounds.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
@@ -98,13 +101,13 @@ TEMPLATE_TEST_CASE(
     }
   }
 
-  auto const gpu_res = launch_interval_rosenbrock<T, DIMS>(intervals.data(), N);
+  auto const gpu_res = launch_interval_rosenbrock<T>(intervals);
   REQUIRE(gpu_res.size() == N);
 
   SECTION("matches the CPU rounding oracle bit-for-bit")
   {
     for (std::size_t i = 0; i < N; ++i) {
-      auto const cpu_res = interval_rosenbrock_cpu<T, DIMS>(intervals[i]);
+      auto const cpu_res = interval_rosenbrock_cpu<T>(intervals[i]);
       CAPTURE(i);
       CHECK(gpu_res[i].lower == cpu_res.lower);
       CHECK(gpu_res[i].upper == cpu_res.upper);
@@ -117,13 +120,14 @@ TEMPLATE_TEST_CASE(
     constexpr int SAMPLES_PER_INTERVAL = 20;
     for (std::size_t i = 0; i < N; ++i) {
       for (int s = 0; s < SAMPLES_PER_INTERVAL; ++s) {
-        Point<T, DIMS> p;
+        Point<T> p;
+        p.elems.resize(DIMS);
         for (std::size_t d = 0; d < DIMS; ++d) {
           Bounds<T> const& b = intervals[i].bounds[d];
           T const t = unit(rng);
           p.elems[d] = b.lower + t * (b.upper - b.lower);
         }
-        T const value = rosenbrock<T, DIMS>(p);
+        T const value = rosenbrock<T>(p);
         CAPTURE(i, s);
         CHECK(value >= gpu_res[i].lower);
         CHECK(value <= gpu_res[i].upper);

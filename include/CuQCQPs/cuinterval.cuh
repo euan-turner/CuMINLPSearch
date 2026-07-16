@@ -159,45 +159,41 @@ __host__ __device__ inline Bounds<T> scal_mul_bound(Bounds<T> a, T x)
   }
 }
 
-// elementwise square of each dimension bound for the interval
-template<typename T, std::size_t N, typename Rounding = CudaRounding>
-__host__ __device__ inline Interval<T, N> sqr(Interval<T, N> a)
+// elementwise square of each dimension bound
+template<typename T, typename Rounding = CudaRounding>
+__host__ __device__ inline void sqr(const Bounds<T> *a, Bounds<T> *out, std::size_t n)
 {
-  Interval<T, N> b;
-  for (std::size_t i = 0; i < N; ++i) {
-    b.bounds[i] = sqr_bound<T, Rounding>(a.bounds[i]);
+  for (std::size_t i = 0; i < n; ++i) {
+    out[i] = sqr_bound<T, Rounding>(a[i]);
   }
-  return b;
 }
 
-// elementwise scale by a parallel real coefficient vector, e.g. diag(Q) or b
+// elementwise scale by a parallel real coefficient array, e.g. diag(Q) or b
 // in x^T Q x + b^T x
-template<typename T, std::size_t N, typename Rounding = CudaRounding>
-__host__ __device__ inline Interval<T, N> scale(Interval<T, N> a, const T (&coeffs)[N])
+template<typename T, typename Rounding = CudaRounding>
+__host__ __device__ inline void scale(const Bounds<T> *a, const T *coeffs, Bounds<T> *out, std::size_t n)
 {
-  Interval<T, N> b;
-  for (std::size_t i = 0; i < N; ++i) {
-    b.bounds[i] = scal_mul_bound<T, Rounding>(a.bounds[i], coeffs[i]);
+  for (std::size_t i = 0; i < n; ++i) {
+    out[i] = scal_mul_bound<T, Rounding>(a[i], coeffs[i]);
   }
-  return b;
 }
 
-// horizontal fold of a per-dimension interval vector down to a single bound,
+// horizontal fold of a per-dimension bound array down to a single bound,
 // the step every per-dimension term (diagonal, linear) needs before it can
 // be added into the objective
-template<typename T, std::size_t N, typename Rounding = CudaRounding>
-__host__ __device__ inline Bounds<T> reduce_sum(Interval<T, N> a)
+template<typename T, typename Rounding = CudaRounding>
+__host__ __device__ inline Bounds<T> reduce_sum(const Bounds<T> *a, std::size_t n)
 {
   Bounds<T> res(0);
-  for (std::size_t i = 0; i < N; ++i) {
-    res = add_bounds<T, Rounding>(res, a.bounds[i]);
+  for (std::size_t i = 0; i < n; ++i) {
+    res = add_bounds<T, Rounding>(res, a[i]);
   }
   return res;
 }
 
-// to evaluate x^T Q x + b^T x + c
-// reduce_sum(scale(sqr(x), diag(Q)))
-// reduce_sum(scale(x, b))
+// to evaluate x^T Q x + b^T x + c, with x untouched for reuse across both terms:
+// sqr(x, scratch, n); scale(scratch, diag(Q), scratch, n); reduce_sum(scratch, n)
+// scale(x, b, scratch, n); reduce_sum(scratch, n)
 // loop i j, mul_bounds, scal_mul_bound for non-diagonal Q terms
 
 }  // namespace interval

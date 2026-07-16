@@ -70,8 +70,9 @@ __global__ void k_scal_mul_bound(Bounds<T> a, T x, Bounds<T>* out)
   *out = scal_mul_bound(a, x);
 }
 
-// wraps a raw T[N] so it can be passed through a kernel parameter list and
-// still bind to scale()'s `const T (&coeffs)[N]` parameter
+// wraps a raw T[N] (or Bounds<T>[N]) so it can be passed through a kernel
+// parameter list and still bind to sqr()/scale()/reduce_sum()'s flat
+// Bounds<T>* / T* array parameters
 template<typename T, std::size_t N>
 struct coeffs
 {
@@ -79,23 +80,29 @@ struct coeffs
 };
 
 template<typename T, std::size_t N>
-__global__ void k_sqr_interval(Interval<T, N> a, Interval<T, N>* out)
+struct bounds_array
 {
-  *out = sqr(a);
+  Bounds<T> v[N];
+};
+
+template<typename T, std::size_t N>
+__global__ void k_sqr_interval(bounds_array<T, N> a, bounds_array<T, N>* out)
+{
+  sqr<T>(a.v, out->v, N);
 }
 
 template<typename T, std::size_t N>
-__global__ void k_scale_interval(Interval<T, N> a,
+__global__ void k_scale_interval(bounds_array<T, N> a,
                                  coeffs<T, N> c,
-                                 Interval<T, N>* out)
+                                 bounds_array<T, N>* out)
 {
-  *out = scale(a, c.v);
+  scale<T>(a.v, c.v, out->v, N);
 }
 
 template<typename T, std::size_t N>
-__global__ void k_reduce_sum(Interval<T, N> a, Bounds<T>* out)
+__global__ void k_reduce_sum(bounds_array<T, N> a, Bounds<T>* out)
 {
-  *out = reduce_sum(a);
+  *out = reduce_sum<T>(a.v, N);
 }
 
 // ---- host-side launch + copy-back ----
@@ -509,7 +516,7 @@ TEMPLATE_TEST_CASE("scal_mul_bound branches on the sign of the scalar",
   }
 }
 
-// ---- Interval<T, N> vector-level ops ----
+// ---- flat Bounds<T> array-level ops ----
 
 TEMPLATE_TEST_CASE("sqr applies sqr_bound elementwise across dimensions",
                    "[cuinterval][interval][sqr]",
@@ -519,17 +526,17 @@ TEMPLATE_TEST_CASE("sqr applies sqr_bound elementwise across dimensions",
   using T = TestType;
   constexpr std::size_t n = 3;
 
-  Interval<T, n> a;
-  a.bounds[0] = Bounds<T>(static_cast<T>(2.5L), static_cast<T>(6.25L));  // +
-  a.bounds[1] = Bounds<T>(static_cast<T>(-9.5L), static_cast<T>(-1.25L));  // -
-  a.bounds[2] = Bounds<T>(static_cast<T>(-3.75L), static_cast<T>(4.5L));  // 0
+  bounds_array<T, n> a;
+  a.v[0] = Bounds<T>(static_cast<T>(2.5L), static_cast<T>(6.25L));  // +
+  a.v[1] = Bounds<T>(static_cast<T>(-9.5L), static_cast<T>(-1.25L));  // -
+  a.v[2] = Bounds<T>(static_cast<T>(-3.75L), static_cast<T>(4.5L));  // 0
 
-  auto const r = run_kernel<Interval<T, n>>(
-      [&](Interval<T, n>* out) { k_sqr_interval<T, n><<<1, 1>>>(a, out); });
+  auto const r = run_kernel<bounds_array<T, n>>(
+      [&](bounds_array<T, n>* out) { k_sqr_interval<T, n><<<1, 1>>>(a, out); });
 
-  require_bounds<T>(r.bounds[0], 6.25L, 39.0625L);
-  require_bounds<T>(r.bounds[1], 1.5625L, 90.25L);
-  require_bounds<T>(r.bounds[2], 0.0L, 20.25L);
+  require_bounds<T>(r.v[0], 6.25L, 39.0625L);
+  require_bounds<T>(r.v[1], 1.5625L, 90.25L);
+  require_bounds<T>(r.v[2], 0.0L, 20.25L);
 }
 
 TEMPLATE_TEST_CASE(
@@ -543,21 +550,21 @@ TEMPLATE_TEST_CASE(
   using T = TestType;
   constexpr std::size_t n = 3;
 
-  Interval<T, n> a;
-  a.bounds[0] = Bounds<T>(static_cast<T>(2.5L), static_cast<T>(6.25L));
-  a.bounds[1] = Bounds<T>(static_cast<T>(-9.5L), static_cast<T>(-1.25L));
-  a.bounds[2] = Bounds<T>(static_cast<T>(-3.75L), static_cast<T>(4.5L));
+  bounds_array<T, n> a;
+  a.v[0] = Bounds<T>(static_cast<T>(2.5L), static_cast<T>(6.25L));
+  a.v[1] = Bounds<T>(static_cast<T>(-9.5L), static_cast<T>(-1.25L));
+  a.v[2] = Bounds<T>(static_cast<T>(-3.75L), static_cast<T>(4.5L));
 
   coeffs<T, n> c {
       {static_cast<T>(2.0L), static_cast<T>(-2.0L), static_cast<T>(0.0L)}};
 
-  auto const r = run_kernel<Interval<T, n>>(
-      [&](Interval<T, n>* out)
+  auto const r = run_kernel<bounds_array<T, n>>(
+      [&](bounds_array<T, n>* out)
       { k_scale_interval<T, n><<<1, 1>>>(a, c, out); });
 
-  require_bounds<T>(r.bounds[0], 5.0L, 12.5L);
-  require_bounds<T>(r.bounds[1], 2.5L, 19.0L);
-  require_bounds<T>(r.bounds[2], 0.0L, 0.0L);
+  require_bounds<T>(r.v[0], 5.0L, 12.5L);
+  require_bounds<T>(r.v[1], 2.5L, 19.0L);
+  require_bounds<T>(r.v[2], 0.0L, 0.0L);
 }
 
 TEMPLATE_TEST_CASE("reduce_sum folds mixed-sign dimensions into a single bound",
@@ -571,10 +578,10 @@ TEMPLATE_TEST_CASE("reduce_sum folds mixed-sign dimensions into a single bound",
   // integer bounds keep every partial sum exactly representable, so a
   // single long-double sum of all three dimensions is a valid reference
   // for the sequential add_bounds accumulation reduce_sum performs
-  Interval<T, n> a;
-  a.bounds[0] = Bounds<T>(static_cast<T>(2.0L), static_cast<T>(3.0L));
-  a.bounds[1] = Bounds<T>(static_cast<T>(-5.0L), static_cast<T>(-1.0L));
-  a.bounds[2] = Bounds<T>(static_cast<T>(-4.0L), static_cast<T>(6.0L));
+  bounds_array<T, n> a;
+  a.v[0] = Bounds<T>(static_cast<T>(2.0L), static_cast<T>(3.0L));
+  a.v[1] = Bounds<T>(static_cast<T>(-5.0L), static_cast<T>(-1.0L));
+  a.v[2] = Bounds<T>(static_cast<T>(-4.0L), static_cast<T>(6.0L));
 
   auto const r = run_kernel<Bounds<T>>(
       [&](Bounds<T>* out) { k_reduce_sum<T, n><<<1, 1>>>(a, out); });

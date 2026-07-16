@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 
 namespace interval
 {
 
 // An interval is the explicit form of the bounds on an
-// n-dimensional region. For each dimension, we have an upper
+// n-dimensional region. For each dimension, we have an upperconstant memory
 // and lower bound. Since most interval operations use the lower
 // and upper bound of an interval together, Array of Structs is used.
 
@@ -32,18 +33,24 @@ struct Bounds
   }
 };
 
-template<typename T, std::size_t N>
+/**
+ * @brief Host-side utility for representing an interval.
+ *        Device-side just uses an array
+ * 
+ * @tparam T 
+ */
+template<typename T>
 struct Interval
 {
-  Bounds<T> bounds[N];
+  std::vector<Bounds<T>> bounds;
 
   Interval() = default;
 };
 
-template<typename T, std::size_t N>
+template<typename T>
 struct Point
 {
-  T elems[N];
+  std::vector<T> elems;
 };
 
 }  // namespace interval
