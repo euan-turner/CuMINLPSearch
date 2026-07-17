@@ -15,7 +15,7 @@ include(cmake/variables.cmake)
 
 add_library(
     CuQCQPs_lib
-    source/CuQCQPs.cpp
+    source/CuQCQPs.cu
 )
 add_library(CuQCQPs::lib ALIAS CuQCQPs_lib)
 
@@ -30,6 +30,17 @@ target_compile_features(CuQCQPs_lib PUBLIC cxx_std_20)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(CuQCQPs_lib PROPERTIES CUDA_ARCHITECTURES native)
 endif()
+
+# ---- Declare executable ----
+
+add_executable(CuQCQPs_exe source/main.cpp)
+add_executable(CuQCQPs::exe ALIAS CuQCQPs_exe)
+
+set_target_properties(CuQCQPs_exe PROPERTIES OUTPUT_NAME CuQCQPs)
+
+target_link_libraries(CuQCQPs_exe PRIVATE CuQCQPs::lib)
+
+target_compile_features(CuQCQPs_exe PRIVATE cxx_std_20)
 
 # ---- Developer mode ----
 

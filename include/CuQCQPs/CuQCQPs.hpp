@@ -1,8 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
-
-#include "CuQCQPs/region.hpp"
 
 namespace cuqcqps
 {
@@ -21,16 +20,16 @@ private:
 class driver
 {
 public:
-  driver(uint32_t iter_limit = 1000000);
+  driver(uint32_t iter_limit = 1000000, double tolerance = 1e-9);
 
   auto solve() -> double;
 
 private:
   double GUB_;
   double GLB_;
+  double tolerance_;
   uint32_t iter_limit_;
   uint32_t iter_idx_;
-  uint16_t cycl_idx_;
 };
 
 }  // namespace cuqcqps

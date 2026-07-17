@@ -299,7 +299,10 @@ TEMPLATE_TEST_CASE(
 // other, and exist specifically to catch that class of correlated bug.
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
 std::array<bool, ipow<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
-    const Interval<T>& iv, T gub, std::size_t cycle_start)
+    const Interval<T>& iv,
+    T gub,
+    std::size_t cycle_start,
+    std::array<T, ipow<PartitionNum, CycleSize>()>& lb_out)
 {
   std::size_t const dims = iv.bounds.size();
   std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
@@ -343,6 +346,7 @@ std::array<bool, ipow<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
       res = add_bounds<T, CpuRounding>(res, e);
     }
     result[tid] = (res.lower > gub);
+    lb_out[tid] = res.lower;
   }
   return result;
 }
@@ -377,6 +381,8 @@ TEMPLATE_TEST_CASE(
     }
   }
 
+  auto const tol = rosenbrock_tolerance<T>();
+
   // cycle_start = 0 covers the leading dims; DIMS - CYCLE_SIZE exercises a
   // non-zero offset so the cycleStart window logic in get_bounds is checked
   // at both ends.
@@ -385,16 +391,23 @@ TEMPLATE_TEST_CASE(
       T const gub = gub_dist(rng);
 
       std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> gpu_res {};
+      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> gpu_lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
-          intervals[i], gub, cycle_start, gpu_res);
+          intervals[i], gub, cycle_start, gpu_res, gpu_lb);
 
+      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> cpu_lb {};
       auto const cpu_res = bound_rosenbrock_cpu<T, CYCLE_SIZE, PARTITION_NUM>(
-          intervals[i], gub, cycle_start);
+          intervals[i], gub, cycle_start, cpu_lb);
 
       CAPTURE(i, cycle_start, gub);
       for (std::size_t tid = 0; tid < gpu_res.size(); ++tid) {
         CAPTURE(tid);
         CHECK(gpu_res[tid] == cpu_res[tid]);
+        // Partitioning arithmetic (get_bounds) uses plain FP ops rather than
+        // the directed-rounding Cpu/CudaRounding intrinsics, so GPU/CPU can
+        // differ by FMA contraction; compare with tolerance like the
+        // sample_rosenbrock oracle above, not bit-for-bit.
+        CHECK(gpu_lb[tid] == Catch::Approx(cpu_lb[tid]).epsilon(tol));
       }
     }
   }
@@ -422,17 +435,22 @@ TEMPLATE_TEST_CASE(
   // bound is >= 0; a gub below that prunes every subinterval.
   {
     std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> res {};
+    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
     launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
-        iv, static_cast<T>(-1), 0, res);
+        iv, static_cast<T>(-1), 0, res, lb);
     REQUIRE(std::all_of(res.begin(), res.end(), [](bool p) { return p; }));
+    for (std::size_t tid = 0; tid < res.size(); ++tid) {
+      CHECK(lb[tid] >= static_cast<T>(0));
+    }
   }
 
   // A gub far above anything achievable over [-30, 30]^DIMS keeps every
   // subinterval.
   {
     std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> res {};
+    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
     launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
-        iv, static_cast<T>(1e15), 0, res);
+        iv, static_cast<T>(1e15), 0, res, lb);
     REQUIRE(std::none_of(res.begin(), res.end(), [](bool p) { return p; }));
   }
 }
@@ -481,10 +499,14 @@ TEMPLATE_TEST_CASE(
       T const gub = gub_dist(rng);
 
       std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
+      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
-          intervals[i], gub, cycle_start, pruned);
+          intervals[i], gub, cycle_start, pruned, lb);
 
       for (std::size_t tid = 0; tid < pruned.size(); ++tid) {
+        CAPTURE(i, cycle_start, gub, tid);
+        CHECK(pruned[tid] == (lb[tid] > gub));
+
         // Reconstruct this tid's box directly from the parent interval and
         // the mixed-radix decomposition of tid, without calling get_bounds/
         // CycleContext (device-only, and shared with the kernel) or reusing
@@ -564,18 +586,29 @@ TEMPLATE_TEST_CASE(
   for (std::size_t i = 0; i < N; ++i) {
     std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> prev_pruned {};
     prev_pruned.fill(true);
+    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> first_lb {};
+    bool have_first_lb = false;
     for (T const gub : gubs) {
       std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
+      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
-          intervals[i], gub, 0, pruned);
+          intervals[i], gub, 0, pruned, lb);
 
       for (std::size_t tid = 0; tid < pruned.size(); ++tid) {
         if (pruned[tid]) {
           CAPTURE(i, gub, tid);
           CHECK(prev_pruned[tid]);
         }
+        // The enclosure's lower bound is a fixed property of the box, so it
+        // must not change as gub varies across runs.
+        if (have_first_lb) {
+          CAPTURE(i, gub, tid);
+          CHECK(lb[tid] == first_lb[tid]);
+        }
       }
       prev_pruned = pruned;
+      first_lb = lb;
+      have_first_lb = true;
     }
   }
 }

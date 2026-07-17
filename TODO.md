@@ -13,10 +13,11 @@
 
 ## Optimisation Loop
 
-- [ ] Replace explicitregion with interval
-- [ ] Reduction of GUB from sampled points
-- [ ] Filtering regions from GUB
-- [ ] Iterative region selection
+- [x] Replace explicitregion with interval
+- [x] Reduction of GUB from sampled points
+- [x] Filtering regions from GUB
+- [x] Iterative region selection
+- [ ] Interval hull over all viable intervals at termination
 
 ## Quadratics
 

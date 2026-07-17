@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -349,6 +350,7 @@ template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
 __global__ void bound_rosenbrock_kernel(interval::Bounds<T>* d_interval,
                                         T gub,
                                         bool* d_prune_interval,
+                                        T* d_interval_lb,
                                         std::size_t dims,
                                         std::size_t cycle_start)
 {
@@ -382,6 +384,7 @@ __global__ void bound_rosenbrock_kernel(interval::Bounds<T>* d_interval,
   }
   // is region suboptimal?
   d_prune_interval[tid] = (res.lower > gub);
+  d_interval_lb[tid] = res.lower;
 }
 
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
@@ -389,16 +392,19 @@ void launch_bound_rosenbrock(
     const interval::Interval<T>& interval,
     T gub,
     std::size_t cycle_start,
-    std::array<bool, ipow<PartitionNum, CycleSize>()>& interval_results)
+    std::span<bool, ipow<PartitionNum, CycleSize>()> interval_results,
+    std::span<T, ipow<PartitionNum, CycleSize>()> lb_results)
 {
   interval::Bounds<T>* d_interval;
   bool* d_prune_interval;  // true if region is suboptimal, or infeasible
+  T* d_interval_lb;  // sound lower bound of the enclosure, one per interval
 
   std::size_t dims = interval.bounds.size();
   std::size_t num_threads = ipow<PartitionNum, CycleSize>();
 
   CUDA_CHECK(cudaMalloc(&d_interval, dims * sizeof(interval::Bounds<T>)));
   CUDA_CHECK(cudaMalloc(&d_prune_interval, num_threads * sizeof(bool)));
+  CUDA_CHECK(cudaMalloc(&d_interval_lb, num_threads * sizeof(T)));
 
   CUDA_CHECK(cudaMemcpy(d_interval,
                         interval.bounds.data(),
@@ -408,7 +414,7 @@ void launch_bound_rosenbrock(
   dim3 BLOCK_DIM(512);
   dim3 GRID_DIM(CEIL_DIV(num_threads, 512));
   bound_rosenbrock_kernel<T, CycleSize, PartitionNum><<<GRID_DIM, BLOCK_DIM>>>(
-      d_interval, gub, d_prune_interval, dims, cycle_start);
+      d_interval, gub, d_prune_interval, d_interval_lb, dims, cycle_start);
 
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -418,9 +424,14 @@ void launch_bound_rosenbrock(
                         d_prune_interval,
                         num_threads * sizeof(bool),
                         cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(lb_results.data(),
+                        d_interval_lb,
+                        num_threads * sizeof(T),
+                        cudaMemcpyDeviceToHost));
 
   CUDA_CHECK(cudaFree(d_interval));
   CUDA_CHECK(cudaFree(d_prune_interval));
+  CUDA_CHECK(cudaFree(d_interval_lb));
 }
 
 }  // namespace cuqcqps::rosenbrock
