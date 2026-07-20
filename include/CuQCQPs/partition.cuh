@@ -1,8 +1,8 @@
 #pragma once
 
-#include "interval.hpp"
+#include "search.hpp"
 
-namespace cuqcqps::opt
+namespace cuqcqps::partition
 {
 
 // The bounding kernel receives a single parent interval, which is stored in
@@ -82,4 +82,4 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
   }
 }
 
-}  // namespace cuqcqps::opt
+}  // namespace cuqcqps::partition

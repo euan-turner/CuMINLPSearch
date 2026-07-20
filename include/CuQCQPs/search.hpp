@@ -8,7 +8,7 @@
 
 #include <cuinterval/cuinterval.h>
 
-namespace cuqcqps::interval
+namespace cuqcqps::search
 {
 
 // ```interval``` from ```interval.h``` is used to represent a box in one
@@ -52,7 +52,7 @@ struct CompressedInterval
   // parent in `history` if it has one and narrowing by this interval's own
   // sidx/cycle_start. `out.bounds` must already be sized to the problem's
   // dimensionality. `cycle_size`/`partition_num` mirror the CycleSize and
-  // PartitionNum used to build the opt::CycleContext that produced this
+  // PartitionNum used to build the partition::CycleContext that produced this
   // interval on device.
   void materialise(const IntervalHistory<T>& history,
                    std::vector<cu::interval<T>>& out,
@@ -71,7 +71,7 @@ struct CompressedInterval
     const std::vector<cu::interval<T>>& parent = history.intervals[pidx];
 
     // Decode sidx into a per-dimension partition index within the cycled
-    // block of dimensions, mirroring opt::make_cycle_context.
+    // block of dimensions, mirroring partition::make_cycle_context.
     std::vector<std::size_t> part(cycle_size);
     std::size_t idx = sidx;
     for (std::size_t j = 0; j < cycle_size; ++j) {
@@ -79,7 +79,7 @@ struct CompressedInterval
       idx /= partition_num;
     }
 
-    // Narrow each dimension, mirroring opt::get_bounds.
+    // Narrow each dimension, mirroring partition::get_bounds.
     for (std::size_t dim = 0; dim < out.size(); ++dim) {
       const cu::interval<T>& pb = parent[dim];
       if (dim >= cycle_start && dim < cycle_start + cycle_size) {
@@ -229,4 +229,4 @@ struct IntervalHistory
   }
 };
 
-}  // namespace cuqcqps::interval
+}  // namespace cuqcqps::search

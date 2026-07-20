@@ -13,7 +13,7 @@
 #include <cub/cub.cuh>
 #include <cuda/std/limits>
 
-#include "opt.cuh"
+#include "partition.cuh"
 
 namespace cuqcqps::rosenbrock
 {
@@ -221,8 +221,8 @@ __global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
     return;
   }
 
-  opt::CycleContext<CycleSize> ctx =
-      opt::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
+  partition::CycleContext<CycleSize> ctx =
+      partition::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
 
   T ub =
       ::cuda::std::numeric_limits<T>::max();  // upper bound on the minimum of
@@ -240,8 +240,8 @@ __global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
       cu::interval<T> int_xj;
       cu::interval<T> int_xj1;
 
-      opt::get_bounds(ctx, d_interval, j, int_xj);
-      opt::get_bounds(ctx, d_interval, j + 1, int_xj1);
+      partition::get_bounds(ctx, d_interval, j, int_xj);
+      partition::get_bounds(ctx, d_interval, j + 1, int_xj1);
 
       // point bounds for this sample point
       cu::interval<T> xj(int_xj.lb
@@ -345,8 +345,8 @@ __global__ void bound_rosenbrock_kernel(cu::interval<T>* d_interval,
     return;
   }
 
-  opt::CycleContext<CycleSize> ctx =
-      opt::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
+  partition::CycleContext<CycleSize> ctx =
+      partition::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
 
   // Evaluate rosenbrock kernel over the current interval
   cu::interval<T> res(0);
@@ -355,8 +355,8 @@ __global__ void bound_rosenbrock_kernel(cu::interval<T>* d_interval,
     cu::interval<T> xi;
     cu::interval<T> xi1;
 
-    opt::get_bounds(ctx, d_interval, i, xi);
-    opt::get_bounds(ctx, d_interval, i + 1, xi1);
+    partition::get_bounds(ctx, d_interval, i, xi);
+    partition::get_bounds(ctx, d_interval, i + 1, xi1);
 
     auto a = sqr(xi) - xi1;
     auto b = xi - static_cast<T>(1);

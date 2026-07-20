@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "CuQCQPs/CuQCQPs.hpp"
-#include "CuQCQPs/interval.hpp"
+#include "CuQCQPs/search.hpp"
 #include "CuQCQPs/rosenbrock.cuh"
 
 namespace cuqcqps
@@ -51,9 +51,9 @@ constexpr std::size_t NUM_CHILDREN =
 
 auto driver::solve() -> double
 {
-  using interval::CompressedInterval;
-  using interval::IntervalHistory;
-  using interval::IntervalPQueue;
+  using search::CompressedInterval;
+  using search::IntervalHistory;
+  using search::IntervalPQueue;
 
   // Initialise the pending list on CPU with a single (whole-domain) interval
   IntervalPQueue<double> pending(1000);

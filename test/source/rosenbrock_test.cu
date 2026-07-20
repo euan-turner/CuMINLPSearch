@@ -9,7 +9,7 @@
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "CuQCQPs/interval.hpp"
+#include "CuQCQPs/search.hpp"
 #include "CuQCQPs/rosenbrock.cuh"
 #include "cpu_rounding.hpp"
 
@@ -202,7 +202,7 @@ TEMPLATE_TEST_CASE(
 
 // Independent CPU implementation of sample_rosenbrock_kernel (rosenbrock.cuh),
 // mirroring its tid -> CycleContext -> sample-point partitioning verbatim
-// (see make_cycle_context/get_bounds in opt.cuh) with the CpuRounding-backed
+// (see make_cycle_context/get_bounds in partition.cuh) with the CpuRounding-backed
 // composed ops above instead of the kernel's cu::interval device operators.
 // The partitioning scheme itself is fixed; only the
 // CycleSize/PartitionNum/SamplePoints template values vary between runs, so
