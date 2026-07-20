@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "CuQCQPs/CuQCQPs.hpp"
-
 #include "CuQCQPs/interval.hpp"
 #include "CuQCQPs/rosenbrock.cuh"
 
@@ -53,7 +52,6 @@ constexpr std::size_t NUM_CHILDREN =
 auto driver::solve() -> double
 {
   using interval::CompressedInterval;
-  using interval::Interval;
   using interval::IntervalHistory;
   using interval::IntervalPQueue;
 
@@ -61,8 +59,10 @@ auto driver::solve() -> double
   IntervalPQueue<double> pending(1000);
   IntervalHistory<double> history;
 
-  // Index 0 is reserved for the original index, special-cased by CompressedInterval::materialise
-  history.enqueue(Interval<double> {});
+  // Index 0 is reserved for the original index, special-cased by
+  // CompressedInterval::materialise
+  std::vector<cu::interval<double>> origin {};
+  history.enqueue(origin);
 
   pending.enqueue(CompressedInterval<double> {
       .sidx = 0,
@@ -84,9 +84,10 @@ auto driver::solve() -> double
   // draining it or by the lazy-pruning break below
   bool converged = false;
 
-  // convergence condition is tightness of region, iteration limit, or completion
+  // convergence condition is tightness of region, iteration limit, or
+  // completion
   while (iter_idx_ < iter_limit_ && !pending.empty()
-        && GUB_ - GLB_ > tolerance_)
+         && GUB_ - GLB_ > tolerance_)
   {
     ++iter_idx_;
 
@@ -106,15 +107,15 @@ auto driver::solve() -> double
     // tightest lower bound over everything still outstanding.
     GLB_ = cur.lb;
 
-    Interval<double> box;
-    box.bounds.resize(DIMS);
+    std::vector<cu::interval<double>> box;
+    box.resize(DIMS);
     if (cur.pidx == 0) {
       // Root: materialise()'s generic "no parent" fallback is an unbounded
       // box, but this problem's actual domain is [-30, 30]^DIMS (Rosenbrock's
       // constraint). TODO: drop this once the driver accepts a real problem
       // definition instead of hardcoding Rosenbrock.
-      for (auto& b : box.bounds) {
-        b = interval::Bounds<double>(-30.0, 30.0);
+      for (auto& b : box) {
+        b = cu::interval<double>(-30.0, 30.0);
       }
     } else {
       cur.materialise(history, box, CYCLE_SIZE, PARTITION_NUM);
@@ -125,16 +126,14 @@ auto driver::solve() -> double
     std::size_t const box_idx = history.enqueue(box);
 
     // Cycle to the next block of dimensions to partition.
-    std::size_t const child_cycle_start =
-        (cur.cycle_start + CYCLE_SIZE) % DIMS;
+    std::size_t const child_cycle_start = (cur.cycle_start + CYCLE_SIZE) % DIMS;
 
     // update GUB from sampled points in the current region
-    double const lub =
-        rosenbrock::launch_sample_rosenbrock<double,
-                                             CYCLE_SIZE,
-                                             PARTITION_NUM,
-                                             SAMPLE_POINTS>(box,
-                                                            child_cycle_start);
+    double const lub = rosenbrock::launch_sample_rosenbrock<double,
+                                                            CYCLE_SIZE,
+                                                            PARTITION_NUM,
+                                                            SAMPLE_POINTS>(
+        box, child_cycle_start);
     GUB_ = std::min(GUB_, lub);
 
     // interval analysis over subregions
@@ -155,7 +154,6 @@ auto driver::solve() -> double
     }
 
     std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_ << '\n';
-
   }
 
   if (converged || pending.empty()) {
@@ -171,7 +169,8 @@ auto driver::solve() -> double
   // that could still contain the global optimum.
   std::size_t const viable = pending.count_viable(GUB_);
 
-  std::cout << "------------ Finished ------------" << '\n' << GLB_ << " <= min <= " << GUB_ << '\n';
+  std::cout << "------------ Finished ------------" << '\n'
+            << GLB_ << " <= min <= " << GUB_ << '\n';
   std::cout << "Pending size: " << pending.size() << '\n';
   std::cout << "Viable regions: " << viable << '\n';
   // TODO: interval hull of all viable regions

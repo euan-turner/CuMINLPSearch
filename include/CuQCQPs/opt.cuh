@@ -66,19 +66,19 @@ __device__ CycleContext<CycleSize> make_cycle_context(std::size_t tid,
  */
 template<typename T, std::size_t CycleSize>
 __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
-                           const interval::Bounds<T>* interval,
+                           const cu::interval<T>* interval,
                            std::size_t dim,
-                           interval::Bounds<T>& bound)
+                           cu::interval<T>& bound)
 {
   if (dim >= ctx.cycleStart && dim < ctx.cycleStart + ctx.cycleSize) {
     std::size_t i = dim - ctx.cycleStart;
-    T width = (interval[dim].upper - interval[dim].lower) / ctx.partitionNum;
+    T width = (interval[dim].ub - interval[dim].lb) / ctx.partitionNum;
 
-    bound.lower = interval[dim].lower + width * ctx.part[i];
-    bound.upper = interval[dim].lower + width * (ctx.part[i] + 1);
+    bound.lb = interval[dim].lb + width * ctx.part[i];
+    bound.ub = interval[dim].lb + width * (ctx.part[i] + 1);
   } else {
-    bound.lower = interval[dim].lower;
-    bound.upper = interval[dim].upper;
+    bound.lb = interval[dim].lb;
+    bound.ub = interval[dim].ub;
   }
 }
 

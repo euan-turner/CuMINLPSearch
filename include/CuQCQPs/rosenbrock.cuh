@@ -8,10 +8,11 @@
 #include <string>
 #include <vector>
 
+#include <cuinterval/cuinterval.h>
+
 #include <cub/cub.cuh>
 #include <cuda/std/limits>
 
-#include "cuinterval.cuh"
 #include "opt.cuh"
 
 namespace cuqcqps::rosenbrock
@@ -66,18 +67,16 @@ __global__ void rosenbrock_kernel(T* ps,
 }
 
 template<typename T>
-std::vector<T> launch_rosenbrock(const std::vector<interval::Point<T>>& points)
+std::vector<T> launch_rosenbrock(const std::vector<std::vector<T>>& points)
 {
   std::size_t N = points.size();
-  std::size_t dims = N > 0 ? points[0].elems.size() : 0;
+  std::size_t dims = N > 0 ? points[0].size() : 0;
 
   // Flatten the per-point vectors into one contiguous host buffer so a
   // single cudaMemcpy can move the whole batch.
   std::vector<T> flat(N * dims);
   for (std::size_t i = 0; i < N; ++i) {
-    std::copy(points[i].elems.begin(),
-              points[i].elems.end(),
-              flat.begin() + i * dims);
+    std::copy(points[i].begin(), points[i].end(), flat.begin() + i * dims);
   }
 
   dim3 BLOCK_DIM(512);
@@ -107,10 +106,10 @@ std::vector<T> launch_rosenbrock(const std::vector<interval::Point<T>>& points)
 }
 
 // Rosenbrock function evaluated across a batch of intervals.
-// is is a flattened, row-major [N x dims] array of Bounds<T>.
+// is is a flattened, row-major [N x dims] array of cu::interval<T>.
 template<typename T>
-__global__ void interval_rosenbrock_kernel(interval::Bounds<T>* is,
-                                           interval::Bounds<T>* out,
+__global__ void interval_rosenbrock_kernel(cu::interval<T>* is,
+                                           cu::interval<T>* out,
                                            std::size_t N,
                                            std::size_t dims)
 {
@@ -119,53 +118,48 @@ __global__ void interval_rosenbrock_kernel(interval::Bounds<T>* is,
     return;
   }
 
-  interval::Bounds<T>* iv = is + tid * dims;
+  cu::interval<T>* iv = is + tid * dims;
 
-  interval::Bounds<T> res(0);
+  cu::interval<T> res(0);
   for (std::size_t i = 0; i < dims - 1; ++i) {
-    interval::Bounds<T> xi = iv[i];
-    interval::Bounds<T> xi1 = iv[i + 1];
+    cu::interval<T> xi = iv[i];
+    cu::interval<T> xi1 = iv[i + 1];
 
-    interval::Bounds<T> a =
-        interval::sub_bounds<T>(interval::sqr_bound<T>(xi), xi1);
-    interval::Bounds<T> b = interval::scal_sub_bound<T>(xi, static_cast<T>(1));
-
-    interval::Bounds<T> c = interval::scal_mul_bound<T>(
-        interval::sqr_bound<T>(a), static_cast<T>(100));
-    interval::Bounds<T> d = interval::sqr_bound<T>(b);
-    interval::Bounds<T> e = interval::add_bounds<T>(c, d);
-    res = interval::add_bounds<T>(res, e);
+    auto a = sqr(xi) - xi1;
+    auto b = xi - static_cast<T>(1);
+    auto c = sqr(a) * static_cast<T>(100);
+    auto d = sqr(b);
+    auto e = c + d;
+    res += e;
   }
   out[tid] = res;
 }
 
 template<typename T>
-std::vector<interval::Bounds<T>> launch_interval_rosenbrock(
-    const std::vector<interval::Interval<T>>& intervals)
+std::vector<cu::interval<T>> launch_interval_rosenbrock(
+    const std::vector<std::vector<cu::interval<T>>>& intervals)
 {
   std::size_t N = intervals.size();
-  std::size_t dims = N > 0 ? intervals[0].bounds.size() : 0;
+  std::size_t dims = N > 0 ? intervals[0].size() : 0;
 
-  std::vector<interval::Bounds<T>> flat(N * dims);
+  std::vector<cu::interval<T>> flat(N * dims);
   for (std::size_t i = 0; i < N; ++i) {
-    std::copy(intervals[i].bounds.begin(),
-              intervals[i].bounds.end(),
-              flat.begin() + i * dims);
+    std::copy(
+        intervals[i].begin(), intervals[i].end(), flat.begin() + i * dims);
   }
 
   dim3 BLOCK_DIM(512);
   dim3 GRID_DIM(CEIL_DIV(N, 512));
 
-  interval::Bounds<T>* d_intervals;
-  interval::Bounds<T>* out;
+  cu::interval<T>* d_intervals;
+  cu::interval<T>* out;
 
-  CUDA_CHECK(
-      cudaMalloc(&d_intervals, flat.size() * sizeof(interval::Bounds<T>)));
-  CUDA_CHECK(cudaMalloc(&out, N * sizeof(interval::Bounds<T>)));
+  CUDA_CHECK(cudaMalloc(&d_intervals, flat.size() * sizeof(cu::interval<T>)));
+  CUDA_CHECK(cudaMalloc(&out, N * sizeof(cu::interval<T>)));
 
   CUDA_CHECK(cudaMemcpy(d_intervals,
                         flat.data(),
-                        flat.size() * sizeof(interval::Bounds<T>),
+                        flat.size() * sizeof(cu::interval<T>),
                         cudaMemcpyHostToDevice));
 
   interval_rosenbrock_kernel<<<GRID_DIM, BLOCK_DIM>>>(
@@ -173,11 +167,9 @@ std::vector<interval::Bounds<T>> launch_interval_rosenbrock(
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  std::vector<interval::Bounds<T>> res(N);
-  CUDA_CHECK(cudaMemcpy(res.data(),
-                        out,
-                        N * sizeof(interval::Bounds<T>),
-                        cudaMemcpyDeviceToHost));
+  std::vector<cu::interval<T>> res(N);
+  CUDA_CHECK(cudaMemcpy(
+      res.data(), out, N * sizeof(cu::interval<T>), cudaMemcpyDeviceToHost));
 
   CUDA_CHECK(cudaFree(d_intervals));
   CUDA_CHECK(cudaFree(out));
@@ -189,13 +181,13 @@ std::vector<interval::Bounds<T>> launch_interval_rosenbrock(
 
 // Rosenbrock function evaluated on a single point (for correctness checks)
 template<typename T>
-T rosenbrock(const interval::Point<T>& p)
+T rosenbrock(const std::vector<T>& p)
 {
-  std::size_t dims = p.elems.size();
+  std::size_t dims = p.size();
   T res = 0;
   for (std::size_t i = 0; i < dims - 1; ++i) {
-    T xi = p.elems[i];
-    T xi1 = p.elems[i + 1];
+    T xi = p[i];
+    T xi1 = p[i + 1];
     T a = xi * xi - xi1;
     T b = xi - 1;
     res += 100 * a * a + b * b;
@@ -219,7 +211,7 @@ template<typename T,
          std::size_t CycleSize,
          std::size_t PartitionNum,
          std::size_t SamplePoints>
-__global__ void sample_rosenbrock_kernel(interval::Bounds<T>* d_interval,
+__global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
                                          T* thread_ubs,
                                          std::size_t dims,
                                          std::size_t cycle_start)
@@ -242,35 +234,29 @@ __global__ void sample_rosenbrock_kernel(interval::Bounds<T>* d_interval,
     // but represented as a degenerate interval [xi, xi]
 
     // Evaluate Rosenbrock on the degenerate interval for xi
-    interval::Bounds<T> res(0);
+    cu::interval<T> res(0);
     for (std::size_t j = 0; j < dims - 1; ++j) {
       // interval bounds on xj and xj1
-      interval::Bounds<T> int_xj;
-      interval::Bounds<T> int_xj1;
+      cu::interval<T> int_xj;
+      cu::interval<T> int_xj1;
 
       opt::get_bounds(ctx, d_interval, j, int_xj);
       opt::get_bounds(ctx, d_interval, j + 1, int_xj1);
 
       // point bounds for this sample point
-      interval::Bounds<T> xj(int_xj.lower
-                             + i * (int_xj.upper - int_xj.lower)
-                                 / (SamplePoints - 1));
-      interval::Bounds<T> xj1(int_xj1.lower
-                              + i * (int_xj1.upper - int_xj1.lower)
-                                  / (SamplePoints - 1));
+      cu::interval<T> xj(int_xj.lb
+                         + i * (int_xj.ub - int_xj.lb) / (SamplePoints - 1));
+      cu::interval<T> xj1(int_xj1.lb
+                          + i * (int_xj1.ub - int_xj1.lb) / (SamplePoints - 1));
 
-      interval::Bounds<T> a =
-          interval::sub_bounds<T>(interval::sqr_bound<T>(xj), xj1);
-      interval::Bounds<T> b =
-          interval::scal_sub_bound<T>(xj, static_cast<T>(1));
-
-      interval::Bounds<T> c = interval::scal_mul_bound<T>(
-          interval::sqr_bound<T>(a), static_cast<T>(100));
-      interval::Bounds<T> d = interval::sqr_bound<T>(b);
-      interval::Bounds<T> e = interval::add_bounds<T>(c, d);
-      res = interval::add_bounds<T>(res, e);
+      auto a = sqr(xj) - xj1;
+      auto b = xj - static_cast<T>(1);
+      auto c = sqr(a) * static_cast<T>(100);
+      auto d = sqr(b);
+      auto e = c + d;
+      res += e;
     }
-    ub = min(ub, res.upper);
+    ub = min(ub, res.ub);
   }
 
   // each thread has an upper bound on the minimum of the Rosenbrock function
@@ -298,23 +284,23 @@ template<typename T,
          std::size_t CycleSize,
          std::size_t PartitionNum,
          std::size_t SamplePoints>
-T launch_sample_rosenbrock(const interval::Interval<T>& interval,
+T launch_sample_rosenbrock(const std::vector<cu::interval<T>>& interval,
                            std::size_t cycle_start)
 {
-  interval::Bounds<T>* d_interval;
+  cu::interval<T>* d_interval;
   T* d_thread_ubs;
   T* d_lub;
 
-  std::size_t dims = interval.bounds.size();
+  std::size_t dims = interval.size();
   std::size_t num_threads = ipow<PartitionNum, CycleSize>();
 
-  CUDA_CHECK(cudaMalloc(&d_interval, dims * sizeof(interval::Bounds<T>)));
+  CUDA_CHECK(cudaMalloc(&d_interval, dims * sizeof(cu::interval<T>)));
   CUDA_CHECK(cudaMalloc(&d_thread_ubs, num_threads * sizeof(T)));
   CUDA_CHECK(cudaMalloc(&d_lub, sizeof(T)));
 
   CUDA_CHECK(cudaMemcpy(d_interval,
-                        interval.bounds.data(),
-                        dims * sizeof(interval::Bounds<T>),
+                        interval.data(),
+                        dims * sizeof(cu::interval<T>),
                         cudaMemcpyHostToDevice));
 
   dim3 BLOCK_DIM(512);
@@ -347,7 +333,7 @@ T launch_sample_rosenbrock(const interval::Interval<T>& interval,
 }
 
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
-__global__ void bound_rosenbrock_kernel(interval::Bounds<T>* d_interval,
+__global__ void bound_rosenbrock_kernel(cu::interval<T>* d_interval,
                                         T gub,
                                         bool* d_prune_interval,
                                         T* d_interval_lb,
@@ -363,52 +349,49 @@ __global__ void bound_rosenbrock_kernel(interval::Bounds<T>* d_interval,
       opt::make_cycle_context<CycleSize, PartitionNum>(tid, cycle_start);
 
   // Evaluate rosenbrock kernel over the current interval
-  interval::Bounds<T> res(0);
+  cu::interval<T> res(0);
   for (std::size_t i = 0; i < dims - 1; ++i) {
     // interval bounds on xi and xi1
-    interval::Bounds<T> xi;
-    interval::Bounds<T> xi1;
+    cu::interval<T> xi;
+    cu::interval<T> xi1;
 
     opt::get_bounds(ctx, d_interval, i, xi);
     opt::get_bounds(ctx, d_interval, i + 1, xi1);
 
-    interval::Bounds<T> a =
-        interval::sub_bounds<T>(interval::sqr_bound<T>(xi), xi1);
-    interval::Bounds<T> b = interval::scal_sub_bound<T>(xi, static_cast<T>(1));
-
-    interval::Bounds<T> c = interval::scal_mul_bound<T>(
-        interval::sqr_bound<T>(a), static_cast<T>(100));
-    interval::Bounds<T> d = interval::sqr_bound<T>(b);
-    interval::Bounds<T> e = interval::add_bounds<T>(c, d);
-    res = interval::add_bounds<T>(res, e);
+    auto a = sqr(xi) - xi1;
+    auto b = xi - static_cast<T>(1);
+    auto c = sqr(a) * static_cast<T>(100);
+    auto d = sqr(b);
+    auto e = c + d;
+    res += e;
   }
   // is region suboptimal?
-  d_prune_interval[tid] = (res.lower > gub);
-  d_interval_lb[tid] = res.lower;
+  d_prune_interval[tid] = (res.lb > gub);
+  d_interval_lb[tid] = res.lb;
 }
 
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
 void launch_bound_rosenbrock(
-    const interval::Interval<T>& interval,
+    const std::vector<cu::interval<T>>& interval,
     T gub,
     std::size_t cycle_start,
     std::span<bool, ipow<PartitionNum, CycleSize>()> interval_results,
     std::span<T, ipow<PartitionNum, CycleSize>()> lb_results)
 {
-  interval::Bounds<T>* d_interval;
+  cu::interval<T>* d_interval;
   bool* d_prune_interval;  // true if region is suboptimal, or infeasible
   T* d_interval_lb;  // sound lower bound of the enclosure, one per interval
 
-  std::size_t dims = interval.bounds.size();
+  std::size_t dims = interval.size();
   std::size_t num_threads = ipow<PartitionNum, CycleSize>();
 
-  CUDA_CHECK(cudaMalloc(&d_interval, dims * sizeof(interval::Bounds<T>)));
+  CUDA_CHECK(cudaMalloc(&d_interval, dims * sizeof(cu::interval<T>)));
   CUDA_CHECK(cudaMalloc(&d_prune_interval, num_threads * sizeof(bool)));
   CUDA_CHECK(cudaMalloc(&d_interval_lb, num_threads * sizeof(T)));
 
   CUDA_CHECK(cudaMemcpy(d_interval,
-                        interval.bounds.data(),
-                        dims * sizeof(interval::Bounds<T>),
+                        interval.data(),
+                        dims * sizeof(cu::interval<T>),
                         cudaMemcpyHostToDevice));
 
   dim3 BLOCK_DIM(512);

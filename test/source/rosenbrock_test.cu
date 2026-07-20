@@ -13,7 +13,6 @@
 #include "CuQCQPs/rosenbrock.cuh"
 #include "cpu_rounding.hpp"
 
-using namespace cuqcqps::interval;
 using namespace cuqcqps::rosenbrock;
 
 // GPU arithmetic can contract multiply-adds differently than the host
@@ -26,26 +25,84 @@ constexpr T rosenbrock_tolerance()
   return std::is_same_v<T, float> ? static_cast<T>(1e-3) : static_cast<T>(1e-9);
 }
 
-// Independent CPU implementation of interval_rosenbrock_kernel
-// (rosenbrock.cuh), using CpuRounding instead of the kernel's CudaRounding.
-template<typename T>
-Bounds<T> interval_rosenbrock_cpu(const Interval<T>& iv)
+// cu::interval<T>'s arithmetic (operator+/-/*, sqr()) is __device__-only, so
+// it can't be called from a host oracle. These reimplement just the composed
+// ops the oracles below need, directly against CpuRounding (see
+// cpu_rounding.hpp) -- the host-side counterpart to what the kernels compute
+// with CudaRounding intrinsics.
+namespace
 {
-  std::size_t const DIMS = iv.bounds.size();
-  Bounds<T> res(0);
+
+template<typename T>
+cu::interval<T> add_bounds(cu::interval<T> a, cu::interval<T> b)
+{
+  return cu::interval<T>(CpuRounding::add_rd(a.lb, b.lb),
+                         CpuRounding::add_ru(a.ub, b.ub));
+}
+
+template<typename T>
+cu::interval<T> sub_bounds(cu::interval<T> a, cu::interval<T> b)
+{
+  return cu::interval<T>(CpuRounding::sub_rd(a.lb, b.ub),
+                         CpuRounding::sub_ru(a.ub, b.lb));
+}
+
+template<typename T>
+cu::interval<T> sqr_bound(cu::interval<T> a)
+{
+  if (a.lb >= 0) {
+    return cu::interval<T>(CpuRounding::mul_rd(a.lb, a.lb),
+                           CpuRounding::mul_ru(a.ub, a.ub));
+  } else if (a.ub <= 0) {
+    return cu::interval<T>(CpuRounding::mul_rd(a.ub, a.ub),
+                           CpuRounding::mul_ru(a.lb, a.lb));
+  } else {
+    return cu::interval<T>(0,
+                           std::max(CpuRounding::mul_ru(a.lb, a.lb),
+                                    CpuRounding::mul_ru(a.ub, a.ub)));
+  }
+}
+
+template<typename T>
+cu::interval<T> scal_sub_bound(cu::interval<T> a, T x)
+{
+  return cu::interval<T>(CpuRounding::sub_rd(a.lb, x),
+                         CpuRounding::sub_ru(a.ub, x));
+}
+
+template<typename T>
+cu::interval<T> scal_mul_bound(cu::interval<T> a, T x)
+{
+  if (x >= 0) {
+    return cu::interval<T>(CpuRounding::mul_rd(a.lb, x),
+                           CpuRounding::mul_ru(a.ub, x));
+  } else {
+    return cu::interval<T>(CpuRounding::mul_rd(a.ub, x),
+                           CpuRounding::mul_ru(a.lb, x));
+  }
+}
+
+}  // namespace
+
+// Independent CPU implementation of interval_rosenbrock_kernel
+// (rosenbrock.cuh), using the CpuRounding-backed composed ops above instead
+// of the kernel's cu::interval device operators.
+template<typename T>
+cu::interval<T> interval_rosenbrock_cpu(const std::vector<cu::interval<T>>& iv)
+{
+  std::size_t const DIMS = iv.size();
+  cu::interval<T> res(0);
   for (std::size_t i = 0; i < DIMS - 1; ++i) {
-    Bounds<T> xi = iv.bounds[i];
-    Bounds<T> xi1 = iv.bounds[i + 1];
+    cu::interval<T> xi = iv[i];
+    cu::interval<T> xi1 = iv[i + 1];
 
-    Bounds<T> a =
-        sub_bounds<T, CpuRounding>(sqr_bound<T, CpuRounding>(xi), xi1);
-    Bounds<T> b = scal_sub_bound<T, CpuRounding>(xi, static_cast<T>(1));
+    cu::interval<T> a = sub_bounds<T>(sqr_bound<T>(xi), xi1);
+    cu::interval<T> b = scal_sub_bound<T>(xi, static_cast<T>(1));
 
-    Bounds<T> c = scal_mul_bound<T, CpuRounding>(sqr_bound<T, CpuRounding>(a),
-                                                 static_cast<T>(100));
-    Bounds<T> d = sqr_bound<T, CpuRounding>(b);
-    Bounds<T> e = add_bounds<T, CpuRounding>(c, d);
-    res = add_bounds<T, CpuRounding>(res, e);
+    cu::interval<T> c = scal_mul_bound<T>(sqr_bound<T>(a), static_cast<T>(100));
+    cu::interval<T> d = sqr_bound<T>(b);
+    cu::interval<T> e = add_bounds<T>(c, d);
+    res = add_bounds<T>(res, e);
   }
   return res;
 }
@@ -64,11 +121,11 @@ TEMPLATE_TEST_CASE(
   std::uniform_real_distribution<T> dist(static_cast<T>(-30),
                                          static_cast<T>(30));
 
-  std::vector<Point<T>> points(N);
+  std::vector<std::vector<T>> points(N);
   for (auto& p : points) {
-    p.elems.resize(DIMS);
+    p.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
-      p.elems[d] = dist(rng);
+      p[d] = dist(rng);
     }
   }
 
@@ -98,13 +155,13 @@ TEMPLATE_TEST_CASE(
   std::uniform_real_distribution<T> dist(static_cast<T>(-30),
                                          static_cast<T>(30));
 
-  std::vector<Interval<T>> intervals(N);
+  std::vector<std::vector<cu::interval<T>>> intervals(N);
   for (auto& iv : intervals) {
-    iv.bounds.resize(DIMS);
+    iv.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
-      iv.bounds[d] = Bounds<T>(std::min(a, b), std::max(a, b));
+      iv[d] = cu::interval<T>(std::min(a, b), std::max(a, b));
     }
   }
 
@@ -116,8 +173,8 @@ TEMPLATE_TEST_CASE(
     for (std::size_t i = 0; i < N; ++i) {
       auto const cpu_res = interval_rosenbrock_cpu<T>(intervals[i]);
       CAPTURE(i);
-      CHECK(gpu_res[i].lower == cpu_res.lower);
-      CHECK(gpu_res[i].upper == cpu_res.upper);
+      CHECK(gpu_res[i].lb == cpu_res.lb);
+      CHECK(gpu_res[i].ub == cpu_res.ub);
     }
   }
 
@@ -128,17 +185,16 @@ TEMPLATE_TEST_CASE(
     constexpr int SAMPLES_PER_INTERVAL = 20;
     for (std::size_t i = 0; i < N; ++i) {
       for (int s = 0; s < SAMPLES_PER_INTERVAL; ++s) {
-        Point<T> p;
-        p.elems.resize(DIMS);
+        std::vector<T> p(DIMS);
         for (std::size_t d = 0; d < DIMS; ++d) {
-          Bounds<T> const& b = intervals[i].bounds[d];
+          cu::interval<T> const& b = intervals[i][d];
           T const t = unit(rng);
-          p.elems[d] = b.lower + t * (b.upper - b.lower);
+          p[d] = b.lb + t * (b.ub - b.lb);
         }
         T const value = rosenbrock<T>(p);
         CAPTURE(i, s);
-        CHECK(value >= gpu_res[i].lower);
-        CHECK(value <= gpu_res[i].upper);
+        CHECK(value >= gpu_res[i].lb);
+        CHECK(value <= gpu_res[i].ub);
       }
     }
   }
@@ -146,17 +202,19 @@ TEMPLATE_TEST_CASE(
 
 // Independent CPU implementation of sample_rosenbrock_kernel (rosenbrock.cuh),
 // mirroring its tid -> CycleContext -> sample-point partitioning verbatim
-// (see make_cycle_context/get_bounds in opt.cuh) with CpuRounding instead of
-// the kernel's CudaRounding. The partitioning scheme itself is fixed; only
-// the CycleSize/PartitionNum/SamplePoints template values vary between runs,
-// so this oracle can be reused as-is.
+// (see make_cycle_context/get_bounds in opt.cuh) with the CpuRounding-backed
+// composed ops above instead of the kernel's cu::interval device operators.
+// The partitioning scheme itself is fixed; only the
+// CycleSize/PartitionNum/SamplePoints template values vary between runs, so
+// this oracle can be reused as-is.
 template<typename T,
          std::size_t CycleSize,
          std::size_t PartitionNum,
          std::size_t SamplePoints>
-T sample_rosenbrock_cpu(const Interval<T>& iv, std::size_t cycle_start)
+T sample_rosenbrock_cpu(const std::vector<cu::interval<T>>& iv,
+                        std::size_t cycle_start)
 {
-  std::size_t const dims = iv.bounds.size();
+  std::size_t const dims = iv.size();
   std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
 
   T lub = std::numeric_limits<T>::max();
@@ -169,45 +227,44 @@ T sample_rosenbrock_cpu(const Interval<T>& iv, std::size_t cycle_start)
       idx /= PartitionNum;
     }
 
-    auto const bounds_for_dim = [&](std::size_t dim) -> Bounds<T>
+    auto const bounds_for_dim = [&](std::size_t dim) -> cu::interval<T>
     {
       if (dim >= cycle_start && dim < cycle_start + CycleSize) {
         std::size_t const i = dim - cycle_start;
-        T const width = (iv.bounds[dim].upper - iv.bounds[dim].lower)
-            / static_cast<T>(PartitionNum);
-        return Bounds<T>(
-            iv.bounds[dim].lower + width * static_cast<T>(part[i]),
-            iv.bounds[dim].lower + width * static_cast<T>(part[i] + 1));
+        T const width =
+            (iv[dim].ub - iv[dim].lb) / static_cast<T>(PartitionNum);
+        return cu::interval<T>(
+            iv[dim].lb + width * static_cast<T>(part[i]),
+            iv[dim].lb + width * static_cast<T>(part[i] + 1));
       }
-      return iv.bounds[dim];
+      return iv[dim];
     };
 
     T ub = std::numeric_limits<T>::max();
     for (std::size_t i = 0; i < SamplePoints; ++i) {
-      Bounds<T> res(0);
+      cu::interval<T> res(0);
       for (std::size_t j = 0; j + 1 < dims; ++j) {
-        Bounds<T> const int_xj = bounds_for_dim(j);
-        Bounds<T> const int_xj1 = bounds_for_dim(j + 1);
+        cu::interval<T> const int_xj = bounds_for_dim(j);
+        cu::interval<T> const int_xj1 = bounds_for_dim(j + 1);
 
-        Bounds<T> const xj(int_xj.lower
-                           + static_cast<T>(i) * (int_xj.upper - int_xj.lower)
-                               / static_cast<T>(SamplePoints - 1));
-        Bounds<T> const xj1(int_xj1.lower
-                            + static_cast<T>(i)
-                                * (int_xj1.upper - int_xj1.lower)
-                                / static_cast<T>(SamplePoints - 1));
+        cu::interval<T> const xj(int_xj.lb
+                                 + static_cast<T>(i) * (int_xj.ub - int_xj.lb)
+                                     / static_cast<T>(SamplePoints - 1));
+        cu::interval<T> const xj1(int_xj1.lb
+                                  + static_cast<T>(i)
+                                      * (int_xj1.ub - int_xj1.lb)
+                                      / static_cast<T>(SamplePoints - 1));
 
-        Bounds<T> a =
-            sub_bounds<T, CpuRounding>(sqr_bound<T, CpuRounding>(xj), xj1);
-        Bounds<T> b = scal_sub_bound<T, CpuRounding>(xj, static_cast<T>(1));
+        cu::interval<T> a = sub_bounds<T>(sqr_bound<T>(xj), xj1);
+        cu::interval<T> b = scal_sub_bound<T>(xj, static_cast<T>(1));
 
-        Bounds<T> c = scal_mul_bound<T, CpuRounding>(
-            sqr_bound<T, CpuRounding>(a), static_cast<T>(100));
-        Bounds<T> d = sqr_bound<T, CpuRounding>(b);
-        Bounds<T> e = add_bounds<T, CpuRounding>(c, d);
-        res = add_bounds<T, CpuRounding>(res, e);
+        cu::interval<T> c =
+            scal_mul_bound<T>(sqr_bound<T>(a), static_cast<T>(100));
+        cu::interval<T> d = sqr_bound<T>(b);
+        cu::interval<T> e = add_bounds<T>(c, d);
+        res = add_bounds<T>(res, e);
       }
-      ub = std::min(ub, res.upper);
+      ub = std::min(ub, res.ub);
     }
     lub = std::min(lub, ub);
   }
@@ -231,13 +288,13 @@ TEMPLATE_TEST_CASE(
   std::uniform_real_distribution<T> dist(static_cast<T>(-30),
                                          static_cast<T>(30));
 
-  std::vector<Interval<T>> intervals(N);
+  std::vector<std::vector<cu::interval<T>>> intervals(N);
   for (auto& iv : intervals) {
-    iv.bounds.resize(DIMS);
+    iv.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
-      iv.bounds[d] = Bounds<T>(std::min(a, b), std::max(a, b));
+      iv[d] = cu::interval<T>(std::min(a, b), std::max(a, b));
     }
   }
 
@@ -275,9 +332,9 @@ TEMPLATE_TEST_CASE(
   // is Rosenbrock's known global minimum (value 0). Every quantity involved
   // (-1, 1, 2, 9, 100) is exactly representable, so this holds bit-for-bit,
   // not just approximately.
-  Interval<T> iv;
-  iv.bounds = {Bounds<T>(static_cast<T>(-1), static_cast<T>(1)),
-               Bounds<T>(static_cast<T>(-1), static_cast<T>(1))};
+  std::vector<cu::interval<T>> iv = {
+      cu::interval<T>(static_cast<T>(-1), static_cast<T>(1)),
+      cu::interval<T>(static_cast<T>(-1), static_cast<T>(1))};
 
   T const lub = launch_sample_rosenbrock<T, 1, 1, 10>(iv, 0);
   REQUIRE(lub == static_cast<T>(0));
@@ -287,8 +344,8 @@ TEMPLATE_TEST_CASE(
 // mirroring its tid -> CycleContext -> subinterval partitioning verbatim (see
 // sample_rosenbrock_cpu above), but evaluating the full interval enclosure
 // per subinterval (like interval_rosenbrock_cpu) instead of sampling points,
-// then comparing the enclosure's lower bound against gub with CpuRounding
-// instead of the kernel's CudaRounding.
+// then comparing the enclosure's lower bound against gub with the
+// CpuRounding-backed composed ops above.
 //
 // NOTE: this mirrors the kernel's partitioning and arithmetic chain rather
 // than deriving the answer a different way, so it cannot catch a bug present
@@ -299,12 +356,12 @@ TEMPLATE_TEST_CASE(
 // other, and exist specifically to catch that class of correlated bug.
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
 std::array<bool, ipow<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
-    const Interval<T>& iv,
+    const std::vector<cu::interval<T>>& iv,
     T gub,
     std::size_t cycle_start,
     std::array<T, ipow<PartitionNum, CycleSize>()>& lb_out)
 {
-  std::size_t const dims = iv.bounds.size();
+  std::size_t const dims = iv.size();
   std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
 
   std::array<bool, ipow<PartitionNum, CycleSize>()> result {};
@@ -317,36 +374,35 @@ std::array<bool, ipow<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
       idx /= PartitionNum;
     }
 
-    auto const bounds_for_dim = [&](std::size_t dim) -> Bounds<T>
+    auto const bounds_for_dim = [&](std::size_t dim) -> cu::interval<T>
     {
       if (dim >= cycle_start && dim < cycle_start + CycleSize) {
         std::size_t const i = dim - cycle_start;
-        T const width = (iv.bounds[dim].upper - iv.bounds[dim].lower)
-            / static_cast<T>(PartitionNum);
-        return Bounds<T>(
-            iv.bounds[dim].lower + width * static_cast<T>(part[i]),
-            iv.bounds[dim].lower + width * static_cast<T>(part[i] + 1));
+        T const width =
+            (iv[dim].ub - iv[dim].lb) / static_cast<T>(PartitionNum);
+        return cu::interval<T>(
+            iv[dim].lb + width * static_cast<T>(part[i]),
+            iv[dim].lb + width * static_cast<T>(part[i] + 1));
       }
-      return iv.bounds[dim];
+      return iv[dim];
     };
 
-    Bounds<T> res(0);
+    cu::interval<T> res(0);
     for (std::size_t i = 0; i + 1 < dims; ++i) {
-      Bounds<T> const xi = bounds_for_dim(i);
-      Bounds<T> const xi1 = bounds_for_dim(i + 1);
+      cu::interval<T> const xi = bounds_for_dim(i);
+      cu::interval<T> const xi1 = bounds_for_dim(i + 1);
 
-      Bounds<T> a =
-          sub_bounds<T, CpuRounding>(sqr_bound<T, CpuRounding>(xi), xi1);
-      Bounds<T> b = scal_sub_bound<T, CpuRounding>(xi, static_cast<T>(1));
+      cu::interval<T> a = sub_bounds<T>(sqr_bound<T>(xi), xi1);
+      cu::interval<T> b = scal_sub_bound<T>(xi, static_cast<T>(1));
 
-      Bounds<T> c = scal_mul_bound<T, CpuRounding>(sqr_bound<T, CpuRounding>(a),
-                                                   static_cast<T>(100));
-      Bounds<T> d = sqr_bound<T, CpuRounding>(b);
-      Bounds<T> e = add_bounds<T, CpuRounding>(c, d);
-      res = add_bounds<T, CpuRounding>(res, e);
+      cu::interval<T> c =
+          scal_mul_bound<T>(sqr_bound<T>(a), static_cast<T>(100));
+      cu::interval<T> d = sqr_bound<T>(b);
+      cu::interval<T> e = add_bounds<T>(c, d);
+      res = add_bounds<T>(res, e);
     }
-    result[tid] = (res.lower > gub);
-    lb_out[tid] = res.lower;
+    result[tid] = (res.lb > gub);
+    lb_out[tid] = res.lb;
   }
   return result;
 }
@@ -371,13 +427,13 @@ TEMPLATE_TEST_CASE(
   std::uniform_real_distribution<T> gub_dist(static_cast<T>(0),
                                              static_cast<T>(5e7));
 
-  std::vector<Interval<T>> intervals(N);
+  std::vector<std::vector<cu::interval<T>>> intervals(N);
   for (auto& iv : intervals) {
-    iv.bounds.resize(DIMS);
+    iv.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
-      iv.bounds[d] = Bounds<T>(std::min(a, b), std::max(a, b));
+      iv[d] = cu::interval<T>(std::min(a, b), std::max(a, b));
     }
   }
 
@@ -425,10 +481,9 @@ TEMPLATE_TEST_CASE(
   constexpr std::size_t CYCLE_SIZE = 2;
   constexpr std::size_t PARTITION_NUM = 3;
 
-  Interval<T> iv;
-  iv.bounds.resize(DIMS);
-  for (auto& b : iv.bounds) {
-    b = Bounds<T>(static_cast<T>(-30), static_cast<T>(30));
+  std::vector<cu::interval<T>> iv(DIMS);
+  for (auto& b : iv) {
+    b = cu::interval<T>(static_cast<T>(-30), static_cast<T>(30));
   }
 
   // Rosenbrock is a sum of squares, so every subinterval's enclosure lower
@@ -476,21 +531,21 @@ TEMPLATE_TEST_CASE(
                                              static_cast<T>(5e7));
   std::uniform_real_distribution<T> unit(static_cast<T>(0), static_cast<T>(1));
 
-  std::vector<Interval<T>> intervals(N);
+  std::vector<std::vector<cu::interval<T>>> intervals(N);
   for (auto& iv : intervals) {
-    iv.bounds.resize(DIMS);
+    iv.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
-      iv.bounds[d] = Bounds<T>(std::min(a, b), std::max(a, b));
+      iv[d] = cu::interval<T>(std::min(a, b), std::max(a, b));
     }
   }
 
-  // Interval soundness guarantees res.lower <= f(x) for every x in the box,
-  // so if the kernel marks a box pruned (res.lower > gub), no point inside
-  // that box can score <= gub. This checks that implication directly with
-  // the plain scalar rosenbrock<T>() (already validated against the CPU
-  // rounding oracle in the rosenbrock_kernel test above), not with interval
+  // Interval soundness guarantees res.lb <= f(x) for every x in the box, so
+  // if the kernel marks a box pruned (res.lb > gub), no point inside that box
+  // can score <= gub. This checks that implication directly with the plain
+  // scalar rosenbrock<T>() (already validated against the CPU rounding
+  // oracle in the rosenbrock_kernel test above), not with interval
   // arithmetic, so it doesn't share code with bound_rosenbrock_kernel or
   // with the mirrored oracle above -- a bug common to both of those would
   // still be caught here via a witness point.
@@ -511,27 +566,23 @@ TEMPLATE_TEST_CASE(
         // the mixed-radix decomposition of tid, without calling get_bounds/
         // CycleContext (device-only, and shared with the kernel) or reusing
         // bound_rosenbrock_cpu's bounds_for_dim lambda above.
-        Interval<T> box;
-        box.bounds = intervals[i].bounds;
+        std::vector<cu::interval<T>> box = intervals[i];
         std::size_t idx = tid;
         for (std::size_t d = cycle_start; d < cycle_start + CYCLE_SIZE; ++d) {
           std::size_t const part = idx % PARTITION_NUM;
           idx /= PARTITION_NUM;
-          T const width =
-              (intervals[i].bounds[d].upper - intervals[i].bounds[d].lower)
+          T const width = (intervals[i][d].ub - intervals[i][d].lb)
               / static_cast<T>(PARTITION_NUM);
-          box.bounds[d] = Bounds<T>(
-              intervals[i].bounds[d].lower + width * static_cast<T>(part),
-              intervals[i].bounds[d].lower + width * static_cast<T>(part + 1));
+          box[d] = cu::interval<T>(
+              intervals[i][d].lb + width * static_cast<T>(part),
+              intervals[i][d].lb + width * static_cast<T>(part + 1));
         }
 
         for (int s = 0; s < SAMPLES_PER_BOX; ++s) {
-          Point<T> p;
-          p.elems.resize(DIMS);
+          std::vector<T> p(DIMS);
           for (std::size_t d = 0; d < DIMS; ++d) {
             T const t = unit(rng);
-            p.elems[d] = box.bounds[d].lower
-                + t * (box.bounds[d].upper - box.bounds[d].lower);
+            p[d] = box[d].lb + t * (box[d].ub - box[d].lb);
           }
           T const value = rosenbrock<T>(p);
           if (value <= gub) {
@@ -561,23 +612,23 @@ TEMPLATE_TEST_CASE(
   std::uniform_real_distribution<T> dist(static_cast<T>(-30),
                                          static_cast<T>(30));
 
-  std::vector<Interval<T>> intervals(N);
+  std::vector<std::vector<cu::interval<T>>> intervals(N);
   for (auto& iv : intervals) {
-    iv.bounds.resize(DIMS);
+    iv.resize(DIMS);
     for (std::size_t d = 0; d < DIMS; ++d) {
       T const a = dist(rng);
       T const b = dist(rng);
-      iv.bounds[d] = Bounds<T>(std::min(a, b), std::max(a, b));
+      iv[d] = cu::interval<T>(std::min(a, b), std::max(a, b));
     }
   }
 
-  // prune is (res.lower > gub) against a fixed per-box res.lower, so raising
-  // gub can only turn prunes off, never on: whatever tid is pruned at some
-  // gub must also be pruned at every smaller gub. This holds no matter what
-  // res.lower actually evaluates to, so unlike every other test in this
-  // file it needs no oracle at all -- just two runs of the launcher itself
-  // -- and catches e.g. a flipped comparison direction that the mirrored
-  // oracle above would reproduce identically and so could never catch.
+  // prune is (res.lb > gub) against a fixed per-box res.lb, so raising gub
+  // can only turn prunes off, never on: whatever tid is pruned at some gub
+  // must also be pruned at every smaller gub. This holds no matter what
+  // res.lb actually evaluates to, so unlike every other test in this file it
+  // needs no oracle at all -- just two runs of the launcher itself -- and
+  // catches e.g. a flipped comparison direction that the mirrored oracle
+  // above would reproduce identically and so could never catch.
   std::array<T, 4> const gubs = {static_cast<T>(0),
                                  static_cast<T>(100),
                                  static_cast<T>(1e5),

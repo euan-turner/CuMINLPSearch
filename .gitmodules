@@ -1,0 +1,3 @@
+[submodule "lib/cuinterval"]
+	path = lib/cuinterval
+	url = git@github.com:neilkichler/cuinterval.git

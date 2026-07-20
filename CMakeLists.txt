@@ -11,6 +11,10 @@ project(
 
 include(cmake/variables.cmake)
 
+# ---- Dependencies ----
+
+add_subdirectory(lib/cuinterval)
+
 # ---- Declare library ----
 
 add_library(
@@ -24,6 +28,8 @@ target_include_directories(
     PUBLIC
     "\$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
+
+target_link_libraries(CuQCQPs_lib PUBLIC cuinterval)
 
 target_compile_features(CuQCQPs_lib PUBLIC cxx_std_20)
 
