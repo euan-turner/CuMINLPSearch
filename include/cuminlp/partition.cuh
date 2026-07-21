@@ -2,7 +2,7 @@
 
 #include "search.hpp"
 
-namespace cuqcqps::partition
+namespace cuminlp::partition
 {
 
 // The bounding kernel receives a single parent interval, which is stored in
@@ -82,4 +82,4 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
   }
 }
 
-}  // namespace cuqcqps::partition
+}  // namespace cuminlp::partition

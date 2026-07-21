@@ -15,7 +15,7 @@
 
 #include "partition.cuh"
 
-namespace cuqcqps::rosenbrock
+namespace cuminlp::rosenbrock
 {
 
 #define CEIL_DIV(x, y) (((x) + (y) - 1) / (y))
@@ -417,4 +417,4 @@ void launch_bound_rosenbrock(
   CUDA_CHECK(cudaFree(d_interval_lb));
 }
 
-}  // namespace cuqcqps::rosenbrock
+}  // namespace cuminlp::rosenbrock

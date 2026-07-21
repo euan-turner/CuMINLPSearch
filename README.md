@@ -1,4 +1,4 @@
-# CuQCQPs
+# cuminlp
 
 CUDA solver for quadratically-constrained quadratic programs. See
 [PLAN.md](PLAN.md) for the design and implementation plan.

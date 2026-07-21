@@ -8,18 +8,32 @@
 
 #include <cuinterval/cuinterval.h>
 
-namespace cuqcqps::search
+namespace cuminlp::search
 {
 
 // ```interval``` from ```interval.h``` is used to represent a box in one
 // dimension whenever a multi-dimensional box is required, store them as a
 // vector.
 
-// Forward declared so CompressedInterval::materialise can take a reference
-// to the history it is looked up in.
 template<typename T>
-struct IntervalHistory;  // will store all previous expanded interval<T>
-                         // instances.
+struct IntervalHistory
+{
+  std::vector<std::vector<cu::interval<T>>> intervals;
+
+  explicit IntervalHistory(std::size_t initial_size = 0)
+      : intervals(initial_size)
+  {
+  }
+
+  // Appends an interval to the history, returning its index so it can be
+  // used as the pidx of CompressedInterval entries derived from it.
+  std::size_t enqueue(std::vector<cu::interval<T>> new_interval)
+  {
+    std::size_t idx = intervals.size();
+    intervals.push_back(std::move(new_interval));
+    return idx;
+  }
+};
 
 /**
  * @brief Compressed format for an interval, used to store all intervals pending
@@ -208,25 +222,4 @@ public:
   std::size_t count_viable(T gub) const { return count_viable_impl(0, gub); }
 };
 
-// History of exploration just represented as a vector
-template<typename T>
-struct IntervalHistory
-{
-  std::vector<std::vector<cu::interval<T>>> intervals;
-
-  explicit IntervalHistory(std::size_t initial_size = 0)
-      : intervals(initial_size)
-  {
-  }
-
-  // Appends an interval to the history, returning its index so it can be
-  // used as the pidx of CompressedInterval entries derived from it.
-  std::size_t enqueue(std::vector<cu::interval<T>> new_interval)
-  {
-    std::size_t idx = intervals.size();
-    intervals.push_back(std::move(new_interval));
-    return idx;
-  }
-};
-
-}  // namespace cuqcqps::search
+}  // namespace cuminlp::search

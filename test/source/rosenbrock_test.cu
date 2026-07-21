@@ -9,11 +9,11 @@
 #include <catch2/catch_template_test_macros.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include "CuQCQPs/search.hpp"
-#include "CuQCQPs/rosenbrock.cuh"
+#include "cuminlp/search.hpp"
+#include "cuminlp/rosenbrock.cuh"
 #include "cpu_rounding.hpp"
 
-using namespace cuqcqps::rosenbrock;
+using namespace cuminlp::rosenbrock;
 
 // GPU arithmetic can contract multiply-adds differently than the host
 // compiler, so results are compared with a relative tolerance rather than

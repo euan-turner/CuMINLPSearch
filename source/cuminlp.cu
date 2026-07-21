@@ -8,22 +8,12 @@
 #include <string>
 #include <vector>
 
-#include "CuQCQPs/CuQCQPs.hpp"
-#include "CuQCQPs/search.hpp"
-#include "CuQCQPs/rosenbrock.cuh"
+#include "cuminlp/cuminlp.hpp"
+#include "cuminlp/search.hpp"
+#include "cuminlp/rosenbrock.cuh"
 
-namespace cuqcqps
+namespace cuminlp
 {
-
-library_stub::library_stub()
-    : m_name {"CuQCQPs"}
-{
-}
-
-auto library_stub::name() const -> char const*
-{
-  return m_name.c_str();
-}
 
 driver::driver(uint32_t iter_limit, double tolerance)
     : GUB_(std::numeric_limits<double>::max())
@@ -39,9 +29,9 @@ namespace
 // Rosenbrock instance and partitioning scheme the driver searches.
 // TODO: accept a general QCQP instance/parameters instead of hardcoding
 // Rosenbrock over [-30, 30]^DIMS with a fixed cycling scheme.
-// TODO: implicit variant: DIMS % CYCLE_SIZE ==
+// TODO: implicit variant: DIMS % CYCLE_SIZE == 0
 
-constexpr std::size_t DIMS = 500;
+constexpr std::size_t DIMS = 100;
 constexpr std::size_t CYCLE_SIZE = 5;
 constexpr std::size_t PARTITION_NUM = 4;
 constexpr std::size_t SAMPLE_POINTS = 10;
@@ -177,4 +167,4 @@ auto driver::solve() -> double
   return GUB_;
 }
 
-}  // namespace cuqcqps
+}  // namespace cuminlp

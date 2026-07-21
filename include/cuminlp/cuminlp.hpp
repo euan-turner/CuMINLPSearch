@@ -3,19 +3,8 @@
 #include <cstdint>
 #include <string>
 
-namespace cuqcqps
+namespace cuminlp
 {
-
-class library_stub
-{
-public:
-  library_stub();
-
-  auto name() const -> char const*;
-
-private:
-  std::string m_name;
-};
 
 class driver
 {
@@ -32,4 +21,4 @@ private:
   uint32_t iter_idx_;
 };
 
-}  // namespace cuqcqps
+}  // namespace cuminlp

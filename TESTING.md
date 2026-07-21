@@ -20,7 +20,7 @@ ctest --preset=dev
 ```
 
 > **Note**
-> `CuQCQPs_cuinterval_test` and `CuQCQPs_rosenbrock_test` launch real CUDA
+> `cuminlp_cuinterval_test` and `cuminlp_rosenbrock_test` launch real CUDA
 > kernels, so they (and configuring at all, since `CMAKE_CUDA_ARCHITECTURES`
 > defaults to `native`) require an actual CUDA-capable GPU. Their host-side
 > rounding oracle (`CpuRounding`) uses `<xmmintrin.h>`, so those two targets

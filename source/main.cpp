@@ -1,8 +1,8 @@
-#include "CuQCQPs/CuQCQPs.hpp"
+#include "cuminlp/cuminlp.hpp"
 
 auto main() -> int
 {
-  cuqcqps::driver drv;
+  cuminlp::driver drv;
   drv.solve();
 
   return 0;
