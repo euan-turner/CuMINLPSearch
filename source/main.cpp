@@ -1,4 +1,5 @@
 #include "cuminlp/cuminlp.hpp"
+#include "cuminlp/dag.hpp"
 
 auto main() -> int
 {
