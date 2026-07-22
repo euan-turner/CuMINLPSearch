@@ -6,7 +6,7 @@
 
 namespace cuminlp::dag {
 
-enum Op { Var, Const, Add, Sub, Mul, Div, Sqr, Neg };
+enum Op { Var, Const, Add, Sub, Mul, Div, Sqr, Neg, Exp, Log, Sqrt, Sin, Cos, Tanh, IPow, Abs, Min, Max };
 enum Cmp { LE, EQ };
 
 /**
@@ -19,7 +19,7 @@ template<typename T>
 union DAGNodePayload {
   T constant;         // payload for Op::Const
   std::size_t var_index; // payload for Op::Var
-  // TODO: add more
+  int int_exp;         // payload for Op::IPow
 };
 
 /**

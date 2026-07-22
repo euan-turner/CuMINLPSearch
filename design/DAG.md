@@ -211,6 +211,20 @@ Because `DAGNode.id` is already topologically ordered (Section 3.1), building th
 - **Terminal per-function nodes** (Section 3.1, each function's stored root id, not `nodes.back()` since the list is now shared) feed the same feasibility and GUB machinery as the main pipeline (Section 10): a two-sided range test for each constraint's LHS, and the objective's endpoints reduced by an in-graph CUB node. Reuse that machinery verbatim; do not build a second copy for the benchmark.
 - **Explicit graph API** (consistent with the Section 9.2 decision), root memset for `feasible[]`, fan-in to the D2H copy. The topology is a straight-line chain per function with fan-out only where a node's output feeds multiple consumers (shared operands in the global `ExprDAG`, Section 3.1 — sharing can now occur across functions too, not just within one).
 
+### 4.3.1 Buffer lifetime and reuse (pending, deferred until it bites)
+
+**Status: not built yet.** The naive version of Section 4.3 allocates one `Interval<T>` buffer of length `n_regions` for every reachable node id and never frees any of them for the duration of the benchmark. That's a real near-term memory problem, not a hypothetical one: at the target scale (`n_regions ~ 10^6`), one buffer is 16 MB (`Interval<double>`), and the Rosenbrock instance already in this repo (`DIMS = 100`, `source/cuminlp.cu`) produces on the order of 1000 DAG nodes, i.e. ~16 GB of buffers for one problem before `feasible[]`, CUB temp storage, or anything else — most of a 4090's 24 GB. This needs addressing before Section 4 can run at its target scale on a non-trivial problem, not just for large future MINLPLib instances.
+
+**Proposed mechanism** (host-side, one-time, at graph-build time — costs nothing per replay and doesn't touch the capture-time restrictions of Section 9.5, since all allocation still happens before capture):
+
+1. For each reachable node, compute its **last consumer**: the max node id among everything that reads it — its downstream ops within a function, or the feasibility/GUB kernel if the node is a function's root. A node with fan-out (shared across constraints, or referenced twice within one expression) stays live until the *last* of its consumers, not the first.
+2. Walk nodes in increasing id order with a free-list of buffer slots: allocate a slot for each node's output (reusing a freed slot if one is available), and return an operand's slot to the free list once its last consumer's graph node has been added. This mirrors the register-liveness idea already specified for codegen (Section 6.2), just applied to buffer slots instead of registers, and it's a one-time host-side bookkeeping pass, not a per-launch cost.
+3. **Correctness requirement, not just an optimization detail**: reusing slot `S` for a new node's output requires an **explicit WAR dependency edge** from the new writer's graph node to every old consumer of `S`, not just the natural producer→consumer edge. The explicit graph API (Section 9.2) does not serialize unconnected nodes — two nodes with no edge between them may run concurrently — so without this edge the new write can race the old reads.
+
+**Why this doesn't compromise Section 4's fidelity**: reuse changes *which physical address* a node writes to, not the number of kernel launches, dependency edges, or bytes moved per DAG edge. The wall-clock/occupancy/memory-traffic numbers Section 4.4 measures should be unaffected; only peak allocated footprint changes. Adding the WAR edges costs a few extra fan-in edges, which Section 9.3 already argues barely affects the measured concurrency at 10^6-region scale.
+
+**Deferred for now**: build the naive one-buffer-per-node version first; add this pass once it actually blocks running the benchmark at target scale on a real problem (see TODO.md).
+
 ### 4.4 What to measure, and what it settles
 
 Run this benchmark on both target GPUs (4090, 5090) over a handful of representative problems (a small one and a large one, in variable and constraint count), and record:

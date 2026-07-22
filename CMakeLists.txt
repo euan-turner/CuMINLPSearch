@@ -48,6 +48,20 @@ target_link_libraries(cuminlp_exe PRIVATE cuminlp::lib)
 
 target_compile_features(cuminlp_exe PRIVATE cxx_std_20)
 
+# ---- Examples ----
+
+add_executable(cuminlp_graph_replay_example source/graph_replay_example.cu)
+
+target_link_libraries(cuminlp_graph_replay_example PRIVATE cuminlp::lib)
+
+target_compile_features(cuminlp_graph_replay_example PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_graph_replay_example PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
 # ---- Developer mode ----
 
 if(NOT cuminlp_DEVELOPER_MODE)
