@@ -1,45 +1,30 @@
 #include <algorithm>
-#include <array>
 #include <cstddef>
 #include <iostream>
-#include <limits>
 #include <memory>
 #include <span>
-#include <string>
 #include <vector>
 
-#include "cuminlp/cuminlp.hpp"
-#include "cuminlp/search.hpp"
+#include "cuminlp/fixed_rosenbrock_driver.hpp"
 #include "cuminlp/rosenbrock.cuh"
+#include "cuminlp/search.hpp"
 
-namespace cuminlp
+namespace cuminlp::rosenbrock
 {
-
-driver::driver(uint32_t iter_limit, double tolerance)
-    : GUB_(std::numeric_limits<double>::max())
-    , GLB_(std::numeric_limits<double>::lowest())
-    , tolerance_(tolerance)
-    , iter_limit_(iter_limit)
-    , iter_idx_(0)
-{
-}
 
 namespace
 {
-// Rosenbrock instance and partitioning scheme the driver searches.
-// TODO: accept a general QCQP instance/parameters instead of hardcoding
-// Rosenbrock over [-30, 30]^DIMS with a fixed cycling scheme.
+// Rosenbrock instance and partitioning scheme this driver searches.
 // TODO: implicit invariant: DIMS % CYCLE_SIZE == 0
 
 constexpr std::size_t DIMS = 100;
 constexpr std::size_t CYCLE_SIZE = 5;
 constexpr std::size_t PARTITION_NUM = 4;
 constexpr std::size_t SAMPLE_POINTS = 10;
-constexpr std::size_t NUM_CHILDREN =
-    rosenbrock::ipow<PARTITION_NUM, CYCLE_SIZE>();
+constexpr std::size_t NUM_CHILDREN = ipow<PARTITION_NUM, CYCLE_SIZE>();
 }  // namespace
 
-auto driver::solve() -> double
+auto FixedRosenbrockDriver::solve() -> double
 {
   using search::CompressedInterval;
   using search::IntervalHistory;
@@ -102,8 +87,7 @@ auto driver::solve() -> double
     if (cur.pidx == 0) {
       // Root: materialise()'s generic "no parent" fallback is an unbounded
       // box, but this problem's actual domain is [-30, 30]^DIMS (Rosenbrock's
-      // constraint). TODO: drop this once the driver accepts a real problem
-      // definition instead of hardcoding Rosenbrock.
+      // constraint).
       for (auto& b : box) {
         b = cu::interval<double>(-30.0, 30.0);
       }
@@ -119,18 +103,18 @@ auto driver::solve() -> double
     std::size_t const child_cycle_start = (cur.cycle_start + CYCLE_SIZE) % DIMS;
 
     // update GUB from sampled points in the current region
-    double const lub = rosenbrock::launch_sample_rosenbrock<double,
-                                                            CYCLE_SIZE,
-                                                            PARTITION_NUM,
-                                                            SAMPLE_POINTS>(
+    double const lub = launch_sample_rosenbrock<double,
+                                                  CYCLE_SIZE,
+                                                  PARTITION_NUM,
+                                                  SAMPLE_POINTS>(
         box, child_cycle_start);
     GUB_ = std::min(GUB_, lub);
 
     // interval analysis over subregions
-    rosenbrock::launch_bound_rosenbrock<double, CYCLE_SIZE, PARTITION_NUM>(
+    launch_bound_rosenbrock<double, CYCLE_SIZE, PARTITION_NUM>(
         box, GUB_, child_cycle_start, pruned, child_lb);
 
-    // CPU updates GUB and prunes newsubregions that are suboptimal
+    // CPU updates GUB and prunes new subregions that are suboptimal
     for (std::size_t tid = 0; tid < NUM_CHILDREN; ++tid) {
       if (pruned[tid]) {
         continue;
@@ -167,4 +151,4 @@ auto driver::solve() -> double
   return GUB_;
 }
 
-}  // namespace cuminlp
+}  // namespace cuminlp::rosenbrock

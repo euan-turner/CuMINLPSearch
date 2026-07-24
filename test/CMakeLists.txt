@@ -13,7 +13,7 @@ include(Catch)
 # ---- Tests ----
 
 add_executable(cuminlp_test source/cuminlp_test.cpp)
-target_link_libraries(cuminlp_test PRIVATE cuminlp::lib)
+target_link_libraries(cuminlp_test PRIVATE cuminlp::fixed_rosenbrock_driver)
 target_compile_features(cuminlp_test PRIVATE cxx_std_20)
 
 add_test(NAME cuminlp_test COMMAND cuminlp_test)

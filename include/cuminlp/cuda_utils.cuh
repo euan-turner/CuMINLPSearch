@@ -12,6 +12,16 @@ namespace cuminlp::detail
 
 constexpr std::size_t ceil_div(std::size_t x, std::size_t y) { return (x + y - 1) / y; }
 
+template<std::size_t Base, std::size_t Exp>
+constexpr std::size_t ipow()
+{
+  if constexpr (Exp == 0) {
+    return 1;
+  } else {
+    return Base * ipow<Base, Exp - 1>();
+  }
+}
+
 inline void check(cudaError_t err, const char* what)
 {
   if (err != cudaSuccess) {

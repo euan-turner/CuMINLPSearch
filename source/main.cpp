@@ -1,9 +1,8 @@
-#include "cuminlp/cuminlp.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/fixed_rosenbrock_driver.hpp"
 
 auto main() -> int
 {
-  cuminlp::driver drv;
+  cuminlp::rosenbrock::FixedRosenbrockDriver drv;
   drv.solve();
 
   return 0;

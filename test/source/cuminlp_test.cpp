@@ -2,7 +2,7 @@
 #include <limits>
 #include <string>
 
-#include "cuminlp/cuminlp.hpp"
+#include "cuminlp/fixed_rosenbrock_driver.hpp"
 
 auto main() -> int
 {
@@ -11,7 +11,7 @@ auto main() -> int
   // (currently hardcoded) Rosenbrock instance and check the search actually
   // improved on the trivial +inf upper bound it started from. Requires an
   // actual CUDA device at test time.
-  cuminlp::driver drv(200);
+  cuminlp::rosenbrock::FixedRosenbrockDriver drv(200);
   double const gub = drv.solve();
   if (!std::isfinite(gub) || gub < 0.0
       || gub >= std::numeric_limits<double>::max())

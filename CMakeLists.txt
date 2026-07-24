@@ -17,38 +17,59 @@ add_subdirectory(lib/cuinterval)
 
 # ---- Declare library ----
 
-add_library(
-    cuminlp_lib
-    source/cuminlp.cu
-)
+# Header-only core (dag, graph_replay, graph_driver, search, ...) plus
+# cuinterval linkage and include dirs, shared by every driver and example
+# below. Holds no compiled sources of its own -- it isn't any one driver's
+# library, so it stays an interface target.
+add_library(cuminlp_lib INTERFACE)
 add_library(cuminlp::lib ALIAS cuminlp_lib)
 
 target_include_directories(
     cuminlp_lib
-    PUBLIC
+    INTERFACE
     "\$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
 
-target_link_libraries(cuminlp_lib PUBLIC cuinterval)
+target_link_libraries(cuminlp_lib INTERFACE cuinterval)
 
-target_compile_features(cuminlp_lib PUBLIC cxx_std_20)
+target_compile_features(cuminlp_lib INTERFACE cxx_std_20)
+
+# FixedRosenbrockDriver::solve() is a plain (non-template) method, so unlike
+# the rest of cuminlp_lib it needs an actual translation unit to compile.
+add_library(fixed_rosenbrock_driver_lib source/fixed_rosenbrock_driver.cu)
+add_library(cuminlp::fixed_rosenbrock_driver ALIAS fixed_rosenbrock_driver_lib)
+
+target_link_libraries(fixed_rosenbrock_driver_lib PUBLIC cuminlp::lib)
+
+target_compile_features(fixed_rosenbrock_driver_lib PUBLIC cxx_std_20)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set_target_properties(cuminlp_lib PROPERTIES CUDA_ARCHITECTURES native)
+  set_target_properties(
+      fixed_rosenbrock_driver_lib PROPERTIES CUDA_ARCHITECTURES native
+  )
 endif()
 
-# ---- Declare executable ----
-
-add_executable(cuminlp_exe source/main.cpp)
-add_executable(cuminlp::exe ALIAS cuminlp_exe)
-
-set_target_properties(cuminlp_exe PROPERTIES OUTPUT_NAME cuminlp)
-
-target_link_libraries(cuminlp_exe PRIVATE cuminlp::lib)
-
-target_compile_features(cuminlp_exe PRIVATE cxx_std_20)
-
 # ---- Examples ----
+
+add_executable(fixed_rosenbrock source/main.cpp)
+
+target_link_libraries(fixed_rosenbrock PRIVATE cuminlp::fixed_rosenbrock_driver)
+
+target_compile_features(fixed_rosenbrock PRIVATE cxx_std_20)
+
+# Same Rosenbrock instance/search as fixed_rosenbrock, but solved via
+# GraphDriver -- the DAG/CUDA-graph-replay evaluator -- instead of the
+# hand-written kernels in FixedRosenbrockDriver. Run alongside
+# fixed_rosenbrock to compare the two.
+add_executable(graph_rosenbrock source/graph_replay_rosenbrock_main.cu)
+
+target_link_libraries(graph_rosenbrock PRIVATE cuminlp::lib)
+
+target_compile_features(graph_rosenbrock PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(graph_rosenbrock PROPERTIES CUDA_ARCHITECTURES native)
+endif()
 
 add_executable(cuminlp_graph_replay_example source/graph_replay_example.cu)
 
@@ -59,23 +80,6 @@ target_compile_features(cuminlp_graph_replay_example PRIVATE cxx_std_20)
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(
       cuminlp_graph_replay_example PROPERTIES CUDA_ARCHITECTURES native
-  )
-endif()
-
-# Same Rosenbrock instance/search as cuminlp_exe, but solved via the
-# DAG/CUDA-graph-replay evaluator instead of the hand-written kernels --
-# run alongside cuminlp_exe to compare the two.
-add_executable(cuminlp_graph_driver_exe source/graph_replay_rosenbrock_main.cu)
-
-set_target_properties(cuminlp_graph_driver_exe PROPERTIES OUTPUT_NAME cuminlp_graph_driver)
-
-target_link_libraries(cuminlp_graph_driver_exe PRIVATE cuminlp::lib)
-
-target_compile_features(cuminlp_graph_driver_exe PRIVATE cxx_std_20)
-
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set_target_properties(
-      cuminlp_graph_driver_exe PROPERTIES CUDA_ARCHITECTURES native
   )
 endif()
 
