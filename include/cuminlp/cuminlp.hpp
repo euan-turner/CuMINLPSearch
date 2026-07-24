@@ -13,7 +13,7 @@ public:
 
   auto solve() -> double;
 
-private:
+protected:
   double GUB_;
   double GLB_;
   double tolerance_;

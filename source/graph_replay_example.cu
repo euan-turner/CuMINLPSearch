@@ -1,9 +1,3 @@
-// Worked example for the Section 4 MAiNGO-reproduction graph replay
-// (design/DAG.md Sections 4, 9): builds a small Problem, wires it into one
-// CUDA graph via GraphReplay::build(), replays it once, and prints the
-// per-region interval bounds so the output can be checked by hand against
-// natural interval extension.
-//
 // Problem: minimise f(x, y) = x^2 + 2y over x in [-1, 1], y in [0, 5],
 // subject to x + y <= 5. CycleSize=2, PartitionNum=4 partitions both
 // variables into 4 slices each, giving 4^2 = 16 regions.
@@ -44,7 +38,7 @@ auto main() -> int
   p.set_objective(objective);
   p.add_constraint(x + y, Cmp::LE, 5.0);
 
-  auto replay = GraphReplay<double, CYCLE_SIZE, PARTITION_NUM>::build(p, NUM_REGIONS);
+  auto replay = IntervalGraphReplay<double, CYCLE_SIZE, PARTITION_NUM>::build(p, NUM_REGIONS);
 
   std::vector<cu::interval<double>> domain = {
       cu::interval<double>(-1.0, 1.0), cu::interval<double>(0.0, 5.0)};

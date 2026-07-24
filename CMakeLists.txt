@@ -62,6 +62,23 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   )
 endif()
 
+# Same Rosenbrock instance/search as cuminlp_exe, but solved via the
+# DAG/CUDA-graph-replay evaluator instead of the hand-written kernels --
+# run alongside cuminlp_exe to compare the two.
+add_executable(cuminlp_graph_driver_exe source/graph_replay_rosenbrock_main.cu)
+
+set_target_properties(cuminlp_graph_driver_exe PROPERTIES OUTPUT_NAME cuminlp_graph_driver)
+
+target_link_libraries(cuminlp_graph_driver_exe PRIVATE cuminlp::lib)
+
+target_compile_features(cuminlp_graph_driver_exe PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_graph_driver_exe PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
 # ---- Developer mode ----
 
 if(NOT cuminlp_DEVELOPER_MODE)

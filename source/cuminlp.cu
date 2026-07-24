@@ -29,7 +29,7 @@ namespace
 // Rosenbrock instance and partitioning scheme the driver searches.
 // TODO: accept a general QCQP instance/parameters instead of hardcoding
 // Rosenbrock over [-30, 30]^DIMS with a fixed cycling scheme.
-// TODO: implicit variant: DIMS % CYCLE_SIZE == 0
+// TODO: implicit invariant: DIMS % CYCLE_SIZE == 0
 
 constexpr std::size_t DIMS = 100;
 constexpr std::size_t CYCLE_SIZE = 5;
