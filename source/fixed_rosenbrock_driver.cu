@@ -55,6 +55,22 @@ auto FixedRosenbrockDriver::solve() -> double
   std::span<double, NUM_CHILDREN> child_lb(child_lb_storage.data(),
                                            NUM_CHILDREN);
 
+  // Pre-allocate every device buffer once, up front, and reuse it across all
+  // iterations below
+  cudaStream_t stream;
+  detail::check(cudaStreamCreate(&stream), "cudaStreamCreate");
+
+  cu::interval<double>* d_interval = detail::alloc_device<cu::interval<double>>(DIMS);
+  double* d_per_sample_ub = detail::alloc_device<double>(NUM_CHILDREN * SAMPLE_POINTS);
+  double* d_thread_ubs = detail::alloc_device<double>(NUM_CHILDREN);
+  double* d_lub = detail::alloc_device<double>(1);
+  bool* d_prune_interval = detail::alloc_device<bool>(NUM_CHILDREN);
+  double* d_interval_lb = detail::alloc_device<double>(NUM_CHILDREN);
+
+  std::size_t const temp_storage_bytes =
+      sample_rosenbrock_temp_storage_bytes<double>(NUM_CHILDREN);
+  unsigned char* d_temp_storage = detail::alloc_device<unsigned char>(temp_storage_bytes);
+
   // set once the pending set is proven fully dominated by GUB_, either by
   // draining it or by the lazy-pruning break below
   bool converged = false;
@@ -107,12 +123,15 @@ auto FixedRosenbrockDriver::solve() -> double
                                                   CYCLE_SIZE,
                                                   PARTITION_NUM,
                                                   SAMPLE_POINTS>(
-        box, child_cycle_start);
+        box, child_cycle_start, d_interval, d_per_sample_ub, d_thread_ubs, NUM_CHILDREN,
+        d_lub, d_temp_storage, temp_storage_bytes, stream);
     GUB_ = std::min(GUB_, lub);
 
-    // interval analysis over subregions
+    // interval analysis over subregions; reuses d_interval as populated by
+    // launch_sample_rosenbrock above, no re-copy of box
     launch_bound_rosenbrock<double, CYCLE_SIZE, PARTITION_NUM>(
-        box, GUB_, child_cycle_start, pruned, child_lb);
+        DIMS, GUB_, child_cycle_start, d_interval, d_prune_interval, d_interval_lb,
+        NUM_CHILDREN, pruned, child_lb, stream);
 
     // CPU updates GUB and prunes new subregions that are suboptimal
     for (std::size_t tid = 0; tid < NUM_CHILDREN; ++tid) {
@@ -147,6 +166,16 @@ auto FixedRosenbrockDriver::solve() -> double
             << GLB_ << " <= min <= " << GUB_ << '\n';
   std::cout << "Pending size: " << pending.size() << '\n';
   std::cout << "Viable regions: " << viable << '\n';
+
+  detail::check(cudaFree(d_interval), "cudaFree");
+  detail::check(cudaFree(d_per_sample_ub), "cudaFree");
+  detail::check(cudaFree(d_thread_ubs), "cudaFree");
+  detail::check(cudaFree(d_lub), "cudaFree");
+  detail::check(cudaFree(d_prune_interval), "cudaFree");
+  detail::check(cudaFree(d_interval_lb), "cudaFree");
+  detail::check(cudaFree(d_temp_storage), "cudaFree");
+  detail::check(cudaStreamDestroy(stream), "cudaStreamDestroy");
+
   // TODO: interval hull of all viable regions
   return GUB_;
 }
