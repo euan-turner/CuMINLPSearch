@@ -258,6 +258,21 @@ __global__ void binary_op_scalar_lhs_kernel(T a,
   }
 }
 
+// Both a and b are Op::Const operands' payloads (e.g. two Problem::fixed()
+// values combined directly, `p.fixed(2.0) + p.fixed(3.0)`); the result is
+// the same broadcast value for every region, but still gets a normal buffer
+// so downstream nodes can consume it uniformly.
+template<typename X, typename T, class BinaryOp>
+__global__ void binary_op_scalar_scalar_kernel(T a, T b, X* __restrict__ out, std::size_t n_regions) {
+  std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t num_threads = gridDim.x * blockDim.x;
+  X result = BinaryOp::apply(X(a), X(b));
+
+  for (std::size_t i = tid; i < n_regions; i += num_threads) {
+    out[i] = result;
+  }
+}
+
 // ipow_value dispatches to interval pown() or the scalar ipow_scalar()
 // depending on which V this graph is templated on.
 template<typename T>
@@ -563,8 +578,13 @@ private:
                                      grid_, block_, lhs_val, buffers_[rhs_id], buffers_[id],
                                      n_elems_);
     }
-    throw std::runtime_error("both operands of a binary op are Op::Const; unreachable via the "
-                             "current Expr API");
+    // Both operands are Op::Const (e.g. two Problem::fixed() values combined
+    // directly): the result doesn't depend on the domain or any other node,
+    // so it's materialised with no dependencies, same as root_node_.
+    T lhs_val = problem_.graph.nodes[lhs_id].payload.constant;
+    T rhs_val = problem_.graph.nodes[rhs_id].payload.constant;
+    return detail::add_kernel_node(graph_, {}, binary_op_scalar_scalar_kernel<V, T, BinaryOp>,
+                                   grid_, block_, lhs_val, rhs_val, buffers_[id], n_elems_);
   }
 
   template<class UnaryOp>

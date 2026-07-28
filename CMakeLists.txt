@@ -71,6 +71,19 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(graph_rosenbrock PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
+# 10-point Morse cluster energy minimisation (MINLPLib ex8_6_2), solved via
+# GraphDriver with translational/rotational symmetry broken by fixing 6 of
+# the 30 coordinates.
+add_executable(graph_morse source/morse_cluster_energy.cu)
+
+target_link_libraries(graph_morse PRIVATE cuminlp::lib)
+
+target_compile_features(graph_morse PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(graph_morse PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 add_executable(cuminlp_graph_replay_example source/graph_replay_example.cu)
 
 target_link_libraries(cuminlp_graph_replay_example PRIVATE cuminlp::lib)

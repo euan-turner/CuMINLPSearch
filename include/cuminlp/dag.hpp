@@ -85,7 +85,10 @@ public:
   friend Expr operator*(Expr a, T b) { return a * a.constant(b); }
   friend Expr operator*(T a, Expr b) { return b.constant(a) * b; }
   friend Expr operator/(Expr a, T b) { return a / a.constant(b); }
-  friend Expr operator/(T a, Expr b) { return a / b.constant(a); }
+  friend Expr operator/(T a, Expr b) { return b.constant(a) / b; }
+
+  friend Expr sqrt(Expr a) { return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})}; }
+  friend Expr exp(Expr a) { return {a.graph, a.graph->emit(Op::Exp, {a.node_id})}; }
 
   std::size_t id() const { return node_id; }
 
@@ -138,6 +141,20 @@ struct Problem {
   }
 
   Expr<T> var() { return var(std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max()); }
+
+  /**
+   * @brief Emits a constant node holding `value`.
+   *
+   * Useful for symmetry-broken decision variables: a variable fixed to a
+   * known value (to rule out equivalent solutions under a problem symmetry)
+   * is represented as a Const node rather than a Var, so it never enters
+   * `box_bounds` and is skipped by anything iterating Op::Var nodes.
+   */
+  Expr<T> fixed(T value) {
+    DAGNodePayload<T> p;
+    p.constant = value;
+    return Expr<T>(&graph, graph.emit(Op::Const, {}, p));
+  }
 
   void set_objective(Expr<T> e) { objective_root = e.id(); }
   void add_constraint(Expr<T> lhs, Cmp cmp, T rhs) { constraints.push_back({lhs.id(), cmp, rhs}); }

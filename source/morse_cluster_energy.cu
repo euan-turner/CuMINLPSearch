@@ -1,0 +1,65 @@
+// https://www.minlplib.org/ex8_6_2.html
+// complex objective, no constraints
+
+#include <string>
+
+#include "cuminlp/dag.hpp"
+#include "cuminlp/graph_driver.cuh"
+
+using cuminlp::dag::Expr;
+using cuminlp::dag::Problem;
+
+namespace
+{
+
+// 30 variables, 6 fixed to break translational/rotational symmetry -> 24 free dims
+constexpr std::size_t POINTS = 10;
+constexpr std::size_t VARS = 3 * POINTS;
+constexpr std::size_t CYCLE_SIZE = 4;
+constexpr std::size_t PARTITION_NUM = 4;
+constexpr std::size_t SAMPLE_POINTS = 10;
+}
+
+auto main(int argc, char* argv[]) -> int
+{
+  Problem<double> problem;
+  std::vector<Expr<double>> x;
+  x.reserve(VARS);
+  // x1, x11, x12, x21, x22, x23 are all fixed to 0 to break translational symmetry
+  for (std::size_t i = 0; i < VARS; ++i) {
+    if (i == 0 || i == 10 || i == 11 || i == 20 || i == 21 || i == 22) {
+      x.push_back(problem.fixed(0));
+    } else {
+      x.push_back(problem.var(-5, 5));
+    }
+  }
+  
+  std::vector<Expr<double>> terms;
+  terms.reserve(POINTS * (POINTS - 1)/2);
+
+  for (std::size_t i = 0; i < POINTS; ++i) {
+    for (std::size_t j = i + 1; j < POINTS; ++j) {
+      auto dx = x[i] - x[j];
+      auto dy = x[i+10]-x[j+10];
+      auto dz = x[i+20]-x[j+20];
+      auto r2 = (dx * dx) + (dy * dy) + (dz * dz);
+      auto r = sqrt(r2);
+      auto t = exp(3 * (1 - r));
+      auto u = 1 - t;
+      auto v = u * u;
+      terms.push_back(v);
+    }
+  }
+
+  Expr<double> obj = terms[0];
+  for (std::size_t i = 1; i < terms.size(); ++i) {
+    obj = obj + terms[i];
+  }
+  problem.set_objective(-45 + obj);
+  
+  int iters = std::stoi(argv[1]);
+  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(iters, 1e-9);
+  drv.solve(problem);
+
+  return 0;
+}

@@ -1,10 +1,4 @@
-// Builds the same N-dimensional Rosenbrock instance as source/main.cpp
-// (cuminlp::rosenbrock::FixedRosenbrockDriver), but as a dag::Problem, and
-// solves it via cuminlp::GraphDriver (include/cuminlp/graph_driver.cuh),
-// which evaluates each region through CUDA-graph replays built from the
-// problem's expression DAG rather than the hand-written per-op kernels in
-// include/cuminlp/rosenbrock.cuh. Intended to be run side-by-side with
-// cuminlp_exe to compare the two evaluators.
+// https://www.minlplib.org/prob09.html, but with more than 2 dimensions
 
 #include <cstddef>
 #include <vector>
