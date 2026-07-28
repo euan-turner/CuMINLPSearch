@@ -25,6 +25,31 @@ ctest --preset=dev
 > defaults to `native`) require an actual CUDA-capable GPU. Their host-side
 > rounding oracle (`CpuRounding`) uses `<xmmintrin.h>`, so those two targets
 > are x86-only.
+>
+> `cuminlp_gams_test` is the exception: the GAMS frontend is pure host C++, so
+> its tests run anywhere, GPU or not.
+
+## GAMS frontend
+
+`cuminlp_gams_test` covers expression parsing, objective-variable elimination,
+and agreement with the hand-built ex4_1_2/ex8_6_2 DAGs. Its fixtures live in
+`test/data/gams/`.
+
+To check coverage over a whole corpus (e.g. an unpacked
+[MINLPLib](https://www.minlplib.org) `.gms` archive) and see what is rejected
+and why:
+
+```sh
+cmake --build build/dev -t gams_report
+./build/dev/gams_report path/to/gms/directory
+```
+
+To solve any parseable instance directly, with no per-instance code:
+
+```sh
+cmake --build build/dev -t gams_solve
+./build/dev/gams_solve test/data/gams/ex8_6_2.gms 300
+```
 
 ## Formatting
 

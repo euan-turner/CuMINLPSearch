@@ -12,6 +12,26 @@ include(Catch)
 
 # ---- Tests ----
 
+# GAMS frontend tests: expression parsing, objective-variable elimination, and
+# agreement with the hand-built ex4_1_2/ex8_6_2 DAGs. No CUDA, no GPU needed.
+add_executable(cuminlp_gams_test source/gams_test.cpp)
+target_link_libraries(
+    cuminlp_gams_test
+    PRIVATE cuminlp::gams
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_gams_test PRIVATE cxx_std_20)
+target_compile_definitions(
+    cuminlp_gams_test
+    PRIVATE "CUMINLP_GAMS_TEST_DATA=\"${CMAKE_CURRENT_SOURCE_DIR}/data/gams\""
+)
+# nvs09_problem.hpp / autocorr_bern20_03_problem.hpp: the hand-built Problem
+# builders shared with source/nvs09.cu and source/autocorr_bern20_03.cu, used
+# here as an independent equivalence oracle for the discrete-driver .gms
+# fixtures.
+target_include_directories(cuminlp_gams_test PRIVATE "${PROJECT_SOURCE_DIR}/source")
+catch_discover_tests(cuminlp_gams_test)
+
 add_executable(cuminlp_test source/cuminlp_test.cpp)
 target_link_libraries(cuminlp_test PRIVATE cuminlp::fixed_rosenbrock_driver)
 target_compile_features(cuminlp_test PRIVATE cxx_std_20)

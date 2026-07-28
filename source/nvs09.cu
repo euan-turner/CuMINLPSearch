@@ -2,47 +2,12 @@
 
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
 #include "cuminlp/graph_driver.cuh"
+#include "nvs09_problem.hpp"
 
-using cuminlp::dag::Expr;
-using cuminlp::dag::Problem;
-
-namespace
-{
-
-constexpr std::size_t NUM_VARS = 10;
-constexpr std::size_t CYCLE_SIZE = 10;
-constexpr std::size_t PARTITION_NUM = 7;  // every integer variable is [3, 9]
-constexpr std::size_t SAMPLE_POINTS = 5;
-
-Problem<double> make_nvs09()
-{
-  Problem<double> problem;
-  std::vector<Expr<double>> i;
-  i.reserve(NUM_VARS);
-  for (std::size_t j = 0; j < NUM_VARS; ++j) {
-    i.push_back(problem.int_var(3.0, 9.0));
-  }
-
-  Expr<double> product = i[0];
-  for (std::size_t j = 1; j < NUM_VARS; ++j) {
-    product = product * i[j];
-  }
-
-  Expr<double> sum_terms = sqr(log(i[0] - 2.0)) + sqr(log(10.0 - i[0]));
-  for (std::size_t j = 1; j < NUM_VARS; ++j) {
-    sum_terms = sum_terms + sqr(log(i[j] - 2.0)) + sqr(log(10.0 - i[j]));
-  }
-
-  problem.set_objective(sum_terms - exp(0.2 * log(product)));
-  return problem;
-}
-
-}  // namespace
+using namespace cuminlp::examples::nvs09;
 
 auto main(int argc, char* argv[]) -> int
 {

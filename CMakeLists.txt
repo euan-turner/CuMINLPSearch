@@ -49,6 +49,35 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   )
 endif()
 
+# GAMS scalar-format frontend: reads a .gms model into a dag::Problem. Pure
+# host C++ with no CUDA and no external dependencies, so it is a CXX target --
+# it compiles fast and its tests run on machines with no GPU.
+add_library(gams_frontend source/gams/frontend.cpp)
+add_library(cuminlp::gams ALIAS gams_frontend)
+
+target_link_libraries(gams_frontend PUBLIC cuminlp::lib)
+
+target_compile_features(gams_frontend PUBLIC cxx_std_20)
+
+# Runs the frontend over a corpus and tallies what parsed and what did not, so
+# that "which operator to add next" is answered by measurement.
+add_executable(gams_report source/gams/report.cpp)
+
+target_link_libraries(gams_report PRIVATE cuminlp::gams)
+
+target_compile_features(gams_report PRIVATE cxx_std_20)
+
+# Solves any parseable .gms through GraphDriver, with no per-instance code.
+add_executable(gams_solve source/gams/solve.cu)
+
+target_link_libraries(gams_solve PRIVATE cuminlp::gams PRIVATE cuminlp::lib)
+
+target_compile_features(gams_solve PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(gams_solve PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 # ---- Examples ----
 
 add_executable(fixed_rosenbrock source/main.cpp)
