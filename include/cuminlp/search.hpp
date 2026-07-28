@@ -46,15 +46,23 @@ struct CompressedInterval
 {
   std::size_t sidx;  // index within parent interval
   std::size_t pidx;  // index of parent interval in history
+  std::size_t depth; // tree depth of interval
   std::size_t cycle_start;  // start of block of dimensions to partition
   T lb;  // sound lower bound over this interval
 
   bool operator<(const CompressedInterval<T>& other) const
   {
+    // Lower is higher priority to explore
+    // 1. by least lower bound
+    // 2. by deepest in the tree
+    // 3. by most recent parent
     if (lb != other.lb) {
       return lb < other.lb;
     }
-    return pidx < other.pidx;
+    if (depth != other.depth) {
+      return depth > other.depth;
+    }
+    return pidx > other.pidx;
   }
 
   bool operator==(const CompressedInterval& other) const

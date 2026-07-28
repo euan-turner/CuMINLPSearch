@@ -52,12 +52,10 @@ public:
     pending.enqueue(CompressedInterval<T> {
         .sidx = 0,
         .pidx = 0,
+        .depth = 0,
         .cycle_start = 0,
         .lb = GLB_,
     });
-
-    std::vector<T> child_lb_storage(num_children);
-    std::span<T> child_lb(child_lb_storage);
 
     bool converged = false;
 
@@ -71,7 +69,7 @@ public:
         converged = true;
         break;
       }
-
+      std::cout << "Least pending lb (selected for sample+partition): " << cur.lb << '\n';
       GLB_ = cur.lb;
 
       std::vector<cu::interval<T>> box;
@@ -88,25 +86,26 @@ public:
       // GUB sampling: candidate is the best sampled, feasible value from this domain
       point_replay.set_domain(box, child_cycle_start);
       point_replay.launch(/*stream=*/0);
-      GUB_ = std::min(GUB_, static_cast<double>(point_replay.candidate()));
+      double cand = static_cast<double>(point_replay.candidate());
+      GUB_ = std::min(GUB_, cand);
 
       // Interval analysis of sub-domains and GUB pruning
       interval_replay.set_domain(box, child_cycle_start);
       interval_replay.launch(/*stream=*/0);
       auto obj_lb = interval_replay.obj_lb();
       for (std::size_t tid = 0; tid < num_children; ++tid) {
-        child_lb[tid] = obj_lb[tid];
         if (obj_lb[tid] > GUB_) continue;
 
         pending.enqueue(CompressedInterval<T> {
             .sidx = tid,
             .pidx = box_idx,
+            .depth = cur.depth + 1,
             .cycle_start = child_cycle_start,
             .lb = obj_lb[tid],
         });
       }
 
-      std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_ << '\n';
+      std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_  << ", Candidate: " << cand << '\n';
     }
 
     if (converged || pending.empty()) {

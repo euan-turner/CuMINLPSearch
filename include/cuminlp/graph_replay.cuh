@@ -54,6 +54,26 @@ __global__ void partition_variables_kernel(
   }
 }
 
+template<typename T>
+__device__ __forceinline__
+T sample_from_interval(T lb, T ub, std::size_t vid, std::size_t i)
+{
+  std::uint64_t x = ((std::uint64_t)vid << 32) | i;
+
+  // SplitMix64
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+
+  T u;
+  if constexpr (std::is_same_v<T, float>)
+        u = (uint32_t)x * (T(1.0) / T(4294967296.0));
+    else
+        u = (x >> 11) * (T(1.0) / T(9007199254740992.0));
+  return fma(u, ub - lb, lb);
+}
+
 /**
  * @brief Samples points uniformly from each subdomain
  * 
@@ -84,7 +104,8 @@ __global__ void sample_points_kernel(
       cu::interval<T> v;
       partition::get_bounds(ctx, parent_domain, vid, v);
       for (std::size_t i = 0; i < SamplePoints; ++i) {
-        T p = v.lb + i * (v.ub - v.lb) / (SamplePoints - 1);
+        // T p = v.lb + i * (v.ub - v.lb) / (SamplePoints - 1);
+        T p = sample_from_interval(v.lb, v.ub, vid, i);
         var_buffers[vid][r * SamplePoints + i] = p;
       }
     }
