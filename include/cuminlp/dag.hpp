@@ -87,6 +87,7 @@ public:
   friend Expr operator/(Expr a, T b) { return a / a.constant(b); }
   friend Expr operator/(T a, Expr b) { return b.constant(a) / b; }
 
+  friend Expr sqr(Expr a) { return a * a; }
   friend Expr sqrt(Expr a) { return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})}; }
   friend Expr exp(Expr a) { return {a.graph, a.graph->emit(Op::Exp, {a.node_id})}; }
 

@@ -80,8 +80,21 @@ target_link_libraries(graph_morse PRIVATE cuminlp::lib)
 
 target_compile_features(graph_morse PRIVATE cxx_std_20)
 
+
+
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(graph_morse PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
+# power series problem (MINLPLib ex4_1_2)
+add_executable(graph_power_series source/power_series.cu)
+
+target_link_libraries(graph_power_series PRIVATE cuminlp::lib)
+
+target_compile_features(graph_power_series PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(graph_power_series PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
 add_executable(cuminlp_graph_replay_example source/graph_replay_example.cu)
