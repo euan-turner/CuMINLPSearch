@@ -1,6 +1,8 @@
 #include <iostream>
+#include <memory>
 #include <string>
 
+#include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/graph_driver.cuh"
 
@@ -25,7 +27,7 @@ Problem<double> problem_212() {
 
   Expr<double> c1 = 6 * x[0] + 3 * x[1] + 3 * x[2] + 2 * x[3] + x[4];
   problem.add_constraint(c1, Cmp::LE, 6.5);
-  Expr<double> c2 = 10 * x[0] + 10 * x[3] + x[5];
+  Expr<double> c2 = 10 * x[0] + 10 * x[2] + x[5];
   problem.add_constraint(c2, Cmp::LE, 20);
   return problem;
 }
@@ -57,13 +59,14 @@ auto main(int argc, char* argv[]) -> int
 {
   int problem = std::stoi(argv[1]);
   int iters = std::stoi(argv[2]);
+  auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double, 2, 20>>();
   if (problem == 212) {
     std::cout << "Ex. 2.1.2" << '\n';
-    cuminlp::GraphDriver<double, 2, 20, 100> drv_212(iters, 1e-9);
+    cuminlp::GraphDriver<double, 2, 20, 100> drv_212(policy, iters, 1e-9);
     drv_212.solve(problem_212());
   } else if (problem == 219) {
     std::cout << "Ex. 2.1.9" << '\n';
-    cuminlp::GraphDriver<double, 2, 20, 100> drv_219(iters, 1e-9);
+    cuminlp::GraphDriver<double, 2, 20, 100> drv_219(policy, iters, 1e-9);
     drv_219.solve(problem_219());
   }
   return 0;

@@ -1,8 +1,10 @@
 // https://www.minlplib.org/ex4_1_2.html
 // lots of powers
 
+#include <memory>
 #include <string>
 
+#include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/graph_driver.cuh"
 
@@ -85,7 +87,9 @@ auto main(int argc, char* argv[]) -> int
   problem.set_objective(obj);
 
   int iters = std::stoi(argv[1]);
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(iters, 1e-9);
+  auto policy =
+      std::make_shared<cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
+  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(policy, iters, 1e-9);
   drv.solve(problem);
 
   return 0;

@@ -1,11 +1,16 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <span>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
+#include "cuminlp/composition_policy.hpp"
 #include "cuminlp/cuda_utils.cuh"
 #include "cuminlp/cuminlp.hpp"
 #include "cuminlp/dag.hpp"
@@ -15,19 +20,33 @@
 namespace cuminlp
 {
 
-// Driver for an arbitrary dag::Problem, evaluated each
-// iteration by two CUDA-graph replays (graph_replay.cuh) built once from the
-// problem's expression DAG: a point-sample graph for GUB candidates and an
-// interval graph for sound lower bounds / pruning. CycleSize dimensions are
-// partitioned into PartitionNum slices per iteration (PartitionNum^CycleSize
-// children), each sampled at SamplePoints points for its GUB candidate.
-// Compare FixedRosenbrockDriver (fixed_rosenbrock_driver.hpp), which hardcodes
-// its problem and evaluates via hand-written kernels instead.
-template<typename T, std::size_t CycleSize, std::size_t PartitionNum, std::size_t SamplePoints>
+// Driver for an arbitrary dag::Problem. Each iteration, the CompositionPolicy
+// picks a SlotAssignment for the current node's box; the corresponding
+// (point, interval) GraphReplay pair -- point for GUB candidates, interval
+// for sound lower bounds / pruning -- is built lazily on first use and
+// cached (find_graphs/find_exact_graphs), since possible_compositions() can
+// be large and most entries may go unused for a given problem/CycleSize.
+//
+// If a node's live dimensions all fit within CycleSize and the chosen
+// Composition is fully enumerable, an ExactGraphReplay evaluates it exactly
+// in one shot and fathoms it directly instead of enqueueing children for
+// interval pruning.
+//
+// CompositionPolicy is a runtime constructor argument (not a template
+// parameter) so it can be chosen via CLI flag without recompiling.
+// EnumerateCap defaults to PartitionNum; override only to decouple the
+// enumerate threshold from the bisection width (must match the policy's own).
+template<typename T, std::size_t CycleSize, std::size_t PartitionNum, std::size_t SamplePoints,
+        std::size_t EnumerateCap = PartitionNum>
 class GraphDriver : public driver
 {
 public:
-  using driver::driver;
+  explicit GraphDriver(std::shared_ptr<const CompositionPolicy<T, CycleSize>> policy,
+                       uint32_t iter_limit = 1000000, double tolerance = 1e-9)
+      : driver(iter_limit, tolerance)
+      , policy_(std::move(policy))
+  {
+  }
 
   // The sampled point that attained GUB_, indexed by variable. Empty until
   // solve() finds a feasible sample.
@@ -35,30 +54,63 @@ public:
 
   auto solve(const dag::Problem<T>& problem) -> double
   {
-    using search::CompressedInterval;
+    using search::CompositionInterval;
     using search::IntervalHistory;
     using search::IntervalPQueue;
 
     std::size_t const dims = problem.box_bounds.size();
-    std::size_t const num_children = detail::ipow<PartitionNum, CycleSize>();
+    std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
 
-    // Built once, replayed every iteration against a new box/cycle_start
-    auto point_replay = dag::PointGraphReplay<T, CycleSize, PartitionNum, SamplePoints>::build(
-        problem, num_children);
-    auto interval_replay =
-        dag::IntervalGraphReplay<T, CycleSize, PartitionNum>::build(problem, num_children);
+    // One (point, interval) replay pair per Composition actually encountered,
+    // built lazily and cached -- eagerly building every possible_compositions()
+    // entry could waste enormous GPU memory on graphs nothing ever launches.
+    struct CompositionGraphs {
+      Composition<CycleSize> composition;
+      dag::PointGraphReplay<T, CycleSize, PartitionNum, SamplePoints, EnumerateCap> point;
+      dag::IntervalGraphReplay<T, CycleSize, PartitionNum, EnumerateCap> interval;
+    };
+    std::vector<CompositionGraphs> graphs;
+    auto find_graphs = [&graphs, &problem](const Composition<CycleSize>& composition) -> CompositionGraphs& {
+      for (auto& g : graphs) {
+        if (g.composition == composition) return g;
+      }
+      graphs.push_back(CompositionGraphs {
+          composition,
+          dag::PointGraphReplay<T, CycleSize, PartitionNum, SamplePoints, EnumerateCap>::build(problem, composition),
+          dag::IntervalGraphReplay<T, CycleSize, PartitionNum, EnumerateCap>::build(problem, composition),
+      });
+      return graphs.back();
+    };
 
-    IntervalPQueue<T> pending(1000);
+    // Same lazy/cached approach, one ExactGraphReplay per fully-enumerable
+    // Composition actually encountered.
+    struct ExactGraphs {
+      Composition<CycleSize> composition;
+      dag::ExactGraphReplay<T, CycleSize, PartitionNum, EnumerateCap> exact;
+    };
+    std::vector<ExactGraphs> exact_graphs;
+    auto find_exact_graphs = [&exact_graphs, &problem](const Composition<CycleSize>& composition) -> ExactGraphs* {
+      if (!is_fully_enumerable(composition)) return nullptr;
+      for (auto& g : exact_graphs) {
+        if (g.composition == composition) return &g;
+      }
+      exact_graphs.push_back(ExactGraphs {
+          composition,
+          dag::ExactGraphReplay<T, CycleSize, PartitionNum, EnumerateCap>::build(problem, composition),
+      });
+      return &exact_graphs.back();
+    };
+
+    IntervalPQueue<T, CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap>> pending(1000);
     IntervalHistory<T> history;
 
     std::vector<cu::interval<T>> origin {};
     history.enqueue(origin);
 
-    pending.enqueue(CompressedInterval<T> {
+    pending.enqueue(CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> {
         .sidx = 0,
         .pidx = 0,
         .depth = 0,
-        .cycle_start = 0,
         .lb = GLB_,
     });
 
@@ -69,7 +121,7 @@ public:
     {
       ++iter_idx_;
 
-      CompressedInterval<T> cur = pending.dequeue();
+      CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> cur = pending.dequeue();
 
       if (cur.lb > GUB_) {
         converged = true;
@@ -83,46 +135,69 @@ public:
       if (cur.pidx == 0) {
         box = problem.box_bounds;
       } else {
-        cur.materialise(history, box, CycleSize, PartitionNum);
+        cur.materialise(history, box, *policy_, var_kinds);
+      }
+
+      auto const assignment = policy_->choose(box, var_kinds);
+
+      std::size_t live_count = 0;
+      for (const auto& b : box) {
+        if (b.ub > b.lb) ++live_count;
+      }
+      ExactGraphs* const eg =
+          (live_count <= CycleSize) ? find_exact_graphs(assignment.composition) : nullptr;
+
+      if (eg != nullptr) {
+        // Every live dimension is enumerated, so this launch's ArgMin is the
+        // true best value over the remaining subtree, not just a bound --
+        // fold into GUB_ and fathom, no children to enqueue.
+        eg->exact.set_domain(box, assignment.var_ids);
+        eg->exact.launch(/*stream=*/0);
+        if (eg->exact.has_candidate()) {
+          double const val = static_cast<double>(eg->exact.candidate());
+          if (val < GUB_) {
+            GUB_ = val;
+            auto witness = eg->exact.candidate_point();
+            best_point_.assign(witness.begin(), witness.end());
+          }
+        }
+        std::cout << "iter " << iter_idx_ << ": fully enumerated and fathomed ("
+                  << eg->exact.n_regions() << " points), GUB = " << GUB_ << '\n';
+        continue;
       }
 
       std::size_t const box_idx = history.enqueue(box);
-      std::size_t const child_cycle_start = (cur.cycle_start + CycleSize) % dims;
+      CompositionGraphs& g = find_graphs(assignment.composition);
 
-      // GUB sampling: candidate is the best sampled, feasible value from this
-      // domain. iter_idx_ is the sampler's salt, so a box that gets re-visited
-      // (or shares its non-cycled dimensions with a sibling) draws fresh points
-      // rather than replaying the same ones.
-      point_replay.set_domain(box, child_cycle_start, iter_idx_);
-      point_replay.launch(/*stream=*/0);
-      double cand = static_cast<double>(point_replay.candidate());
+      // Best sampled feasible value from this domain; iter_idx_ salts the
+      // sampler so revisited/sibling boxes draw fresh points.
+      g.point.set_domain(box, assignment.var_ids, iter_idx_);
+      g.point.launch(/*stream=*/0);
+      double cand = static_cast<double>(g.point.candidate());
       if (cand < GUB_) {
         GUB_ = cand;
-        auto witness = point_replay.candidate_point();
+        auto witness = g.point.candidate_point();
         best_point_.assign(witness.begin(), witness.end());
       }
 
       // Interval analysis of sub-domains, then feasibility and GUB pruning
-      interval_replay.set_domain(box, child_cycle_start);
-      interval_replay.launch(/*stream=*/0);
-      auto obj_lb = interval_replay.obj_lb();
-      auto feasible = interval_replay.feasible();
-      for (std::size_t tid = 0; tid < num_children; ++tid) {
-        // feasible[tid] == 0 means some constraint's interval range provably
-        // excludes its rhs over this whole child, so no point in it can satisfy
-        // the constraint. Sound to discard outright -- unlike the obj_lb test
-        // below, this holds regardless of GUB_.
+      g.interval.set_domain(box, assignment.var_ids);
+      g.interval.launch(/*stream=*/0);
+      auto obj_lb = g.interval.obj_lb();
+      auto feasible = g.interval.feasible();
+      for (std::size_t tid = 0; tid < g.interval.n_regions(); ++tid) {
+        // feasible[tid] == 0: some constraint provably excludes its rhs over
+        // this child. Sound to discard regardless of GUB_.
         if (!feasible[tid]) {
           ++pruned_infeasible;
           continue;
         }
         if (obj_lb[tid] > GUB_) continue;
 
-        pending.enqueue(CompressedInterval<T> {
+        pending.enqueue(CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> {
             .sidx = tid,
             .pidx = box_idx,
             .depth = cur.depth + 1,
-            .cycle_start = child_cycle_start,
             .lb = obj_lb[tid],
         });
       }
@@ -133,24 +208,19 @@ public:
     bool const found_incumbent = GUB_ < std::numeric_limits<double>::max();
 
     if ((converged || pending.empty()) && found_incumbent) {
-      // Fully explored: every remaining possibility has been pruned or
-      // proven dominated, so the best upper bound found is proven optimal.
+      // Fully explored: everything else pruned or dominated, so GUB_ is optimal.
       GLB_ = GUB_;
     } else if (pending.empty()) {
-      // Exhausted the queue without ever sampling a feasible point. Interval
-      // feasibility pruning can empty the frontier on its own, so this is a
-      // reachable outcome and must not be reported as convergence -- collapsing
-      // GLB_ onto an infinite GUB_ here would claim a proven optimum of +inf.
+      // Frontier emptied by feasibility pruning without ever sampling a
+      // feasible point -- not convergence, so don't collapse GLB_ onto GUB_.
       std::cout << "Search space exhausted with no feasible point sampled; either the "
                    "problem is infeasible or point sampling never satisfied the "
                    "constraints (likely for equalities).\n";
     } else {
-      // GLB is smallest lower bound on any pending region, which is the first
       GLB_ = pending.peek().lb;
     }
 
-    // Regions not yet proven suboptimal against the final GUB_, i.e. regions
-    // that could still contain the global optimum.
+    // Regions not yet proven suboptimal against the final GUB_.
     std::size_t const viable = pending.count_viable(GUB_);
 
     std::cout << "------------ Finished ------------" << '\n'
@@ -177,6 +247,7 @@ public:
 
 private:
   std::vector<T> best_point_;
+  std::shared_ptr<const CompositionPolicy<T, CycleSize>> policy_;
 };
 
 }  // namespace cuminlp

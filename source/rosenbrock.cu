@@ -1,8 +1,10 @@
 // https://www.minlplib.org/prob09.html, but with more than 2 dimensions
 
 #include <cstddef>
+#include <memory>
 #include <vector>
 
+#include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/graph_driver.cuh"
 
@@ -46,7 +48,9 @@ auto main() -> int
 {
   Problem<double> problem = make_rosenbrock(DIMS);
 
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv;
+  auto policy =
+      std::make_shared<cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
+  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(policy);
   drv.solve(problem);
 
   return 0;

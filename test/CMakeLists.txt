@@ -18,6 +18,18 @@ target_compile_features(cuminlp_test PRIVATE cxx_std_20)
 
 add_test(NAME cuminlp_test COMMAND cuminlp_test)
 
+# Host-only: GreedyCompositionPolicy is plain templated C++ with no device
+# code, so this doesn't need a CUDA device to run.
+add_executable(cuminlp_composition_policy_test source/composition_policy_test.cpp)
+target_link_libraries(
+    cuminlp_composition_policy_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_composition_policy_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_composition_policy_test)
+
 # Checks rosenbrock_kernel/interval_rosenbrock_kernel against independent CPU
 # reference implementations (see rosenbrock_test.cu). Requires an actual CUDA
 # device. -frounding-math is needed for the CpuRounding oracle helpers (see
@@ -42,3 +54,22 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 catch_discover_tests(cuminlp_rosenbrock_test)
+
+# Launches graph_replay.cuh's sample_points_kernel directly (bypassing
+# GraphBuilder/GraphReplay) to check Integer/Binary variables are always
+# sampled on the integer lattice, even when they aren't the slot being
+# cycled this iteration. Requires an actual CUDA device.
+add_executable(cuminlp_sample_discrete_test source/sample_discrete_test.cu)
+target_link_libraries(
+    cuminlp_sample_discrete_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_sample_discrete_test PRIVATE cxx_std_20)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_sample_discrete_test PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
+catch_discover_tests(cuminlp_sample_discrete_test)

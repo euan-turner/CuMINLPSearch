@@ -1,5 +1,6 @@
 #pragma once
 
+#include "composition_policy.hpp"
 #include "search.hpp"
 
 namespace cuminlp::partition
@@ -80,6 +81,112 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
     bound.lb = interval[dim].lb;
     bound.ub = interval[dim].ub;
   }
+}
+
+/**
+ * @brief Per-thread slot context for a Composition/SlotAssignment (see
+ *        composition_policy.hpp): unlike CycleContext above, slots act on an
+ *        explicit, possibly non-contiguous set of variables, each with its
+ *        own fan-out and operation (bisect vs enumerate), rather than a
+ *        uniform PartitionNum over a contiguous cycle_start block. Used by
+ *        GraphReplay (graph_replay.cuh); CycleContext/get_bounds above remain
+ *        the hand-rolled FixedRosenbrockDriver/rosenbrock.cuh's own, simpler
+ *        model and are untouched by this.
+ *
+ * @tparam CycleSize Number of dimensions being cycled this iteration
+ */
+template<std::size_t CycleSize>
+struct SlotContext
+{
+  int part[CycleSize];             // this thread's index into each slot's fan-out
+  std::size_t var_ids[CycleSize];  // which variable each slot acts on
+  int fan_out[CycleSize];          // radix used to decode `part` for each slot
+  SlotKind kind[CycleSize];        // operation each slot performs
+};
+
+/**
+ * @brief Create the per-thread slot context for a thread
+ *
+ * @tparam CycleSize    Number of dimensions being cycled
+ * @param tid           Global thread index
+ * @param slot_var_ids  Which variable each of the CycleSize slots acts on
+ * @param slot_fan_out  Fan-out (radix) of each slot, from Composition + PartitionNum
+ * @param slot_kind     Operation each slot performs
+ * @return SlotContext
+ */
+template<std::size_t CycleSize>
+__device__ SlotContext<CycleSize> make_slot_context(std::size_t tid,
+                                                    const std::size_t* __restrict__ slot_var_ids,
+                                                    const int* __restrict__ slot_fan_out,
+                                                    const SlotKind* __restrict__ slot_kind)
+{
+  SlotContext<CycleSize> ctx {};
+
+  std::size_t idx = tid;
+  for (std::size_t j = 0; j < CycleSize; ++j) {
+    ctx.var_ids[j] = slot_var_ids[j];
+    ctx.fan_out[j] = slot_fan_out[j];
+    ctx.kind[j] = slot_kind[j];
+    ctx.part[j] = static_cast<int>(idx % static_cast<std::size_t>(ctx.fan_out[j]));
+    idx /= static_cast<std::size_t>(ctx.fan_out[j]);
+  }
+  return ctx;
+}
+
+/**
+ * @brief Calculate the thread's bounds for a specified dimension, dispatching
+ *        per-slot on SlotKind (bisect for Continuous/IntegerBisect, point
+ *        value for IntegerEnumerate/BinaryEnumerate).
+ *
+ * @tparam T Precision used (float/double)
+ * @tparam CycleSize Number of dimensions being cycled
+ * @param ctx SlotContext for the thread
+ * @param interval Parent interval
+ * @param dim Dimension to bound
+ * @param bound Result parameter: bounds for dim
+ */
+template<typename T, std::size_t CycleSize>
+__device__ void get_slot_bounds(const SlotContext<CycleSize>& ctx,
+                                const cu::interval<T>* interval,
+                                std::size_t dim,
+                                cu::interval<T>& bound)
+{
+  for (std::size_t j = 0; j < CycleSize; ++j) {
+    if (ctx.var_ids[j] != dim) continue;
+
+    const cu::interval<T>& parent = interval[dim];
+    switch (ctx.kind[j]) {
+      case SlotKind::IntegerEnumerate:
+      case SlotKind::BinaryEnumerate: {
+        // The region index maps directly to an integer offset from lb. A
+        // Binary's domain is always exactly size 2, matching its fan-out
+        // exactly, but an IntegerEnumerate slot's true remaining domain can
+        // be narrower than PartitionNum -- clamp rather than produce an
+        // out-of-range point. Clamping stays sound (a clamped duplicate is
+        // still a subset of the true domain), it just re-evaluates that
+        // duplicate; marking these regions infeasible outright to skip the
+        // wasted work is a follow-up.
+        T value = parent.lb + static_cast<T>(ctx.part[j]);
+        if (value > parent.ub) value = parent.ub;
+        bound.lb = value;
+        bound.ub = value;
+        break;
+      }
+      case SlotKind::Continuous:
+      case SlotKind::IntegerBisect: {
+        T width = (parent.ub - parent.lb) / static_cast<T>(ctx.fan_out[j]);
+        bound.lb = parent.lb + width * static_cast<T>(ctx.part[j]);
+        bound.ub = parent.lb + width * static_cast<T>(ctx.part[j] + 1);
+        break;
+      }
+    }
+    return;
+  }
+
+  // Not one of this iteration's cycled dimensions -- unchanged from the
+  // parent.
+  bound.lb = interval[dim].lb;
+  bound.ub = interval[dim].ub;
 }
 
 }  // namespace cuminlp::partition

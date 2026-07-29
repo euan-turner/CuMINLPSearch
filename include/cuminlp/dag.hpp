@@ -6,8 +6,9 @@
 
 namespace cuminlp::dag {
 
-enum Op { Var, Const, Add, Sub, Mul, Div, Sqr, Neg, Exp, Log, Sqrt, Sin, Cos, Tanh, IPow, Abs, Min, Max };
-enum Cmp { LE, EQ };
+enum class VarKind { Continuous, Integer, Binary };
+enum class Op { Var, Const, Add, Sub, Mul, Div, Sqr, Neg, Exp, Log, Sqrt, Sin, Cos, Tanh, IPow, Abs, Min, Max };
+enum class Cmp { LE, EQ };
 
 /**
  * @brief Payload for a DAGNode where the operator requires parameters
@@ -90,6 +91,7 @@ public:
   friend Expr sqr(Expr a) { return a * a; }
   friend Expr sqrt(Expr a) { return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})}; }
   friend Expr exp(Expr a) { return {a.graph, a.graph->emit(Op::Exp, {a.node_id})}; }
+  friend Expr log(Expr a) { return {a.graph, a.graph->emit(Op::Log, {a.node_id})}; }
 
   friend Expr pow(Expr a, int n) {
     DAGNodePayload<T> p;
@@ -139,19 +141,22 @@ struct ConstraintRef {
  */
 template<typename T>
 struct Problem {
-  Expr<T> var(T lb, T ub) {
+  Expr<T> var(T lb, T ub, VarKind kind = VarKind::Continuous) {
     std::size_t idx = box_bounds.size();
     box_bounds.push_back(cu::interval<T>{lb, ub});
+    var_kinds.push_back(kind);
     DAGNodePayload<T> p;
     p.var_index = idx;
     return Expr<T>(&graph, graph.emit(Op::Var, {}, p));
   }
 
-  Expr<T> var() { return var(std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max()); }
+  Expr<T> var(VarKind kind = VarKind::Continuous) { return var(std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max(), kind); }
 
-  Expr<T> lb_var(T lb) { return var(lb, std::numeric_limits<T>::max()); }
+  Expr<T> int_var(T lb, T ub) { return var(lb, ub, VarKind::Integer); }
 
-  Expr<T> ub_var(T ub) { return var(std::numeric_limits<T>::lowest(), ub); }
+  Expr<T> bin_var() { return var(T(0), T(1), VarKind::Binary); }
+
+
 
   /**
    * @brief Emits a constant node holding `value`.
@@ -172,6 +177,7 @@ struct Problem {
 
   ExprDAG<T> graph;
   std::vector<cu::interval<T>> box_bounds;
+  std::vector<VarKind> var_kinds;
   std::size_t objective_root = std::numeric_limits<std::size_t>::max();
   std::vector<ConstraintRef<T>> constraints;
 };

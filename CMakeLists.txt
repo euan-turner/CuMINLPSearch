@@ -108,6 +108,28 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(graph_qps PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
+# nvs09 (MINLPLib INLP, all-integer objective, no constraints)
+add_executable(graph_nvs09 source/nvs09.cu)
+
+target_link_libraries(graph_nvs09 PRIVATE cuminlp::lib)
+
+target_compile_features(graph_nvs09 PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(graph_nvs09 PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
+# autocorr_bern20-03 (MINLPLib MBQCP, 20 binary variables, no integers/continuous)
+add_executable(graph_autocorr_bern20_03 source/autocorr_bern20_03.cu)
+
+target_link_libraries(graph_autocorr_bern20_03 PRIVATE cuminlp::lib)
+
+target_compile_features(graph_autocorr_bern20_03 PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(graph_autocorr_bern20_03 PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 
 # ---- Developer mode ----
 
