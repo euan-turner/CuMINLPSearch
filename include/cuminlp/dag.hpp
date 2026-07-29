@@ -1,58 +1,103 @@
 #pragma once
 
 #include <cmath>
-#include <cuinterval/interval.h>
 #include <limits>
 #include <vector>
 
+#include <cuinterval/interval.h>
+
 #include "cuminlp/errors.hpp"
 
-namespace cuminlp::dag {
+namespace cuminlp::dag
+{
 
-enum class VarKind { Continuous, Integer, Binary };
-enum class Op { Var, Const, Add, Sub, Mul, Div, Sqr, Neg, Exp, Log, Sqrt, Sin, Cos, Tanh, IPow, Abs, Min, Max };
-enum class Cmp { LE, EQ };
+enum class VarKind
+{
+  Continuous,
+  Integer,
+  Binary
+};
+enum class Op
+{
+  Var,
+  Const,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Sqr,
+  Neg,
+  Exp,
+  Log,
+  Sqrt,
+  Sin,
+  Cos,
+  Tanh,
+  IPow,
+  Abs,
+  Min,
+  Max
+};
+enum class Cmp
+{
+  LE,
+  EQ
+};
 
 /**
  * @brief Payload for a DAGNode where the operator requires parameters
  * that are not themselves DAGNodes
- * 
+ *
  * @tparam T numerical precision
  */
 template<typename T>
-union DAGNodePayload {
-  T constant;         // payload for Op::Const
-  std::size_t var_index; // payload for Op::Var
-  int int_exp;         // payload for Op::IPow
+union DAGNodePayload
+{
+  T constant;  // payload for Op::Const
+  std::size_t var_index;  // payload for Op::Var
+  int int_exp;  // payload for Op::IPow
 };
 
 /**
- * @brief A DAGNode represents a single operation (correspondingly, a variable or intermediate value)
- * in the expression of an objective or constraint.
+ * @brief A DAGNode represents a single operation (correspondingly, a variable
+ * or intermediate value) in the expression of an objective or constraint.
  * TODO: hash-consing of sub-expressions to collapse
- * 
+ *
  * @invariant DAGNode ids are topologically ordered: ∀i∈in:i<id.
- * 
- * @tparam T numerical precision 
+ *
+ * @tparam T numerical precision
  */
 template<typename T>
-struct DAGNode {
-  std::size_t id; // position in expression list, doubles as SSA name
-  Op op;       // operator to apply
-  std::vector<std::size_t> in; // operator ids (INV: every id in `in` is < id)
-  DAGNodePayload<T> payload; // INV: matches Op
-  std::size_t op_count; // subtree size of this node + ancestors
-  std::size_t live_set_estimate; // peak simultaneously-live interval slots, for later
+struct DAGNode
+{
+  std::size_t id;  // position in expression list, doubles as SSA name
+  Op op;  // operator to apply
+  std::vector<std::size_t> in;  // operator ids (INV: every id in `in` is < id)
+  DAGNodePayload<T> payload;  // INV: matches Op
+  std::size_t op_count;  // subtree size of this node + ancestors
+  std::size_t
+      live_set_estimate;  // peak simultaneously-live interval slots, for later
 };
 
 template<typename T>
-class ExprDAG {
+class ExprDAG
+{
 public:
-  std::size_t emit(Op op, std::initializer_list<std::size_t> inputs, DAGNodePayload<T> payload = {}) {
+  std::size_t emit(Op op,
+                   std::initializer_list<std::size_t> inputs,
+                   DAGNodePayload<T> payload = {})
+  {
     std::size_t id = nodes.size();
     std::size_t op_count = 1;
-    for (auto in_id : inputs) op_count += nodes[in_id].op_count;
-    nodes.push_back(DAGNode<T>{id, op, std::vector<std::size_t>(inputs), payload, op_count, 0}); // TODO: liveness checks
+    for (auto in_id : inputs) {
+      op_count += nodes[in_id].op_count;
+    }
+    nodes.push_back(DAGNode<T> {id,
+                                op,
+                                std::vector<std::size_t>(inputs),
+                                payload,
+                                op_count,
+                                0});  // TODO: liveness checks
     return id;
   }
 
@@ -60,39 +105,70 @@ public:
 };
 
 /**
- * @brief Expression in the expression DAG, corresponding to variable, constant or operation.
- * 
- * @tparam T 
+ * @brief Expression in the expression DAG, corresponding to variable, constant
+ * or operation.
+ *
+ * @tparam T
  */
 template<typename T>
-class Expr {
+class Expr
+{
 public:
-  Expr(ExprDAG<T>* g, std::size_t id) : graph(g), node_id(id) {}
+  Expr(ExprDAG<T>* g, std::size_t id)
+      : graph(g)
+      , node_id(id)
+  {
+  }
 
-  friend Expr operator+(Expr a, Expr b) { return {a.graph, a.graph->emit(Op::Add, {a.node_id, b.node_id})}; }
-  friend Expr operator-(Expr a, Expr b) { return {a.graph, a.graph->emit(Op::Sub, {a.node_id, b.node_id})}; }
-  friend Expr operator-(Expr a) {
-    if (a.is_const()) return a.constant(-a.const_value());
+  friend Expr operator+(Expr a, Expr b)
+  {
+    return {a.graph, a.graph->emit(Op::Add, {a.node_id, b.node_id})};
+  }
+
+  friend Expr operator-(Expr a, Expr b)
+  {
+    return {a.graph, a.graph->emit(Op::Sub, {a.node_id, b.node_id})};
+  }
+
+  friend Expr operator-(Expr a)
+  {
+    if (a.is_const()) {
+      return a.constant(-a.const_value());
+    }
     return {a.graph, a.graph->emit(Op::Neg, {a.node_id})};
   }
-  friend Expr operator*(Expr a, Expr b) {
+
+  friend Expr operator*(Expr a, Expr b)
+  {
     if (a.node_id == b.node_id) {
-      if (a.is_const()) return a.constant(a.const_value() * a.const_value());
+      if (a.is_const()) {
+        return a.constant(a.const_value() * a.const_value());
+      }
       return {a.graph, a.graph->emit(Op::Sqr, {a.node_id})};
-    }
-    else {
+    } else {
       return {a.graph, a.graph->emit(Op::Mul, {a.node_id, b.node_id})};
     }
   }
-  friend Expr operator/(Expr a, Expr b) { return {a.graph, a.graph->emit(Op::Div, {a.node_id, b.node_id})}; }
+
+  friend Expr operator/(Expr a, Expr b)
+  {
+    return {a.graph, a.graph->emit(Op::Div, {a.node_id, b.node_id})};
+  }
 
   friend Expr operator+(Expr a, T b) { return a + a.constant(b); }
+
   friend Expr operator+(T a, Expr b) { return b.constant(a) + b; }
+
   friend Expr operator-(Expr a, T b) { return a - a.constant(b); }
+
   friend Expr operator-(T a, Expr b) { return b.constant(a) - b; }
+
   friend Expr operator*(Expr a, T b) { return a * a.constant(b); }
+
   friend Expr operator*(T a, Expr b) { return b.constant(a) * b; }
+
   friend Expr operator/(Expr a, T b) { return a / a.constant(b); }
+
   friend Expr operator/(T a, Expr b) { return b.constant(a) / b; }
 
   // Unary ops applied directly to a Const operand constant-fold transparently
@@ -100,21 +176,36 @@ public:
   // TEST_EXTENSION.md §1b): callers don't need to special-case
   // sqrt(p.fixed(2.0)) etc, and validate() never has to reject them.
   friend Expr sqr(Expr a) { return a * a; }
-  friend Expr sqrt(Expr a) {
-    if (a.is_const()) return a.constant(std::sqrt(a.const_value()));
+
+  friend Expr sqrt(Expr a)
+  {
+    if (a.is_const()) {
+      return a.constant(std::sqrt(a.const_value()));
+    }
     return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})};
   }
-  friend Expr exp(Expr a) {
-    if (a.is_const()) return a.constant(std::exp(a.const_value()));
+
+  friend Expr exp(Expr a)
+  {
+    if (a.is_const()) {
+      return a.constant(std::exp(a.const_value()));
+    }
     return {a.graph, a.graph->emit(Op::Exp, {a.node_id})};
   }
-  friend Expr log(Expr a) {
-    if (a.is_const()) return a.constant(std::log(a.const_value()));
+
+  friend Expr log(Expr a)
+  {
+    if (a.is_const()) {
+      return a.constant(std::log(a.const_value()));
+    }
     return {a.graph, a.graph->emit(Op::Log, {a.node_id})};
   }
 
-  friend Expr pow(Expr a, int n) {
-    if (a.is_const()) return a.constant(static_cast<T>(std::pow(a.const_value(), n)));
+  friend Expr pow(Expr a, int n)
+  {
+    if (a.is_const()) {
+      return a.constant(static_cast<T>(std::pow(a.const_value(), n)));
+    }
     DAGNodePayload<T> p;
     p.int_exp = n;
     return {a.graph, a.graph->emit(Op::IPow, {a.node_id}, p)};
@@ -127,9 +218,11 @@ private:
   std::size_t node_id;
 
   bool is_const() const { return graph->nodes[node_id].op == Op::Const; }
+
   T const_value() const { return graph->nodes[node_id].payload.constant; }
 
-  Expr constant(T c) const {
+  Expr constant(T c) const
+  {
     DAGNodePayload<T> p;
     p.constant = c;
     return {graph, graph->emit(Op::Const, {}, p)};
@@ -138,19 +231,20 @@ private:
 
 /**
  * @brief Reference to the root node of a constraint in the expression DAG
- * 
- * @tparam T 
+ *
+ * @tparam T
  */
 template<typename T>
-struct ConstraintRef {
-  std::size_t root_id;   // root node
-  Cmp cmp;               // constraint type (LE or EQ)
-  T rhs;                 // RHS of constraint
+struct ConstraintRef
+{
+  std::size_t root_id;  // root node
+  Cmp cmp;  // constraint type (LE or EQ)
+  T rhs;  // RHS of constraint
 };
 
 /**
  * @brief Full IR for an MINLP problem
- * 
+ *
  * Expected usage:
  * @code {.cpp}
  * Problem<double> p;
@@ -160,11 +254,12 @@ struct ConstraintRef {
  * p.set_objective(e);
  * p.add_constraint(x + y, Cmp::LE, 5.0);
  * @endcode
- * 
+ *
  * @tparam T numerical precision
  */
 template<typename T>
-struct Problem {
+struct Problem
+{
   Problem() = default;
 
   // Every Expr handed out by var()/fixed()/etc points at &this->graph. A
@@ -177,22 +272,25 @@ struct Problem {
   Problem(Problem&&) = default;
   Problem& operator=(Problem&&) = default;
 
-  Expr<T> var(T lb, T ub, VarKind kind = VarKind::Continuous) {
+  Expr<T> var(T lb, T ub, VarKind kind = VarKind::Continuous)
+  {
     std::size_t idx = box_bounds.size();
-    box_bounds.push_back(cu::interval<T>{lb, ub});
+    box_bounds.push_back(cu::interval<T> {lb, ub});
     var_kinds.push_back(kind);
     DAGNodePayload<T> p;
     p.var_index = idx;
     return Expr<T>(&graph, graph.emit(Op::Var, {}, p));
   }
 
-  Expr<T> var(VarKind kind = VarKind::Continuous) { return var(std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max(), kind); }
+  Expr<T> var(VarKind kind = VarKind::Continuous)
+  {
+    return var(
+        std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max(), kind);
+  }
 
   Expr<T> int_var(T lb, T ub) { return var(lb, ub, VarKind::Integer); }
 
   Expr<T> bin_var() { return var(T(0), T(1), VarKind::Binary); }
-
-
 
   /**
    * @brief Emits a constant node holding `value`.
@@ -202,14 +300,19 @@ struct Problem {
    * is represented as a Const node rather than a Var, so it never enters
    * `box_bounds` and is skipped by anything iterating Op::Var nodes.
    */
-  Expr<T> fixed(T value) {
+  Expr<T> fixed(T value)
+  {
     DAGNodePayload<T> p;
     p.constant = value;
     return Expr<T>(&graph, graph.emit(Op::Const, {}, p));
   }
 
   void set_objective(Expr<T> e) { objective_root = e.id(); }
-  void add_constraint(Expr<T> lhs, Cmp cmp, T rhs) { constraints.push_back({lhs.id(), cmp, rhs}); }
+
+  void add_constraint(Expr<T> lhs, Cmp cmp, T rhs)
+  {
+    constraints.push_back({lhs.id(), cmp, rhs});
+  }
 
   /**
    * @brief Checks every structural invariant of this Problem and its graph,
@@ -224,43 +327,58 @@ struct Problem {
    * some real problems genuinely don't have both bounds, and the defined
    * partitioning behavior for that case is still an open decision.
    */
-  void validate() const {
+  void validate() const
+  {
     // §1: graph.nodes bookkeeping -- defense in depth, always true by
     // construction via emit()/var(), but cheap to check and this is the one
     // place callers can rely on it having been checked.
     for (const DAGNode<T>& node : graph.nodes) {
       for (std::size_t in_id : node.in) {
         if (in_id >= node.id) {
-          throw InvalidDAG("DAG node operand id is not strictly less than the node's own id; "
-                           "topological-order invariant violated");
+          throw InvalidDAG(
+              "DAG node operand id is not strictly less than the node's own "
+              "id; " "topological-order invariant violated");
         }
       }
       std::size_t expected_op_count = 1;
-      for (std::size_t in_id : node.in) expected_op_count += graph.nodes[in_id].op_count;
+      for (std::size_t in_id : node.in) {
+        expected_op_count += graph.nodes[in_id].op_count;
+      }
       if (node.op_count != expected_op_count) {
-        throw InvalidDAG("DAG node op_count does not match the size of its subtree");
+        throw InvalidDAG(
+            "DAG node op_count does not match the size of its subtree");
       }
     }
 
     std::size_t var_node_count = 0;
     for (const DAGNode<T>& node : graph.nodes) {
-      if (node.op == Op::Var) ++var_node_count;
+      if (node.op == Op::Var) {
+        ++var_node_count;
+      }
     }
-    if (var_node_count != box_bounds.size() || box_bounds.size() != var_kinds.size()) {
-      throw InvalidDAG("box_bounds/var_kinds are out of sync with the number of Op::Var nodes");
+    if (var_node_count != box_bounds.size()
+        || box_bounds.size() != var_kinds.size())
+    {
+      throw InvalidDAG(
+          "box_bounds/var_kinds are out of sync with the number of Op::Var "
+          "nodes");
     }
 
     // §1b: a Const can never be an objective/constraint root -- unlike a
     // unary op applied to a Const, this isn't foldable into a well-defined
     // value (there's no expression left to evaluate).
-    if (objective_root < graph.nodes.size() && graph.nodes[objective_root].op == Op::Const) {
-      throw InvalidDAG("objective root is a bare Const; set_objective was given a fixed() value "
-                       "rather than an expression to optimise");
+    if (objective_root < graph.nodes.size()
+        && graph.nodes[objective_root].op == Op::Const)
+    {
+      throw InvalidDAG(
+          "objective root is a bare Const; set_objective was given a fixed() "
+          "value " "rather than an expression to optimise");
     }
     for (const ConstraintRef<T>& c : constraints) {
       if (graph.nodes[c.root_id].op == Op::Const) {
-        throw InvalidDAG("constraint root is a bare Const; add_constraint was given a fixed() "
-                         "value rather than an expression");
+        throw InvalidDAG(
+            "constraint root is a bare Const; add_constraint was given a "
+            "fixed() " "value rather than an expression");
       }
     }
 
@@ -269,7 +387,8 @@ struct Problem {
       throw InvalidProblem("Problem has zero variables");
     }
     if (objective_root == std::numeric_limits<std::size_t>::max()) {
-      throw InvalidProblem("Problem's objective was never set (set_objective was never called)");
+      throw InvalidProblem(
+          "Problem's objective was never set (set_objective was never called)");
     }
     for (std::size_t i = 0; i < box_bounds.size(); ++i) {
       const cu::interval<T>& b = box_bounds[i];
@@ -280,10 +399,13 @@ struct Problem {
       // already integer-valued" -- also sidesteps -Wfloat-equal.
       if (var_kinds[i] == VarKind::Integer || var_kinds[i] == VarKind::Binary) {
         if (std::floor(b.lb) < b.lb || std::floor(b.ub) < b.ub) {
-          throw InvalidProblem("Integer/Binary variable has non-integer-valued bounds");
+          throw InvalidProblem(
+              "Integer/Binary variable has non-integer-valued bounds");
         }
       }
-      if (var_kinds[i] == VarKind::Binary && (b.lb < T(0) || b.lb > T(0) || b.ub < T(1) || b.ub > T(1))) {
+      if (var_kinds[i] == VarKind::Binary
+          && (b.lb < T(0) || b.lb > T(0) || b.ub < T(1) || b.ub > T(1)))
+      {
         throw InvalidProblem("Binary variable's bounds are not exactly [0,1]");
       }
     }
@@ -301,4 +423,4 @@ struct Problem {
   std::vector<ConstraintRef<T>> constraints;
 };
 
-}
+}  // namespace cuminlp::dag

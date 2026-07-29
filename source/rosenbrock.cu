@@ -48,9 +48,10 @@ auto main() -> int
 {
   Problem<double> problem = make_rosenbrock(DIMS);
 
-  auto policy =
-      std::make_shared<cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(policy);
+  auto policy = std::make_shared<
+      cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
+  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(
+      policy);
   drv.solve(problem);
 
   return 0;

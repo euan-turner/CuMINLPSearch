@@ -99,10 +99,10 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
 template<std::size_t CycleSize>
 struct SlotContext
 {
-  int part[CycleSize];             // this thread's index into each slot's fan-out
+  int part[CycleSize];  // this thread's index into each slot's fan-out
   std::size_t var_ids[CycleSize];  // which variable each slot acts on
-  int fan_out[CycleSize];          // radix used to decode `part` for each slot
-  SlotKind kind[CycleSize];        // operation each slot performs
+  int fan_out[CycleSize];  // radix used to decode `part` for each slot
+  SlotKind kind[CycleSize];  // operation each slot performs
 };
 
 /**
@@ -111,15 +111,17 @@ struct SlotContext
  * @tparam CycleSize    Number of dimensions being cycled
  * @param tid           Global thread index
  * @param slot_var_ids  Which variable each of the CycleSize slots acts on
- * @param slot_fan_out  Fan-out (radix) of each slot, from Composition + PartitionNum
+ * @param slot_fan_out  Fan-out (radix) of each slot, from Composition +
+ * PartitionNum
  * @param slot_kind     Operation each slot performs
  * @return SlotContext
  */
 template<std::size_t CycleSize>
-__device__ SlotContext<CycleSize> make_slot_context(std::size_t tid,
-                                                    const std::size_t* __restrict__ slot_var_ids,
-                                                    const int* __restrict__ slot_fan_out,
-                                                    const SlotKind* __restrict__ slot_kind)
+__device__ SlotContext<CycleSize> make_slot_context(
+    std::size_t tid,
+    const std::size_t* __restrict__ slot_var_ids,
+    const int* __restrict__ slot_fan_out,
+    const SlotKind* __restrict__ slot_kind)
 {
   SlotContext<CycleSize> ctx {};
 
@@ -128,7 +130,8 @@ __device__ SlotContext<CycleSize> make_slot_context(std::size_t tid,
     ctx.var_ids[j] = slot_var_ids[j];
     ctx.fan_out[j] = slot_fan_out[j];
     ctx.kind[j] = slot_kind[j];
-    ctx.part[j] = static_cast<int>(idx % static_cast<std::size_t>(ctx.fan_out[j]));
+    ctx.part[j] =
+        static_cast<int>(idx % static_cast<std::size_t>(ctx.fan_out[j]));
     idx /= static_cast<std::size_t>(ctx.fan_out[j]);
   }
   return ctx;
@@ -153,15 +156,19 @@ __device__ void get_slot_bounds(const SlotContext<CycleSize>& ctx,
                                 cu::interval<T>& bound)
 {
   for (std::size_t j = 0; j < CycleSize; ++j) {
-    if (ctx.var_ids[j] != dim) continue;
+    if (ctx.var_ids[j] != dim) {
+      continue;
+    }
 
     // Delegates to the same decode CompositionInterval::materialise uses
     // host-side (search.hpp), so host/device agreement is structural rather
     // than two hand-written implementations that happen to match (see
     // TEST_EXTENSION.md §4a and slot_decode.hpp).
-    cuminlp::decode::slot_bounds<T>(ctx.kind[j], interval[dim],
+    cuminlp::decode::slot_bounds<T>(ctx.kind[j],
+                                    interval[dim],
                                     static_cast<std::size_t>(ctx.part[j]),
-                                    static_cast<std::size_t>(ctx.fan_out[j]), bound);
+                                    static_cast<std::size_t>(ctx.fan_out[j]),
+                                    bound);
     return;
   }
 

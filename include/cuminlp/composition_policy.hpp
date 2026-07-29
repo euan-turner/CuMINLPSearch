@@ -13,7 +13,8 @@
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
 
-namespace cuminlp {
+namespace cuminlp
+{
 
 // Which operation a slot in a Composition performs on its assigned variable
 // this iteration. This is what fixes a replayed CUDA
@@ -23,14 +24,22 @@ namespace cuminlp {
 // CycleSize): it always has fan-out 1 and counts as enumerable, so a box
 // whose live variables all enumerate can still be fathomed even when they
 // don't fill every slot (TEST_EXTENSION.md §4b).
-enum class SlotKind { Continuous, IntegerBisect, IntegerEnumerate, BinaryEnumerate, Padding };
+enum class SlotKind
+{
+  Continuous,
+  IntegerBisect,
+  IntegerEnumerate,
+  BinaryEnumerate,
+  Padding
+};
 
 template<std::size_t CycleSize>
 using Composition = std::array<SlotKind, CycleSize>;
 
 // Which variable fills each slot of `composition`, for one search-tree node.
 template<std::size_t CycleSize>
-struct SlotAssignment {
+struct SlotAssignment
+{
   Composition<CycleSize> composition;
   std::array<std::size_t, CycleSize> var_ids;
 };
@@ -46,14 +55,23 @@ struct SlotAssignment {
 template<std::size_t PartitionNum, std::size_t EnumerateCap = PartitionNum>
 constexpr std::size_t slot_fan_out(SlotKind kind)
 {
-  if (kind == SlotKind::BinaryEnumerate) return 2;
-  if (kind == SlotKind::IntegerEnumerate) return EnumerateCap;
-  if (kind == SlotKind::Padding) return 1;
+  if (kind == SlotKind::BinaryEnumerate) {
+    return 2;
+  }
+  if (kind == SlotKind::IntegerEnumerate) {
+    return EnumerateCap;
+  }
+  if (kind == SlotKind::Padding) {
+    return 1;
+  }
   return PartitionNum;
 }
 
-template<std::size_t PartitionNum, std::size_t EnumerateCap, std::size_t CycleSize>
-constexpr std::size_t composition_fan_out(const Composition<CycleSize>& composition)
+template<std::size_t PartitionNum,
+         std::size_t EnumerateCap,
+         std::size_t CycleSize>
+constexpr std::size_t composition_fan_out(
+    const Composition<CycleSize>& composition)
 {
   std::size_t total = 1;
   for (SlotKind kind : composition) {
@@ -77,7 +95,8 @@ constexpr bool is_fully_enumerable(const Composition<CycleSize>& composition)
 {
   for (SlotKind kind : composition) {
     if (kind != SlotKind::IntegerEnumerate && kind != SlotKind::BinaryEnumerate
-        && kind != SlotKind::Padding) {
+        && kind != SlotKind::Padding)
+    {
       return false;
     }
   }
@@ -90,8 +109,8 @@ constexpr bool is_fully_enumerable(const Composition<CycleSize>& composition)
 // live-variable count and the Composition the policy chose for it, so it's
 // testable independent of the surrounding search loop (see graph_driver.cuh).
 template<std::size_t CycleSize>
-constexpr bool can_fathom_without_children(std::size_t live_count,
-                                          const Composition<CycleSize>& composition)
+constexpr bool can_fathom_without_children(
+    std::size_t live_count, const Composition<CycleSize>& composition)
 {
   return live_count <= CycleSize && is_fully_enumerable(composition);
 }
@@ -100,12 +119,14 @@ constexpr bool can_fathom_without_children(std::size_t live_count,
 // act on next and how. Must be a pure function of currently-observable state
 // (the box + the problem's variable kinds).
 template<typename T, std::size_t CycleSize>
-class CompositionPolicy {
+class CompositionPolicy
+{
 public:
   virtual ~CompositionPolicy() = default;
 
-  virtual SlotAssignment<CycleSize> choose(std::span<const cu::interval<T>> box,
-                                            std::span<const dag::VarKind> var_kinds) const = 0;
+  virtual SlotAssignment<CycleSize> choose(
+      std::span<const cu::interval<T>> box,
+      std::span<const dag::VarKind> var_kinds) const = 0;
 
   // Every Composition `choose` could return, for any box with these
   // var_kinds.
@@ -116,12 +137,16 @@ public:
 // Greedy, stateless composition policy: fills slots from unresolved (i.e.
 // non-degenerate, lb < ub) variables, binaries first, then integers, then
 // continuous.
-template<typename T, std::size_t CycleSize, std::size_t PartitionNum,
-        std::size_t EnumerateCap = PartitionNum>
-class GreedyCompositionPolicy : public CompositionPolicy<T, CycleSize> {
+template<typename T,
+         std::size_t CycleSize,
+         std::size_t PartitionNum,
+         std::size_t EnumerateCap = PartitionNum>
+class GreedyCompositionPolicy : public CompositionPolicy<T, CycleSize>
+{
 public:
-  SlotAssignment<CycleSize> choose(std::span<const cu::interval<T>> box,
-                                    std::span<const dag::VarKind> var_kinds) const override
+  SlotAssignment<CycleSize> choose(
+      std::span<const cu::interval<T>> box,
+      std::span<const dag::VarKind> var_kinds) const override
   {
     assert(box.size() == var_kinds.size());
     if (var_kinds.empty()) {
@@ -129,8 +154,8 @@ public:
       // index on a zero-variable problem (TEST_EXTENSION.md §3, the
       // "every var_id < var_kinds.size()" invariant).
       throw ShapeMismatch(
-          "CompositionPolicy::choose called with an empty var_kinds span; there are no "
-          "variables to assign to any slot");
+          "CompositionPolicy::choose called with an empty var_kinds span; "
+          "there are no " "variables to assign to any slot");
     }
 
     SlotAssignment<CycleSize> out {};
@@ -177,9 +202,15 @@ public:
     std::size_t num_integer = 0;
     std::size_t num_continuous = 0;
     for (dag::VarKind kind : var_kinds) {
-      if (kind == dag::VarKind::Binary) ++num_binary;
-      if (kind == dag::VarKind::Integer) ++num_integer;
-      if (kind == dag::VarKind::Continuous) ++num_continuous;
+      if (kind == dag::VarKind::Binary) {
+        ++num_binary;
+      }
+      if (kind == dag::VarKind::Integer) {
+        ++num_integer;
+      }
+      if (kind == dag::VarKind::Continuous) {
+        ++num_continuous;
+      }
     }
     std::size_t const max_k = std::min(CycleSize, num_binary);
 
@@ -193,11 +224,21 @@ public:
           for (std::size_t c = 0; c <= max_c; ++c) {
             Composition<CycleSize> comp {};
             std::size_t s = 0;
-            for (std::size_t i = 0; i < k; ++i) comp[s++] = SlotKind::BinaryEnumerate;
-            for (std::size_t i = 0; i < e; ++i) comp[s++] = SlotKind::IntegerEnumerate;
-            for (std::size_t i = 0; i < m - e; ++i) comp[s++] = SlotKind::IntegerBisect;
-            for (std::size_t i = 0; i < c; ++i) comp[s++] = SlotKind::Continuous;
-            for (; s < CycleSize; ++s) comp[s] = SlotKind::Padding;
+            for (std::size_t i = 0; i < k; ++i) {
+              comp[s++] = SlotKind::BinaryEnumerate;
+            }
+            for (std::size_t i = 0; i < e; ++i) {
+              comp[s++] = SlotKind::IntegerEnumerate;
+            }
+            for (std::size_t i = 0; i < m - e; ++i) {
+              comp[s++] = SlotKind::IntegerBisect;
+            }
+            for (std::size_t i = 0; i < c; ++i) {
+              comp[s++] = SlotKind::Continuous;
+            }
+            for (; s < CycleSize; ++s) {
+              comp[s] = SlotKind::Padding;
+            }
             out.push_back(comp);
           }
         }
@@ -220,7 +261,9 @@ public:
   {
     T const lo = std::ceil(b.lb);
     T const hi = std::floor(b.ub);
-    if (hi < lo) return 0;
+    if (hi < lo) {
+      return 0;
+    }
     return static_cast<std::size_t>(hi - lo) + 1;
   }
 
@@ -232,7 +275,9 @@ private:
                                  SlotAssignment<CycleSize>& out,
                                  std::size_t filled)
   {
-    for (std::size_t vid = 0; vid < var_kinds.size() && filled < CycleSize; ++vid) {
+    for (std::size_t vid = 0; vid < var_kinds.size() && filled < CycleSize;
+         ++vid)
+    {
       if (var_kinds[vid] == dag::VarKind::Binary && unresolved(box[vid])) {
         out.composition[filled] = SlotKind::BinaryEnumerate;
         out.var_ids[filled] = vid;
@@ -256,12 +301,16 @@ private:
     // Smallest remaining domain first: most likely to become enumerable (or
     // already is), so this makes the fastest progress toward fully
     // resolving a dimension.
-    std::sort(candidates.begin(), candidates.end(), [&](std::size_t a, std::size_t b) {
-      return integer_domain_size(box[a]) < integer_domain_size(box[b]);
-    });
+    std::sort(
+        candidates.begin(),
+        candidates.end(),
+        [&](std::size_t a, std::size_t b)
+        { return integer_domain_size(box[a]) < integer_domain_size(box[b]); });
 
     for (std::size_t vid : candidates) {
-      if (filled >= CycleSize) break;
+      if (filled >= CycleSize) {
+        break;
+      }
       out.composition[filled] = integer_domain_size(box[vid]) <= EnumerateCap
           ? SlotKind::IntegerEnumerate
           : SlotKind::IntegerBisect;
@@ -283,12 +332,15 @@ private:
       }
     }
     // Widest first: classic largest-uncertainty-first bisection heuristic.
-    std::sort(candidates.begin(), candidates.end(), [&](std::size_t a, std::size_t b) {
-      return (box[a].ub - box[a].lb) > (box[b].ub - box[b].lb);
-    });
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [&](std::size_t a, std::size_t b)
+              { return (box[a].ub - box[a].lb) > (box[b].ub - box[b].lb); });
 
     for (std::size_t vid : candidates) {
-      if (filled >= CycleSize) break;
+      if (filled >= CycleSize) {
+        break;
+      }
       out.composition[filled] = SlotKind::Continuous;
       out.var_ids[filled] = vid;
       ++filled;

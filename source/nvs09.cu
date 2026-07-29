@@ -11,7 +11,8 @@
 using cuminlp::dag::Expr;
 using cuminlp::dag::Problem;
 
-namespace {
+namespace
+{
 
 constexpr std::size_t NUM_VARS = 10;
 constexpr std::size_t CYCLE_SIZE = 10;
@@ -47,9 +48,10 @@ auto main(int argc, char* argv[]) -> int
 {
   int iters = argc > 1 ? std::stoi(argv[1]) : 2000;
 
-  auto policy =
-      std::make_shared<cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(policy, iters, 1e-6);
+  auto policy = std::make_shared<
+      cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
+  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(
+      policy, iters, 1e-6);
   drv.solve(make_nvs09());
 
   return 0;

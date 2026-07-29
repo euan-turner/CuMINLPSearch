@@ -14,13 +14,15 @@ namespace cuminlp
 
 // A CUDA runtime/driver call failed. Carries the cudaError_t so callers
 // can branch on the specific failure, not just the message.
-class CUDAError : public error {
+class CUDAError : public error
+{
 public:
   CUDAError(cudaError_t code, const char* api_call)
       : error(std::string(api_call) + " failed: " + cudaGetErrorString(code))
       , code_(code)
   {
   }
+
   cudaError_t code() const noexcept { return code_; }
 
 private:
@@ -32,7 +34,10 @@ private:
 namespace cuminlp::detail
 {
 
-constexpr std::size_t ceil_div(std::size_t x, std::size_t y) { return (x + y - 1) / y; }
+constexpr std::size_t ceil_div(std::size_t x, std::size_t y)
+{
+  return (x + y - 1) / y;
+}
 
 template<std::size_t Base, std::size_t Exp>
 constexpr std::size_t ipow()
@@ -65,7 +70,9 @@ U* alloc_device(std::size_t n)
 template<typename Func, typename... Args>
 cudaGraphNode_t add_kernel_node(cudaGraph_t graph,
                                 const std::vector<cudaGraphNode_t>& deps,
-                                Func func, dim3 grid, dim3 block,
+                                Func func,
+                                dim3 grid,
+                                dim3 block,
                                 Args... args)
 {
   void* kernel_args[] = {const_cast<void*>(static_cast<const void*>(&args))...};
@@ -78,8 +85,12 @@ cudaGraphNode_t add_kernel_node(cudaGraph_t graph,
   params.extra = nullptr;
 
   cudaGraphNode_t node;
-  check(cudaGraphAddKernelNode(&node, graph, deps.empty() ? nullptr : deps.data(), deps.size(), &params),
-       "cudaGraphAddKernelNode");
+  check(cudaGraphAddKernelNode(&node,
+                               graph,
+                               deps.empty() ? nullptr : deps.data(),
+                               deps.size(),
+                               &params),
+        "cudaGraphAddKernelNode");
   return node;
 }
 

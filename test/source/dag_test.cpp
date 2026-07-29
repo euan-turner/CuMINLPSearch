@@ -2,10 +2,11 @@
 #include <limits>
 #include <type_traits>
 
+#include "cuminlp/dag.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
-#include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
 
 using cuminlp::InvalidDAG;
@@ -14,14 +15,18 @@ using cuminlp::dag::Op;
 using cuminlp::dag::Problem;
 using cuminlp::dag::VarKind;
 
-namespace {
+namespace
+{
 // The constants under test here are all either passed straight through
 // (e.g. bin_var()'s bounds) or computed by a single well-defined libm call
 // on an exactly-representable input (e.g. std::sqrt(4.0)), so bitwise
 // equality is the right check -- this sidesteps -Wfloat-equal (which flags
 // == / != between floats, but not < / >) rather than weakening the
 // assertion to an approximate one.
-bool feq(double a, double b) { return !(a < b) && !(b < a); }
+bool feq(double a, double b)
+{
+  return !(a < b) && !(b < a);
+}
 }  // namespace
 
 // TEST_EXTENSION.md §1a: Problem is move-only, not copyable -- a copy would
@@ -32,7 +37,9 @@ static_assert(!std::is_copy_assignable_v<Problem<double>>);
 static_assert(std::is_move_constructible_v<Problem<double>>);
 static_assert(std::is_move_assignable_v<Problem<double>>);
 
-TEST_CASE("Problem::var/int_var/bin_var append exactly one entry each, in order", "[dag]")
+TEST_CASE(
+    "Problem::var/int_var/bin_var append exactly one entry each, in order",
+    "[dag]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
@@ -67,12 +74,15 @@ TEST_CASE("Problem::fixed never registers as a variable", "[dag]")
   CHECK(p.var_kinds.size() == before);
 }
 
-TEST_CASE("DAGNode ids are topologically ordered and op_count reflects subtree size", "[dag]")
+TEST_CASE(
+    "DAGNode ids are topologically ordered and op_count reflects subtree size",
+    "[dag]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
   auto y = p.var(0.0, 5.0);
-  auto e = x * x + 2.0 * y;  // Sqr(x) [op_count 2], 2.0*y [Const, Mul -> op_count 3], Add -> 6
+  auto e = x * x + 2.0 * y;  // Sqr(x) [op_count 2], 2.0*y [Const, Mul ->
+                             // op_count 3], Add -> 6
   p.set_objective(e);
   p.add_constraint(x + y, cuminlp::dag::Cmp::LE, 5.0);
 
@@ -85,13 +95,16 @@ TEST_CASE("DAGNode ids are topologically ordered and op_count reflects subtree s
   REQUIRE_NOTHROW(p.validate());
 }
 
-TEST_CASE("Reusing an Expr handle in two places does not corrupt op_count bookkeeping", "[dag]")
+TEST_CASE(
+    "Reusing an Expr handle in two places does not corrupt op_count "
+    "bookkeeping",
+    "[dag]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
   auto shared = x * x;  // Sqr(x), op_count == 2
 
-  auto objective = shared + shared;   // reused in the objective ...
+  auto objective = shared + shared;  // reused in the objective ...
   p.set_objective(objective);
   p.add_constraint(shared, cuminlp::dag::Cmp::LE, 1.0);  // ... and a constraint
 
@@ -101,7 +114,8 @@ TEST_CASE("Reusing an Expr handle in two places does not corrupt op_count bookke
   REQUIRE_NOTHROW(p.validate());
 }
 
-TEST_CASE("a*a only becomes Op::Sqr when both operands are the same node", "[dag]")
+TEST_CASE("a*a only becomes Op::Sqr when both operands are the same node",
+          "[dag]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
@@ -154,7 +168,8 @@ TEST_CASE("Unary ops applied directly to fixed() constant-fold", "[dag][1b]")
   CHECK(feq(p.graph.nodes[sqr_c.id()].payload.constant, 9.0));
 }
 
-TEST_CASE("A bare Const as the objective root is rejected by validate()", "[dag][1b]")
+TEST_CASE("A bare Const as the objective root is rejected by validate()",
+          "[dag][1b]")
 {
   Problem<double> p;
   p.var(-1.0, 1.0);
@@ -163,7 +178,8 @@ TEST_CASE("A bare Const as the objective root is rejected by validate()", "[dag]
   REQUIRE_THROWS_AS(p.validate(), InvalidDAG);
 }
 
-TEST_CASE("A bare Const as a constraint root is rejected by validate()", "[dag][1b]")
+TEST_CASE("A bare Const as a constraint root is rejected by validate()",
+          "[dag][1b]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
@@ -195,7 +211,8 @@ TEST_CASE("validate() rejects lb > ub", "[dag][2]")
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }
 
-TEST_CASE("validate() rejects non-integer bounds on an Integer variable", "[dag][2]")
+TEST_CASE("validate() rejects non-integer bounds on an Integer variable",
+          "[dag][2]")
 {
   Problem<double> p;
   auto x = p.var(0.5, 5.0, VarKind::Integer);
@@ -204,7 +221,9 @@ TEST_CASE("validate() rejects non-integer bounds on an Integer variable", "[dag]
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }
 
-TEST_CASE("validate() rejects a Binary variable whose bounds aren't exactly [0,1]", "[dag][2]")
+TEST_CASE(
+    "validate() rejects a Binary variable whose bounds aren't exactly [0,1]",
+    "[dag][2]")
 {
   Problem<double> p;
   // Bypasses bin_var() (which always produces [0,1]) to exercise the
@@ -224,7 +243,8 @@ TEST_CASE("bin_var() always produces bounds accepted by validate()", "[dag][2]")
   REQUIRE_NOTHROW(p.validate());
 }
 
-TEST_CASE("validate() rejects a Problem whose objective was never set", "[dag][2]")
+TEST_CASE("validate() rejects a Problem whose objective was never set",
+          "[dag][2]")
 {
   Problem<double> p;
   p.var(-1.0, 1.0);
@@ -235,7 +255,8 @@ TEST_CASE("validate() rejects a Problem whose objective was never set", "[dag][2
 TEST_CASE("validate() rejects a Problem with zero variables", "[dag][2]")
 {
   Problem<double> p;
-  p.set_objective(p.fixed(1.0));  // also hits the Const-root case, either error is fine here
+  p.set_objective(p.fixed(
+      1.0));  // also hits the Const-root case, either error is fine here
 
   REQUIRE_THROWS(p.validate());
 }
@@ -245,7 +266,8 @@ TEST_CASE("validate() rejects a non-finite constraint rhs", "[dag][2]")
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
   p.set_objective(x * x);
-  p.add_constraint(x, cuminlp::dag::Cmp::LE, std::numeric_limits<double>::infinity());
+  p.add_constraint(
+      x, cuminlp::dag::Cmp::LE, std::numeric_limits<double>::infinity());
 
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }
@@ -255,7 +277,8 @@ TEST_CASE("validate() rejects a NaN constraint rhs", "[dag][2]")
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
   p.set_objective(x * x);
-  p.add_constraint(x, cuminlp::dag::Cmp::EQ, std::numeric_limits<double>::quiet_NaN());
+  p.add_constraint(
+      x, cuminlp::dag::Cmp::EQ, std::numeric_limits<double>::quiet_NaN());
 
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }

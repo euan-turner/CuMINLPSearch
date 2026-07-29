@@ -60,7 +60,7 @@ struct CompressedInterval
 {
   std::size_t sidx;  // index within parent interval
   std::size_t pidx;  // index of parent interval in history
-  std::size_t depth; // tree depth of interval
+  std::size_t depth;  // tree depth of interval
   std::size_t cycle_start;  // start of block of dimensions to partition
   T lb;  // sound lower bound over this interval
 
@@ -144,13 +144,15 @@ struct CompressedInterval
  * @tparam PartitionNum
  * @tparam EnumerateCap
  */
-template<typename T, std::size_t CycleSize, std::size_t PartitionNum,
-        std::size_t EnumerateCap = PartitionNum>
+template<typename T,
+         std::size_t CycleSize,
+         std::size_t PartitionNum,
+         std::size_t EnumerateCap = PartitionNum>
 struct CompositionInterval
 {
   std::size_t sidx;  // index within parent interval
   std::size_t pidx;  // index of parent interval in history
-  std::size_t depth; // tree depth of interval
+  std::size_t depth;  // tree depth of interval
   T lb;  // sound lower bound over this interval
 
   bool operator<(const CompositionInterval& other) const
@@ -204,7 +206,8 @@ struct CompositionInterval
     const std::vector<cu::interval<T>>& parent = history.intervals[pidx];
     out = parent;
 
-    cuminlp::SlotAssignment<CycleSize> assignment = policy.choose(parent, var_kinds);
+    cuminlp::SlotAssignment<CycleSize> assignment =
+        policy.choose(parent, var_kinds);
 
     // Decode sidx into a per-slot partition/enumeration index, mirroring
     // partition::make_slot_context, then narrow each cycled dimension via
@@ -212,12 +215,14 @@ struct CompositionInterval
     std::size_t idx = sidx;
     for (std::size_t j = 0; j < CycleSize; ++j) {
       SlotKind kind = assignment.composition[j];
-      std::size_t fan_out = cuminlp::slot_fan_out<PartitionNum, EnumerateCap>(kind);
+      std::size_t fan_out =
+          cuminlp::slot_fan_out<PartitionNum, EnumerateCap>(kind);
       std::size_t part = idx % fan_out;
       idx /= fan_out;
 
       std::size_t dim = assignment.var_ids[j];
-      cuminlp::decode::slot_bounds<T>(kind, parent[dim], part, fan_out, out[dim]);
+      cuminlp::decode::slot_bounds<T>(
+          kind, parent[dim], part, fan_out, out[dim]);
     }
   }
 };

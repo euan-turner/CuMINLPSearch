@@ -21,7 +21,8 @@ using cuminlp::dag::PointGraphReplay;
 using cuminlp::dag::Problem;
 using cuminlp::dag::VarKind;
 
-namespace {
+namespace
+{
 
 // x in [0, 10], objective x*x, constraint x <= 5 (feasible over part of the
 // domain: [0,5] is feasible, (5,10] is not).
@@ -50,7 +51,9 @@ static_assert(!std::is_copy_constructible_v<PointGraphReplay<double, 1, 4, 8>>);
 static_assert(!std::is_copy_assignable_v<PointGraphReplay<double, 1, 4, 8>>);
 static_assert(std::is_move_constructible_v<PointGraphReplay<double, 1, 4, 8>>);
 
-TEST_CASE("GraphReplay::n_regions matches composition_fan_out for its Composition", "[graph_replay][5e]")
+TEST_CASE(
+    "GraphReplay::n_regions matches composition_fan_out for its Composition",
+    "[graph_replay][5e]")
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
@@ -60,17 +63,21 @@ TEST_CASE("GraphReplay::n_regions matches composition_fan_out for its Compositio
   CHECK(replay.n_regions() == 4);
 }
 
-TEST_CASE("set_domain rejects a domain whose size doesn't match the problem's variable count",
-         "[graph_replay][5]")
+TEST_CASE(
+    "set_domain rejects a domain whose size doesn't match the problem's "
+    "variable count",
+    "[graph_replay][5]")
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
   auto replay = IntervalGraphReplay<double, 1, 4>::build(p, comp);
 
-  std::vector<cu::interval<double>> wrong_size_domain = {{0.0, 10.0}, {0.0, 1.0}};
+  std::vector<cu::interval<double>> wrong_size_domain = {{0.0, 10.0},
+                                                         {0.0, 1.0}};
   std::array<std::size_t, 1> var_ids = {0};
 
-  REQUIRE_THROWS_AS(replay.set_domain(wrong_size_domain, var_ids), ShapeMismatch);
+  REQUIRE_THROWS_AS(replay.set_domain(wrong_size_domain, var_ids),
+                    ShapeMismatch);
 }
 
 TEST_CASE("A moved-from GraphReplay is not launchable", "[graph_replay][5]")
@@ -94,7 +101,9 @@ TEST_CASE("A moved-from GraphReplay is not launchable", "[graph_replay][5]")
   CHECK_THROWS_AS(replay.launch(0), cuminlp::error);
 }
 
-TEST_CASE("has_candidate(), candidate_point()'s NaN-ness, and feasibility agree", "[graph_replay][5c]")
+TEST_CASE(
+    "has_candidate(), candidate_point()'s NaN-ness, and feasibility agree",
+    "[graph_replay][5c]")
 {
   Composition<1> comp = {SlotKind::Continuous};
   std::array<std::size_t, 1> var_ids = {0};
@@ -104,7 +113,8 @@ TEST_CASE("has_candidate(), candidate_point()'s NaN-ness, and feasibility agree"
     Problem<double> p = make_problem();
     auto replay = PointGraphReplay<double, 1, 4, 16>::build(p, comp);
 
-    std::vector<cu::interval<double>> domain = {{0.0, 5.0}};  // entirely feasible (x <= 5)
+    std::vector<cu::interval<double>> domain = {
+        {0.0, 5.0}};  // entirely feasible (x <= 5)
     replay.set_domain(domain, var_ids, /*salt=*/1);
     replay.launch(0);
 
@@ -115,7 +125,9 @@ TEST_CASE("has_candidate(), candidate_point()'s NaN-ness, and feasibility agree"
     CHECK(replay.candidate() < std::numeric_limits<double>::max());
   }
 
-  SECTION("an entirely infeasible domain has no candidate, and its witness is all-NaN")
+  SECTION(
+      "an entirely infeasible domain has no candidate, and its witness is "
+      "all-NaN")
   {
     Problem<double> p = make_infeasible_problem();
     auto replay = PointGraphReplay<double, 1, 4, 16>::build(p, comp);
@@ -131,8 +143,10 @@ TEST_CASE("has_candidate(), candidate_point()'s NaN-ness, and feasibility agree"
   }
 }
 
-TEST_CASE("Replay determinism: identical (domain, var_ids, salt) gives bitwise-identical results",
-         "[graph_replay][5d]")
+TEST_CASE(
+    "Replay determinism: identical (domain, var_ids, salt) gives "
+    "bitwise-identical results",
+    "[graph_replay][5d]")
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
@@ -145,13 +159,15 @@ TEST_CASE("Replay determinism: identical (domain, var_ids, salt) gives bitwise-i
   replay.launch(0);
   double const first_candidate = replay.candidate();
   auto const first_point_span = replay.candidate_point();
-  std::vector<double> first_point(first_point_span.begin(), first_point_span.end());
+  std::vector<double> first_point(first_point_span.begin(),
+                                  first_point_span.end());
 
   replay.set_domain(domain, var_ids, /*salt=*/7);
   replay.launch(0);
   double const second_candidate = replay.candidate();
   auto const second_point_span = replay.candidate_point();
-  std::vector<double> second_point(second_point_span.begin(), second_point_span.end());
+  std::vector<double> second_point(second_point_span.begin(),
+                                   second_point_span.end());
 
   CHECK(first_candidate == second_candidate);
   REQUIRE(first_point.size() == second_point.size());
@@ -160,7 +176,8 @@ TEST_CASE("Replay determinism: identical (domain, var_ids, salt) gives bitwise-i
   }
 }
 
-TEST_CASE("Replay determinism: different salts draw different sample points", "[graph_replay][5d]")
+TEST_CASE("Replay determinism: different salts draw different sample points",
+          "[graph_replay][5d]")
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
@@ -183,7 +200,8 @@ TEST_CASE("Replay determinism: different salts draw different sample points", "[
   CHECK(candidate_salt1 != candidate_salt2);
 }
 
-TEST_CASE("The interval graph's result is bitwise-identical regardless of salt", "[graph_replay][5d]")
+TEST_CASE("The interval graph's result is bitwise-identical regardless of salt",
+          "[graph_replay][5d]")
 {
   // The interval graph's root kernel takes no salt argument at all -- salt
   // only ever reaches set_domain() as a parameter of the shared API surface
@@ -197,11 +215,13 @@ TEST_CASE("The interval graph's result is bitwise-identical regardless of salt",
 
   replay.set_domain(domain, var_ids, /*salt=*/1);
   replay.launch(0);
-  std::vector<double> obj_lb_salt1(replay.obj_lb().begin(), replay.obj_lb().end());
+  std::vector<double> obj_lb_salt1(replay.obj_lb().begin(),
+                                   replay.obj_lb().end());
 
   replay.set_domain(domain, var_ids, /*salt=*/2);
   replay.launch(0);
-  std::vector<double> obj_lb_salt2(replay.obj_lb().begin(), replay.obj_lb().end());
+  std::vector<double> obj_lb_salt2(replay.obj_lb().begin(),
+                                   replay.obj_lb().end());
 
   REQUIRE(obj_lb_salt1.size() == obj_lb_salt2.size());
   for (std::size_t i = 0; i < obj_lb_salt1.size(); ++i) {

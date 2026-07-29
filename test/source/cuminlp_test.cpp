@@ -6,7 +6,6 @@
 
 auto main() -> int
 {
-
   // Smoke test: run a handful of branch-and-bound iterations over the
   // (currently hardcoded) Rosenbrock instance and check the search actually
   // improved on the trivial +inf upper bound it started from. Requires an

@@ -74,8 +74,11 @@ std::vector<T> launch_rosenbrock(const std::vector<std::vector<T>>& points)
   T* d_points = detail::alloc_device<T>(flat.size());
   T* out = detail::alloc_device<T>(N);
 
-  detail::check(cudaMemcpy(
-      d_points, flat.data(), flat.size() * sizeof(T), cudaMemcpyHostToDevice), "cudaMemcpy");
+  detail::check(cudaMemcpy(d_points,
+                           flat.data(),
+                           flat.size() * sizeof(T),
+                           cudaMemcpyHostToDevice),
+                "cudaMemcpy");
 
   rosenbrock_kernel<T><<<GRID_DIM, BLOCK_DIM>>>(d_points, out, N, dims);
   detail::check(cudaGetLastError(), "cudaGetLastError");
@@ -83,7 +86,8 @@ std::vector<T> launch_rosenbrock(const std::vector<std::vector<T>>& points)
 
   std::vector<T> res(N);
   detail::check(
-      cudaMemcpy(res.data(), out, N * sizeof(T), cudaMemcpyDeviceToHost), "cudaMemcpy");
+      cudaMemcpy(res.data(), out, N * sizeof(T), cudaMemcpyDeviceToHost),
+      "cudaMemcpy");
 
   detail::check(cudaFree(d_points), "cudaFree");
   detail::check(cudaFree(out), "cudaFree");
@@ -137,13 +141,15 @@ std::vector<cu::interval<T>> launch_interval_rosenbrock(
   dim3 BLOCK_DIM(512);
   dim3 GRID_DIM(static_cast<unsigned int>(detail::ceil_div(N, 512)));
 
-  cu::interval<T>* d_intervals = detail::alloc_device<cu::interval<T>>(flat.size());
+  cu::interval<T>* d_intervals =
+      detail::alloc_device<cu::interval<T>>(flat.size());
   cu::interval<T>* out = detail::alloc_device<cu::interval<T>>(N);
 
   detail::check(cudaMemcpy(d_intervals,
                            flat.data(),
                            flat.size() * sizeof(cu::interval<T>),
-                           cudaMemcpyHostToDevice), "cudaMemcpy");
+                           cudaMemcpyHostToDevice),
+                "cudaMemcpy");
 
   interval_rosenbrock_kernel<<<GRID_DIM, BLOCK_DIM>>>(
       d_intervals, out, N, dims);
@@ -151,8 +157,10 @@ std::vector<cu::interval<T>> launch_interval_rosenbrock(
   detail::check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
   std::vector<cu::interval<T>> res(N);
-  detail::check(cudaMemcpy(
-      res.data(), out, N * sizeof(cu::interval<T>), cudaMemcpyDeviceToHost), "cudaMemcpy");
+  detail::check(
+      cudaMemcpy(
+          res.data(), out, N * sizeof(cu::interval<T>), cudaMemcpyDeviceToHost),
+      "cudaMemcpy");
 
   detail::check(cudaFree(d_intervals), "cudaFree");
   detail::check(cudaFree(out), "cudaFree");
@@ -199,10 +207,11 @@ template<typename T,
          std::size_t CycleSize,
          std::size_t PartitionNum,
          std::size_t SamplePoints>
-__global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
-                                         T* per_sample_ub,  // num_regions * SamplePoints
-                                         std::size_t dims,
-                                         std::size_t cycle_start)
+__global__ void sample_rosenbrock_kernel(
+    cu::interval<T>* d_interval,
+    T* per_sample_ub,  // num_regions * SamplePoints
+    std::size_t dims,
+    std::size_t cycle_start)
 {
   constexpr std::size_t num_regions = ipow<PartitionNum, CycleSize>();
   std::size_t const gtid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -214,7 +223,8 @@ __global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
   std::size_t const i = gtid % SamplePoints;  // this thread's sample index
 
   partition::CycleContext<CycleSize> ctx =
-      partition::make_cycle_context<CycleSize, PartitionNum>(region, cycle_start);
+      partition::make_cycle_context<CycleSize, PartitionNum>(region,
+                                                             cycle_start);
 
   // Sample point is defined as:
   // xj = lb + i * (ub - lb) / (SamplePoints - 1) for each dimension
@@ -251,7 +261,10 @@ __global__ void sample_rosenbrock_kernel(cu::interval<T>* d_interval,
 // of this pipeline still one-thread-per-region -- this part is cheap (a
 // SamplePoints-long min over already-computed values, not a full Rosenbrock
 // evaluation), unlike the kernel above.
-template<typename T, std::size_t CycleSize, std::size_t PartitionNum, std::size_t SamplePoints>
+template<typename T,
+         std::size_t CycleSize,
+         std::size_t PartitionNum,
+         std::size_t SamplePoints>
 __global__ void reduce_sample_ub_kernel(const T* __restrict__ per_sample_ub,
                                         T* __restrict__ thread_ubs)
 {
@@ -285,10 +298,12 @@ template<typename T>
 std::size_t sample_rosenbrock_temp_storage_bytes(std::size_t num_threads)
 {
   std::size_t temp_bytes = 0;
-  detail::check(
-      cub::DeviceReduce::Min(nullptr, temp_bytes, static_cast<T*>(nullptr),
-                             static_cast<T*>(nullptr), num_threads),
-      "cub::DeviceReduce::Min (size query)");
+  detail::check(cub::DeviceReduce::Min(nullptr,
+                                       temp_bytes,
+                                       static_cast<T*>(nullptr),
+                                       static_cast<T*>(nullptr),
+                                       num_threads),
+                "cub::DeviceReduce::Min (size query)");
   return temp_bytes;
 }
 
@@ -313,7 +328,8 @@ std::size_t sample_rosenbrock_temp_storage_bytes(std::size_t num_threads)
  *        recomputed locally) so a caller that allocates d_thread_ubs at the
  *        wrong size is caught here instead of silently overrunning it
  * @param d_lub Device scratch, single T
- * @param d_temp_storage CUB scratch sized by sample_rosenbrock_temp_storage_bytes
+ * @param d_temp_storage CUB scratch sized by
+ * sample_rosenbrock_temp_storage_bytes
  * @param temp_storage_bytes size of d_temp_storage, in bytes
  * @param stream Stream every op here is enqueued on; synchronised once at the
  *        end so the returned lub is valid on return
@@ -347,27 +363,37 @@ T launch_sample_rosenbrock(const std::vector<cu::interval<T>>& interval,
                                 interval.data(),
                                 dims * sizeof(cu::interval<T>),
                                 cudaMemcpyHostToDevice,
-                                stream), "cudaMemcpyAsync");
+                                stream),
+                "cudaMemcpyAsync");
 
   dim3 BLOCK_DIM(512);
   std::size_t const total_samples = num_threads * SamplePoints;
-  dim3 SAMPLE_GRID_DIM(static_cast<unsigned int>(detail::ceil_div(total_samples, 512)));
+  dim3 SAMPLE_GRID_DIM(
+      static_cast<unsigned int>(detail::ceil_div(total_samples, 512)));
   sample_rosenbrock_kernel<T, CycleSize, PartitionNum, SamplePoints>
-      <<<SAMPLE_GRID_DIM, BLOCK_DIM, 0, stream>>>(d_interval, d_per_sample_ub, dims, cycle_start);
+      <<<SAMPLE_GRID_DIM, BLOCK_DIM, 0, stream>>>(
+          d_interval, d_per_sample_ub, dims, cycle_start);
   detail::check(cudaGetLastError(), "cudaGetLastError");
 
-  dim3 REDUCE_GRID_DIM(static_cast<unsigned int>(detail::ceil_div(num_threads, 512)));
+  dim3 REDUCE_GRID_DIM(
+      static_cast<unsigned int>(detail::ceil_div(num_threads, 512)));
   reduce_sample_ub_kernel<T, CycleSize, PartitionNum, SamplePoints>
-      <<<REDUCE_GRID_DIM, BLOCK_DIM, 0, stream>>>(d_per_sample_ub, d_thread_ubs);
+      <<<REDUCE_GRID_DIM, BLOCK_DIM, 0, stream>>>(d_per_sample_ub,
+                                                  d_thread_ubs);
   detail::check(cudaGetLastError(), "cudaGetLastError");
 
-  detail::check(cub::DeviceReduce::Min(d_temp_storage, temp_storage_bytes, d_thread_ubs,
-                                       d_lub, num_threads, stream),
-               "cub::DeviceReduce::Min");
+  detail::check(cub::DeviceReduce::Min(d_temp_storage,
+                                       temp_storage_bytes,
+                                       d_thread_ubs,
+                                       d_lub,
+                                       num_threads,
+                                       stream),
+                "cub::DeviceReduce::Min");
 
   T lub;
-  detail::check(cudaMemcpyAsync(&lub, d_lub, sizeof(T), cudaMemcpyDeviceToHost, stream),
-               "cudaMemcpyAsync");
+  detail::check(
+      cudaMemcpyAsync(&lub, d_lub, sizeof(T), cudaMemcpyDeviceToHost, stream),
+      "cudaMemcpyAsync");
   detail::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
 
   return lub;
@@ -387,19 +413,31 @@ T launch_sample_rosenbrock(const std::vector<cu::interval<T>>& interval,
 {
   std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
 
-  cu::interval<T>* d_interval = detail::alloc_device<cu::interval<T>>(interval.size());
+  cu::interval<T>* d_interval =
+      detail::alloc_device<cu::interval<T>>(interval.size());
   T* d_per_sample_ub = detail::alloc_device<T>(num_threads * SamplePoints);
   T* d_thread_ubs = detail::alloc_device<T>(num_threads);
   T* d_lub = detail::alloc_device<T>(1);
-  std::size_t const temp_storage_bytes = sample_rosenbrock_temp_storage_bytes<T>(num_threads);
-  unsigned char* d_temp_storage = detail::alloc_device<unsigned char>(temp_storage_bytes);
+  std::size_t const temp_storage_bytes =
+      sample_rosenbrock_temp_storage_bytes<T>(num_threads);
+  unsigned char* d_temp_storage =
+      detail::alloc_device<unsigned char>(temp_storage_bytes);
 
   cudaStream_t stream;
   detail::check(cudaStreamCreate(&stream), "cudaStreamCreate");
 
-  T const lub = launch_sample_rosenbrock<T, CycleSize, PartitionNum, SamplePoints>(
-      interval, cycle_start, d_interval, d_per_sample_ub, d_thread_ubs, num_threads, d_lub,
-      d_temp_storage, temp_storage_bytes, stream);
+  T const lub =
+      launch_sample_rosenbrock<T, CycleSize, PartitionNum, SamplePoints>(
+          interval,
+          cycle_start,
+          d_interval,
+          d_per_sample_ub,
+          d_thread_ubs,
+          num_threads,
+          d_lub,
+          d_temp_storage,
+          temp_storage_bytes,
+          stream);
 
   detail::check(cudaStreamDestroy(stream), "cudaStreamDestroy");
   detail::check(cudaFree(d_interval), "cudaFree");
@@ -449,8 +487,8 @@ __global__ void bound_rosenbrock_kernel(cu::interval<T>* d_interval,
   d_interval_lb[tid] = res.lb;
 }
 
-// d_interval is not re-copied here: it's the same buffer launch_sample_rosenbrock
-// just populated
+// d_interval is not re-copied here: it's the same buffer
+// launch_sample_rosenbrock just populated
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
 void launch_bound_rosenbrock(
     std::size_t dims,
@@ -473,8 +511,9 @@ void launch_bound_rosenbrock(
 
   dim3 BLOCK_DIM(512);
   dim3 GRID_DIM(static_cast<unsigned int>(detail::ceil_div(num_threads, 512)));
-  bound_rosenbrock_kernel<T, CycleSize, PartitionNum><<<GRID_DIM, BLOCK_DIM, 0, stream>>>(
-      d_interval, gub, d_prune_interval, d_interval_lb, dims, cycle_start);
+  bound_rosenbrock_kernel<T, CycleSize, PartitionNum>
+      <<<GRID_DIM, BLOCK_DIM, 0, stream>>>(
+          d_interval, gub, d_prune_interval, d_interval_lb, dims, cycle_start);
   detail::check(cudaGetLastError(), "cudaGetLastError");
 
   // populates an array of PartitionNum ^ CycleSize bools (one per interval)
@@ -482,12 +521,14 @@ void launch_bound_rosenbrock(
                                 d_prune_interval,
                                 num_threads * sizeof(bool),
                                 cudaMemcpyDeviceToHost,
-                                stream), "cudaMemcpyAsync");
+                                stream),
+                "cudaMemcpyAsync");
   detail::check(cudaMemcpyAsync(lb_results.data(),
                                 d_interval_lb,
                                 num_threads * sizeof(T),
                                 cudaMemcpyDeviceToHost,
-                                stream), "cudaMemcpyAsync");
+                                stream),
+                "cudaMemcpyAsync");
 
   detail::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
 }
@@ -505,7 +546,8 @@ void launch_bound_rosenbrock(
 {
   std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
 
-  cu::interval<T>* d_interval = detail::alloc_device<cu::interval<T>>(interval.size());
+  cu::interval<T>* d_interval =
+      detail::alloc_device<cu::interval<T>>(interval.size());
   bool* d_prune_interval = detail::alloc_device<bool>(num_threads);
   T* d_interval_lb = detail::alloc_device<T>(num_threads);
 
@@ -516,12 +558,20 @@ void launch_bound_rosenbrock(
                                 interval.data(),
                                 interval.size() * sizeof(cu::interval<T>),
                                 cudaMemcpyHostToDevice,
-                                stream), "cudaMemcpyAsync");
+                                stream),
+                "cudaMemcpyAsync");
   detail::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
 
-  launch_bound_rosenbrock<T, CycleSize, PartitionNum>(
-      interval.size(), gub, cycle_start, d_interval, d_prune_interval, d_interval_lb,
-      num_threads, interval_results, lb_results, stream);
+  launch_bound_rosenbrock<T, CycleSize, PartitionNum>(interval.size(),
+                                                      gub,
+                                                      cycle_start,
+                                                      d_interval,
+                                                      d_prune_interval,
+                                                      d_interval_lb,
+                                                      num_threads,
+                                                      interval_results,
+                                                      lb_results,
+                                                      stream);
 
   detail::check(cudaStreamDestroy(stream), "cudaStreamDestroy");
   detail::check(cudaFree(d_interval), "cudaFree");

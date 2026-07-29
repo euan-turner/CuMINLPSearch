@@ -15,12 +15,13 @@
 // what makes host/device agreement structural rather than something to prove
 // by test (TEST_EXTENSION.md §4a).
 #if defined(__CUDACC__)
-#define CUMINLP_HD __host__ __device__
+#  define CUMINLP_HD __host__ __device__
 #else
-#define CUMINLP_HD
+#  define CUMINLP_HD
 #endif
 
-namespace cuminlp::decode {
+namespace cuminlp::decode
+{
 
 // Decodes one slot's contribution to a dimension's bounds: `part` is this
 // slot's index into its `fan_out`-way radix (see
@@ -38,8 +39,10 @@ namespace cuminlp::decode {
 // (a clamped duplicate is still inside the parent domain), just possibly a
 // duplicate evaluation.
 template<typename T>
-CUMINLP_HD inline void slot_bounds(SlotKind kind, const cu::interval<T>& parent,
-                                   std::size_t part, std::size_t fan_out,
+CUMINLP_HD inline void slot_bounds(SlotKind kind,
+                                   const cu::interval<T>& parent,
+                                   std::size_t part,
+                                   std::size_t fan_out,
                                    cu::interval<T>& bound)
 {
   switch (kind) {
@@ -47,7 +50,9 @@ CUMINLP_HD inline void slot_bounds(SlotKind kind, const cu::interval<T>& parent,
     case SlotKind::BinaryEnumerate: {
       T lo = std::ceil(parent.lb);
       T value = lo + static_cast<T>(part);
-      if (value > parent.ub) value = parent.ub;
+      if (value > parent.ub) {
+        value = parent.ub;
+      }
       bound.lb = value;
       bound.ub = value;
       break;
