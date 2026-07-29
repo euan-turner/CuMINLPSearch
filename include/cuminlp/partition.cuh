@@ -2,6 +2,7 @@
 
 #include "composition_policy.hpp"
 #include "search.hpp"
+#include "slot_decode.hpp"
 
 namespace cuminlp::partition
 {
@@ -154,32 +155,13 @@ __device__ void get_slot_bounds(const SlotContext<CycleSize>& ctx,
   for (std::size_t j = 0; j < CycleSize; ++j) {
     if (ctx.var_ids[j] != dim) continue;
 
-    const cu::interval<T>& parent = interval[dim];
-    switch (ctx.kind[j]) {
-      case SlotKind::IntegerEnumerate:
-      case SlotKind::BinaryEnumerate: {
-        // The region index maps directly to an integer offset from lb. A
-        // Binary's domain is always exactly size 2, matching its fan-out
-        // exactly, but an IntegerEnumerate slot's true remaining domain can
-        // be narrower than PartitionNum -- clamp rather than produce an
-        // out-of-range point. Clamping stays sound (a clamped duplicate is
-        // still a subset of the true domain), it just re-evaluates that
-        // duplicate; marking these regions infeasible outright to skip the
-        // wasted work is a follow-up.
-        T value = parent.lb + static_cast<T>(ctx.part[j]);
-        if (value > parent.ub) value = parent.ub;
-        bound.lb = value;
-        bound.ub = value;
-        break;
-      }
-      case SlotKind::Continuous:
-      case SlotKind::IntegerBisect: {
-        T width = (parent.ub - parent.lb) / static_cast<T>(ctx.fan_out[j]);
-        bound.lb = parent.lb + width * static_cast<T>(ctx.part[j]);
-        bound.ub = parent.lb + width * static_cast<T>(ctx.part[j] + 1);
-        break;
-      }
-    }
+    // Delegates to the same decode CompositionInterval::materialise uses
+    // host-side (search.hpp), so host/device agreement is structural rather
+    // than two hand-written implementations that happen to match (see
+    // TEST_EXTENSION.md §4a and slot_decode.hpp).
+    cuminlp::decode::slot_bounds<T>(ctx.kind[j], interval[dim],
+                                    static_cast<std::size_t>(ctx.part[j]),
+                                    static_cast<std::size_t>(ctx.fan_out[j]), bound);
     return;
   }
 

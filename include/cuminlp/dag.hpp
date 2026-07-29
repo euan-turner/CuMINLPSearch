@@ -1,8 +1,11 @@
 #pragma once
 
+#include <cmath>
 #include <cuinterval/interval.h>
 #include <limits>
 #include <vector>
+
+#include "cuminlp/errors.hpp"
 
 namespace cuminlp::dag {
 
@@ -68,9 +71,13 @@ public:
 
   friend Expr operator+(Expr a, Expr b) { return {a.graph, a.graph->emit(Op::Add, {a.node_id, b.node_id})}; }
   friend Expr operator-(Expr a, Expr b) { return {a.graph, a.graph->emit(Op::Sub, {a.node_id, b.node_id})}; }
-  friend Expr operator-(Expr a) { return {a.graph, a.graph->emit(Op::Neg, {a.node_id})}; }
-  friend Expr operator*(Expr a, Expr b) { 
+  friend Expr operator-(Expr a) {
+    if (a.is_const()) return a.constant(-a.const_value());
+    return {a.graph, a.graph->emit(Op::Neg, {a.node_id})};
+  }
+  friend Expr operator*(Expr a, Expr b) {
     if (a.node_id == b.node_id) {
+      if (a.is_const()) return a.constant(a.const_value() * a.const_value());
       return {a.graph, a.graph->emit(Op::Sqr, {a.node_id})};
     }
     else {
@@ -88,12 +95,26 @@ public:
   friend Expr operator/(Expr a, T b) { return a / a.constant(b); }
   friend Expr operator/(T a, Expr b) { return b.constant(a) / b; }
 
+  // Unary ops applied directly to a Const operand constant-fold transparently
+  // rather than emitting a degenerate op node over a Const (see
+  // TEST_EXTENSION.md §1b): callers don't need to special-case
+  // sqrt(p.fixed(2.0)) etc, and validate() never has to reject them.
   friend Expr sqr(Expr a) { return a * a; }
-  friend Expr sqrt(Expr a) { return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})}; }
-  friend Expr exp(Expr a) { return {a.graph, a.graph->emit(Op::Exp, {a.node_id})}; }
-  friend Expr log(Expr a) { return {a.graph, a.graph->emit(Op::Log, {a.node_id})}; }
+  friend Expr sqrt(Expr a) {
+    if (a.is_const()) return a.constant(std::sqrt(a.const_value()));
+    return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})};
+  }
+  friend Expr exp(Expr a) {
+    if (a.is_const()) return a.constant(std::exp(a.const_value()));
+    return {a.graph, a.graph->emit(Op::Exp, {a.node_id})};
+  }
+  friend Expr log(Expr a) {
+    if (a.is_const()) return a.constant(std::log(a.const_value()));
+    return {a.graph, a.graph->emit(Op::Log, {a.node_id})};
+  }
 
   friend Expr pow(Expr a, int n) {
+    if (a.is_const()) return a.constant(static_cast<T>(std::pow(a.const_value(), n)));
     DAGNodePayload<T> p;
     p.int_exp = n;
     return {a.graph, a.graph->emit(Op::IPow, {a.node_id}, p)};
@@ -104,6 +125,9 @@ public:
 private:
   ExprDAG<T>* graph;
   std::size_t node_id;
+
+  bool is_const() const { return graph->nodes[node_id].op == Op::Const; }
+  T const_value() const { return graph->nodes[node_id].payload.constant; }
 
   Expr constant(T c) const {
     DAGNodePayload<T> p;
@@ -141,6 +165,18 @@ struct ConstraintRef {
  */
 template<typename T>
 struct Problem {
+  Problem() = default;
+
+  // Every Expr handed out by var()/fixed()/etc points at &this->graph. A
+  // copy would leave those Exprs aliasing the original's graph while the
+  // copy holds an independent one (TEST_EXTENSION.md §1a), so Problem is
+  // move-only: copying is a caller mistake worth a compile error rather
+  // than silent aliasing.
+  Problem(const Problem&) = delete;
+  Problem& operator=(const Problem&) = delete;
+  Problem(Problem&&) = default;
+  Problem& operator=(Problem&&) = default;
+
   Expr<T> var(T lb, T ub, VarKind kind = VarKind::Continuous) {
     std::size_t idx = box_bounds.size();
     box_bounds.push_back(cu::interval<T>{lb, ub});
@@ -174,6 +210,89 @@ struct Problem {
 
   void set_objective(Expr<T> e) { objective_root = e.id(); }
   void add_constraint(Expr<T> lhs, Cmp cmp, T rhs) { constraints.push_back({lhs.id(), cmp, rhs}); }
+
+  /**
+   * @brief Checks every structural invariant of this Problem and its graph,
+   * throwing on the first violation.
+   *
+   * Deliberately host-only and device-free: every malformed-Problem rejection
+   * must be reachable without a CUDA device, so the DAG/Problem test targets
+   * don't need a GPU and so callers get a typed error at construction rather
+   * than an untyped throw from deep inside GraphBuilder. See
+   * TEST_EXTENSION.md §1-2 for the invariants this covers. Note: an unbounded
+   * (or one-sided-bounded) variable is deliberately not rejected here yet --
+   * some real problems genuinely don't have both bounds, and the defined
+   * partitioning behavior for that case is still an open decision.
+   */
+  void validate() const {
+    // §1: graph.nodes bookkeeping -- defense in depth, always true by
+    // construction via emit()/var(), but cheap to check and this is the one
+    // place callers can rely on it having been checked.
+    for (const DAGNode<T>& node : graph.nodes) {
+      for (std::size_t in_id : node.in) {
+        if (in_id >= node.id) {
+          throw InvalidDAG("DAG node operand id is not strictly less than the node's own id; "
+                           "topological-order invariant violated");
+        }
+      }
+      std::size_t expected_op_count = 1;
+      for (std::size_t in_id : node.in) expected_op_count += graph.nodes[in_id].op_count;
+      if (node.op_count != expected_op_count) {
+        throw InvalidDAG("DAG node op_count does not match the size of its subtree");
+      }
+    }
+
+    std::size_t var_node_count = 0;
+    for (const DAGNode<T>& node : graph.nodes) {
+      if (node.op == Op::Var) ++var_node_count;
+    }
+    if (var_node_count != box_bounds.size() || box_bounds.size() != var_kinds.size()) {
+      throw InvalidDAG("box_bounds/var_kinds are out of sync with the number of Op::Var nodes");
+    }
+
+    // §1b: a Const can never be an objective/constraint root -- unlike a
+    // unary op applied to a Const, this isn't foldable into a well-defined
+    // value (there's no expression left to evaluate).
+    if (objective_root < graph.nodes.size() && graph.nodes[objective_root].op == Op::Const) {
+      throw InvalidDAG("objective root is a bare Const; set_objective was given a fixed() value "
+                       "rather than an expression to optimise");
+    }
+    for (const ConstraintRef<T>& c : constraints) {
+      if (graph.nodes[c.root_id].op == Op::Const) {
+        throw InvalidDAG("constraint root is a bare Const; add_constraint was given a fixed() "
+                         "value rather than an expression");
+      }
+    }
+
+    // §2: Problem-level checks, independent of graph well-formedness.
+    if (var_kinds.empty()) {
+      throw InvalidProblem("Problem has zero variables");
+    }
+    if (objective_root == std::numeric_limits<std::size_t>::max()) {
+      throw InvalidProblem("Problem's objective was never set (set_objective was never called)");
+    }
+    for (std::size_t i = 0; i < box_bounds.size(); ++i) {
+      const cu::interval<T>& b = box_bounds[i];
+      if (!(b.lb <= b.ub)) {
+        throw InvalidProblem("variable's lower bound exceeds its upper bound");
+      }
+      // floor(x) <= x always, so floor(x) < x (rather than !=) is "not
+      // already integer-valued" -- also sidesteps -Wfloat-equal.
+      if (var_kinds[i] == VarKind::Integer || var_kinds[i] == VarKind::Binary) {
+        if (std::floor(b.lb) < b.lb || std::floor(b.ub) < b.ub) {
+          throw InvalidProblem("Integer/Binary variable has non-integer-valued bounds");
+        }
+      }
+      if (var_kinds[i] == VarKind::Binary && (b.lb < T(0) || b.lb > T(0) || b.ub < T(1) || b.ub > T(1))) {
+        throw InvalidProblem("Binary variable's bounds are not exactly [0,1]");
+      }
+    }
+    for (const ConstraintRef<T>& c : constraints) {
+      if (!std::isfinite(c.rhs)) {
+        throw InvalidProblem("constraint rhs must be finite");
+      }
+    }
+  }
 
   ExprDAG<T> graph;
   std::vector<cu::interval<T>> box_bounds;

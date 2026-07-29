@@ -58,7 +58,6 @@ public:
     using search::IntervalHistory;
     using search::IntervalPQueue;
 
-    std::size_t const dims = problem.box_bounds.size();
     std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
 
     // One (point, interval) replay pair per Composition actually encountered,
@@ -131,12 +130,7 @@ public:
       GLB_ = cur.lb;
 
       std::vector<cu::interval<T>> box;
-      box.resize(dims);
-      if (cur.pidx == 0) {
-        box = problem.box_bounds;
-      } else {
-        cur.materialise(history, box, *policy_, var_kinds);
-      }
+      cur.materialise(history, box, *policy_, var_kinds, problem.box_bounds);
 
       auto const assignment = policy_->choose(box, var_kinds);
 
@@ -144,8 +138,9 @@ public:
       for (const auto& b : box) {
         if (b.ub > b.lb) ++live_count;
       }
-      ExactGraphs* const eg =
-          (live_count <= CycleSize) ? find_exact_graphs(assignment.composition) : nullptr;
+      ExactGraphs* const eg = can_fathom_without_children(live_count, assignment.composition)
+          ? find_exact_graphs(assignment.composition)
+          : nullptr;
 
       if (eg != nullptr) {
         // Every live dimension is enumerated, so this launch's ArgMin is the

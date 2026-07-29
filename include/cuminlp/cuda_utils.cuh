@@ -7,6 +7,28 @@
 
 #include <cuda_runtime.h>
 
+#include "cuminlp/errors.hpp"
+
+namespace cuminlp
+{
+
+// A CUDA runtime/driver call failed. Carries the cudaError_t so callers
+// can branch on the specific failure, not just the message.
+class CUDAError : public error {
+public:
+  CUDAError(cudaError_t code, const char* api_call)
+      : error(std::string(api_call) + " failed: " + cudaGetErrorString(code))
+      , code_(code)
+  {
+  }
+  cudaError_t code() const noexcept { return code_; }
+
+private:
+  cudaError_t code_;
+};
+
+}  // namespace cuminlp
+
 namespace cuminlp::detail
 {
 
@@ -25,7 +47,7 @@ constexpr std::size_t ipow()
 inline void check(cudaError_t err, const char* what)
 {
   if (err != cudaSuccess) {
-    throw std::runtime_error(std::string(what) + " failed: " + cudaGetErrorString(err));
+    throw cuminlp::CUDAError(err, what);
   }
 }
 

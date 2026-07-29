@@ -30,6 +30,33 @@ target_compile_features(cuminlp_composition_policy_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_composition_policy_test)
 
+# Host-only: dag.hpp/Problem::validate() is deliberately device-free (see
+# TEST_EXTENSION.md's "Problem::validate()" section), so §1-2's invariants
+# are all testable without a CUDA device.
+add_executable(cuminlp_dag_test source/dag_test.cpp)
+target_link_libraries(
+    cuminlp_dag_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_dag_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_dag_test)
+
+# Host-only: cuminlp::decode::slot_bounds (slot_decode.hpp) is a CUMINLP_HD
+# function that's a no-op host function outside __CUDACC__, and
+# CompositionInterval::materialise (search.hpp) has no CUDA dependency, so
+# §3a/§3b/§4a's decode invariants don't need a CUDA device either.
+add_executable(cuminlp_decode_test source/decode_test.cpp)
+target_link_libraries(
+    cuminlp_decode_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_decode_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_decode_test)
+
 # Checks rosenbrock_kernel/interval_rosenbrock_kernel against independent CPU
 # reference implementations (see rosenbrock_test.cu). Requires an actual CUDA
 # device. -frounding-math is needed for the CpuRounding oracle helpers (see
@@ -73,3 +100,23 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 catch_discover_tests(cuminlp_sample_discrete_test)
+
+# Exercises GraphReplay/GraphBuilder's public API end-to-end (build, set_domain,
+# launch, candidate reporting): move-only + moved-from safety, ShapeMismatch on
+# a mismatched set_domain() size, candidate/has_candidate/candidate_point
+# self-consistency, and launch determinism (TEST_EXTENSION.md §5). Requires an
+# actual CUDA device.
+add_executable(cuminlp_graph_replay_test source/graph_replay_test.cu)
+target_link_libraries(
+    cuminlp_graph_replay_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_graph_replay_test PRIVATE cxx_std_20)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_graph_replay_test PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
+catch_discover_tests(cuminlp_graph_replay_test)

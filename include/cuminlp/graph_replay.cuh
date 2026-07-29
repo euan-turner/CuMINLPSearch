@@ -1053,8 +1053,12 @@ public:
   // interval graph's root kernel takes no such argument and ignores it.
   void set_domain(std::span<const cu::interval<T>> domain,
                   const std::array<std::size_t, CycleSize>& var_ids, std::size_t salt = 0) {
+    if (exec_ == nullptr) {
+      throw cuminlp::error("set_domain() called on a moved-from GraphReplay");
+    }
     if (domain.size() != n_vars_) {
-      throw std::runtime_error("set_domain: domain size does not match the problem's variable count");
+      throw cuminlp::ShapeMismatch(
+          "set_domain: domain size does not match the problem's variable count");
     }
     detail::check(cudaMemcpy(domain_buffer_, domain.data(), n_vars_ * sizeof(cu::interval<T>),
                              cudaMemcpyHostToDevice),
@@ -1108,6 +1112,9 @@ public:
   // this launch's own feasibility-masked min objective upper bound, and
   // candidate_point() the variable values that attained it.
   void launch(cudaStream_t stream) {
+    if (exec_ == nullptr) {
+      throw cuminlp::error("launch() called on a moved-from GraphReplay");
+    }
     detail::check(cudaGraphLaunch(exec_, stream), "cudaGraphLaunch");
     detail::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
     detail::check(cudaMemcpy(feasible_host_.data(), feasible_buffer_,

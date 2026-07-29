@@ -7,9 +7,16 @@
 #include <utility>
 #include <vector>
 
-#include <cuinterval/cuinterval.h>
+// Only field access (.lb/.ub) on cu::interval<T> below, never interval
+// arithmetic -- interval.h (a plain struct definition) is enough, and unlike
+// cuinterval.h (which pulls in operations.cuh's unconditional __device__
+// arithmetic overloads) it's compilable by a plain host compiler, which is
+// what keeps this header's search::CompositionInterval::materialise
+// host-testable without a CUDA toolchain (TEST_EXTENSION.md §4a).
+#include <cuinterval/interval.h>
 
 #include "cuminlp/composition_policy.hpp"
+#include "cuminlp/slot_decode.hpp"
 
 namespace cuminlp::search
 {
@@ -172,19 +179,25 @@ struct CompositionInterval
   // `policy`/`var_kinds` must be the same ones used to produce this interval
   // on device, so re-invoking `policy.choose()` on the reconstructed parent
   // box deterministically recovers the same SlotAssignment (see
-  // CompositionPolicy's class comment), which is then decoded exactly as
-  // partition::get_slot_bounds does on device.
+  // CompositionPolicy's class comment), which is then decoded via the same
+  // cuminlp::decode::slot_bounds partition::get_slot_bounds calls on device
+  // (TEST_EXTENSION.md §4a) -- host/device agreement is structural, not
+  // asserted by two hand-written implementations.
+  //
+  // `root_box` is the true root domain (Problem::box_bounds) for pidx == 0:
+  // there is no parent to look up at the root, so it can't be reconstructed
+  // from `history` the way every other node's box can. Passing it explicitly
+  // keeps materialise() usable as the single decode path for every node,
+  // including the root, rather than callers special-casing pidx == 0
+  // themselves (see GraphDriver::solve()).
   void materialise(const IntervalHistory<T>& history,
                    std::vector<cu::interval<T>>& out,
                    const cuminlp::CompositionPolicy<T, CycleSize>& policy,
-                   std::span<const dag::VarKind> var_kinds) const
+                   std::span<const dag::VarKind> var_kinds,
+                   std::span<const cu::interval<T>> root_box) const
   {
     if (pidx == 0) {
-      // first interval - full (unbounded) domain
-      for (auto& b : out) {
-        b.lb = std::numeric_limits<T>::lowest();
-        b.ub = std::numeric_limits<T>::max();
-      }
+      out.assign(root_box.begin(), root_box.end());
       return;
     }
 
@@ -194,8 +207,8 @@ struct CompositionInterval
     cuminlp::SlotAssignment<CycleSize> assignment = policy.choose(parent, var_kinds);
 
     // Decode sidx into a per-slot partition/enumeration index, mirroring
-    // partition::make_slot_context, then narrow each cycled dimension,
-    // mirroring partition::get_slot_bounds.
+    // partition::make_slot_context, then narrow each cycled dimension via
+    // the same decode partition::get_slot_bounds uses on device.
     std::size_t idx = sidx;
     for (std::size_t j = 0; j < CycleSize; ++j) {
       SlotKind kind = assignment.composition[j];
@@ -204,24 +217,7 @@ struct CompositionInterval
       idx /= fan_out;
 
       std::size_t dim = assignment.var_ids[j];
-      const cu::interval<T>& pb = parent[dim];
-      switch (kind) {
-        case SlotKind::IntegerEnumerate:
-        case SlotKind::BinaryEnumerate: {
-          T value = pb.lb + static_cast<T>(part);
-          if (value > pb.ub) value = pb.ub;
-          out[dim].lb = value;
-          out[dim].ub = value;
-          break;
-        }
-        case SlotKind::Continuous:
-        case SlotKind::IntegerBisect: {
-          T width = (pb.ub - pb.lb) / static_cast<T>(fan_out);
-          out[dim].lb = pb.lb + width * static_cast<T>(part);
-          out[dim].ub = pb.lb + width * static_cast<T>(part + 1);
-          break;
-        }
-      }
+      cuminlp::decode::slot_bounds<T>(kind, parent[dim], part, fan_out, out[dim]);
     }
   }
 };
