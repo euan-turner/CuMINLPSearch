@@ -61,7 +61,7 @@ target_compile_features(fixed_rosenbrock PRIVATE cxx_std_20)
 # GraphDriver -- the DAG/CUDA-graph-replay evaluator -- instead of the
 # hand-written kernels in FixedRosenbrockDriver. Run alongside
 # fixed_rosenbrock to compare the two.
-add_executable(graph_rosenbrock source/graph_replay_rosenbrock_main.cu)
+add_executable(graph_rosenbrock source/rosenbrock.cu)
 
 target_link_libraries(graph_rosenbrock PRIVATE cuminlp::lib)
 
@@ -97,17 +97,17 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(graph_power_series PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
-add_executable(cuminlp_graph_replay_example source/graph_replay_example.cu)
+# qps
+add_executable(graph_qps source/qps.cu)
 
-target_link_libraries(cuminlp_graph_replay_example PRIVATE cuminlp::lib)
+target_link_libraries(graph_qps PRIVATE cuminlp::lib)
 
-target_compile_features(cuminlp_graph_replay_example PRIVATE cxx_std_20)
+target_compile_features(graph_qps PRIVATE cxx_std_20)
 
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set_target_properties(
-      cuminlp_graph_replay_example PROPERTIES CUDA_ARCHITECTURES native
-  )
+  set_target_properties(graph_qps PROPERTIES CUDA_ARCHITECTURES native)
 endif()
+
 
 # ---- Developer mode ----
 

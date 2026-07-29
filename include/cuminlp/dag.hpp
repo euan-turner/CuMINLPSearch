@@ -91,6 +91,12 @@ public:
   friend Expr sqrt(Expr a) { return {a.graph, a.graph->emit(Op::Sqrt, {a.node_id})}; }
   friend Expr exp(Expr a) { return {a.graph, a.graph->emit(Op::Exp, {a.node_id})}; }
 
+  friend Expr pow(Expr a, int n) {
+    DAGNodePayload<T> p;
+    p.int_exp = n;
+    return {a.graph, a.graph->emit(Op::IPow, {a.node_id}, p)};
+  }
+
   std::size_t id() const { return node_id; }
 
 private:
@@ -142,6 +148,10 @@ struct Problem {
   }
 
   Expr<T> var() { return var(std::numeric_limits<T>::lowest(), std::numeric_limits<T>::max()); }
+
+  Expr<T> lb_var(T lb) { return var(lb, std::numeric_limits<T>::max()); }
+
+  Expr<T> ub_var(T ub) { return var(std::numeric_limits<T>::lowest(), ub); }
 
   /**
    * @brief Emits a constant node holding `value`.

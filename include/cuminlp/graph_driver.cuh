@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -58,6 +59,7 @@ public:
     });
 
     bool converged = false;
+    std::size_t pruned_infeasible = 0;
 
     while (iter_idx_ < iter_limit_ && !pending.empty() && GUB_ - GLB_ > tolerance_)
     {
@@ -83,17 +85,29 @@ public:
       std::size_t const box_idx = history.enqueue(box);
       std::size_t const child_cycle_start = (cur.cycle_start + CycleSize) % dims;
 
-      // GUB sampling: candidate is the best sampled, feasible value from this domain
-      point_replay.set_domain(box, child_cycle_start);
+      // GUB sampling: candidate is the best sampled, feasible value from this
+      // domain. iter_idx_ is the sampler's salt, so a box that gets re-visited
+      // (or shares its non-cycled dimensions with a sibling) draws fresh points
+      // rather than replaying the same ones.
+      point_replay.set_domain(box, child_cycle_start, iter_idx_);
       point_replay.launch(/*stream=*/0);
       double cand = static_cast<double>(point_replay.candidate());
       GUB_ = std::min(GUB_, cand);
 
-      // Interval analysis of sub-domains and GUB pruning
+      // Interval analysis of sub-domains, then feasibility and GUB pruning
       interval_replay.set_domain(box, child_cycle_start);
       interval_replay.launch(/*stream=*/0);
       auto obj_lb = interval_replay.obj_lb();
+      auto feasible = interval_replay.feasible();
       for (std::size_t tid = 0; tid < num_children; ++tid) {
+        // feasible[tid] == 0 means some constraint's interval range provably
+        // excludes its rhs over this whole child, so no point in it can satisfy
+        // the constraint. Sound to discard outright -- unlike the obj_lb test
+        // below, this holds regardless of GUB_.
+        if (!feasible[tid]) {
+          ++pruned_infeasible;
+          continue;
+        }
         if (obj_lb[tid] > GUB_) continue;
 
         pending.enqueue(CompressedInterval<T> {
@@ -108,10 +122,20 @@ public:
       std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_  << ", Candidate: " << cand << '\n';
     }
 
-    if (converged || pending.empty()) {
+    bool const found_incumbent = GUB_ < std::numeric_limits<double>::max();
+
+    if ((converged || pending.empty()) && found_incumbent) {
       // Fully explored: every remaining possibility has been pruned or
       // proven dominated, so the best upper bound found is proven optimal.
       GLB_ = GUB_;
+    } else if (pending.empty()) {
+      // Exhausted the queue without ever sampling a feasible point. Interval
+      // feasibility pruning can empty the frontier on its own, so this is a
+      // reachable outcome and must not be reported as convergence -- collapsing
+      // GLB_ onto an infinite GUB_ here would claim a proven optimum of +inf.
+      std::cout << "Search space exhausted with no feasible point sampled; either the "
+                   "problem is infeasible or point sampling never satisfied the "
+                   "constraints (likely for equalities).\n";
     } else {
       // GLB is smallest lower bound on any pending region, which is the first
       GLB_ = pending.peek().lb;
@@ -125,6 +149,7 @@ public:
               << GLB_ << " <= min <= " << GUB_ << '\n';
     std::cout << "Pending size: " << pending.size() << '\n';
     std::cout << "Viable regions: " << viable << '\n';
+    std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';
     return GUB_;
   }
 };

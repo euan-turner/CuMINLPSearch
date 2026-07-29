@@ -15,11 +15,16 @@ namespace
 // 30 variables, 6 fixed to break translational/rotational symmetry -> 24 free dims
 constexpr std::size_t POINTS = 10;
 constexpr std::size_t VARS = 3 * POINTS;
-constexpr std::size_t CYCLE_SIZE = 4;
-constexpr std::size_t PARTITION_NUM = 4;
+constexpr std::size_t CYCLE_SIZE = 2;
+constexpr std::size_t PARTITION_NUM = 20;
 constexpr std::size_t SAMPLE_POINTS = 10;
 }
 
+// 10000 iterations
+// subdomains is CYCLE_SIZE^PARTITION_NUM
+// CYCLE 4, PARTITION 10 = -22.0167
+// CYCLE 2, PARTITION 20 = -16.2154
+// CYCLE 8, PARTITION 5 = 
 auto main(int argc, char* argv[]) -> int
 {
   Problem<double> problem;
@@ -58,6 +63,7 @@ auto main(int argc, char* argv[]) -> int
   problem.set_objective(-45 + obj);
   
   int iters = std::stoi(argv[1]);
+
   cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(iters, 1e-9);
   drv.solve(problem);
 

@@ -56,9 +56,15 @@ __global__ void partition_variables_kernel(
 
 template<typename T>
 __device__ __forceinline__
-T sample_from_interval(T lb, T ub, std::size_t vid, std::size_t i)
+T sample_from_interval(T lb, T ub, std::size_t vid, std::size_t i,
+                       std::size_t region, std::size_t salt)
 {
-  std::uint64_t x = ((std::uint64_t)vid << 32) | i;
+  // Combine the four coordinates with distinct odd multipliers, then run the
+  // SplitMix64 finaliser over the result to avalanche them together.
+  std::uint64_t x = (std::uint64_t)vid    * 0x9e3779b97f4a7c15ULL;
+  x ^= (std::uint64_t)i      * 0xbf58476d1ce4e5b9ULL;
+  x ^= (std::uint64_t)region * 0x94d049bb133111ebULL;
+  x ^= (std::uint64_t)salt   * 0xd6e8feb86659fd93ULL;
 
   // SplitMix64
   x += 0x9e3779b97f4a7c15ULL;
@@ -84,8 +90,9 @@ T sample_from_interval(T lb, T ub, std::size_t vid, std::size_t i)
  * @param parent_domain interval domain being divided
  * @param cycle_start first of CycleSize variables being divided
  * @param var_buffers buffer for sampled points
- * @param n_vars 
- * @param n_regions 
+ * @param n_vars
+ * @param n_regions
+ * @param salt per-launch seed component, so re-visiting a box draws fresh points
  */
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum, std::size_t SamplePoints>
 __global__ void sample_points_kernel(
@@ -93,7 +100,8 @@ __global__ void sample_points_kernel(
   std::size_t cycle_start,
   T* const* __restrict__ var_buffers, // NUM_VARS x NUM_REGIONS x SamplePoints
   std::size_t n_vars,
-  std::size_t n_regions
+  std::size_t n_regions,
+  std::size_t salt
 ) {
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t num_threads = gridDim.x * blockDim.x;
@@ -105,7 +113,7 @@ __global__ void sample_points_kernel(
       partition::get_bounds(ctx, parent_domain, vid, v);
       for (std::size_t i = 0; i < SamplePoints; ++i) {
         // T p = v.lb + i * (v.ub - v.lb) / (SamplePoints - 1);
-        T p = sample_from_interval(v.lb, v.ub, vid, i);
+        T p = sample_from_interval(v.lb, v.ub, vid, i, r, salt);
         var_buffers[vid][r * SamplePoints + i] = p;
       }
     }
@@ -481,7 +489,8 @@ public:
     if constexpr (is_point) {
       root_node_ = detail::add_kernel_node(
           graph_, {}, sample_points_kernel<T, CycleSize, PartitionNum, SamplePoints>, root_grid_,
-          block_, domain_buffer, std::size_t {0}, var_buffers_device_, n_vars, n_regions_);
+          block_, domain_buffer, std::size_t {0}, var_buffers_device_, n_vars, n_regions_,
+          std::size_t {0});
     } else {
       root_node_ = detail::add_kernel_node(
           graph_, {}, partition_variables_kernel<T, CycleSize, PartitionNum>, root_grid_, block_,
@@ -674,6 +683,8 @@ private:
 template<typename T, typename V, std::size_t CycleSize, std::size_t PartitionNum,
          std::size_t SamplePoints = 1>
 class GraphReplay {
+  static constexpr bool is_point = std::is_same_v<V, T>;
+
 public:
   static GraphReplay build(const Problem<T>& problem, std::size_t max_regions) {
     GraphReplay replay;
@@ -836,7 +847,10 @@ public:
   // (fixed buffer address, topology unchanged);
   // cycle_start is a baked-in kernel arg, updated via
   // cudaGraphExecKernelNodeSetParams
-  void set_domain(std::span<const cu::interval<T>> domain, std::size_t cycle_start) {
+  // `salt` seeds the point graph's sampler (see sample_from_interval); the
+  // interval graph's root kernel takes no such argument and ignores it.
+  void set_domain(std::span<const cu::interval<T>> domain, std::size_t cycle_start,
+                  std::size_t salt = 0) {
     if (domain.size() != n_vars_) {
       throw std::runtime_error("set_domain: domain size does not match the problem's variable count");
     }
@@ -844,27 +858,31 @@ public:
                              cudaMemcpyHostToDevice),
                  "cudaMemcpy");
 
-    void* kernel_args[] = {
-        const_cast<void*>(static_cast<const void*>(&domain_buffer_)),
-        const_cast<void*>(static_cast<const void*>(&cycle_start)),
-        const_cast<void*>(static_cast<const void*>(&var_buffers_device_)),
-        const_cast<void*>(static_cast<const void*>(&n_vars_)),
-        const_cast<void*>(static_cast<const void*>(&n_regions_)),
-    };
     cudaKernelNodeParams params {};
-    if constexpr (std::is_same_v<V, T>) {
-      params.func = reinterpret_cast<void*>(sample_points_kernel<T, CycleSize, PartitionNum, SamplePoints>);
-    } else {
-      params.func = reinterpret_cast<void*>(partition_variables_kernel<T, CycleSize, PartitionNum>);
-    }
     params.gridDim = root_grid_;
     params.blockDim = block_;
     params.sharedMemBytes = 0;
-    params.kernelParams = kernel_args;
     params.extra = nullptr;
 
-    detail::check(cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
-                 "cudaGraphExecKernelNodeSetParams");
+    // The two root kernels differ in arity, so the argument arrays do too.
+    if constexpr (is_point) {
+      void* kernel_args[] = {
+          &domain_buffer_, &cycle_start, &var_buffers_device_, &n_vars_, &n_regions_, &salt,
+      };
+      params.func = reinterpret_cast<void*>(
+          sample_points_kernel<T, CycleSize, PartitionNum, SamplePoints>);
+      params.kernelParams = kernel_args;
+      detail::check(cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
+                   "cudaGraphExecKernelNodeSetParams");
+    } else {
+      void* kernel_args[] = {
+          &domain_buffer_, &cycle_start, &var_buffers_device_, &n_vars_, &n_regions_,
+      };
+      params.func = reinterpret_cast<void*>(partition_variables_kernel<T, CycleSize, PartitionNum>);
+      params.kernelParams = kernel_args;
+      detail::check(cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
+                   "cudaGraphExecKernelNodeSetParams");
+    }
   }
 
   // Launches the graph and synchronises; feasible[]/obj_lb[]/candidate() D2H
