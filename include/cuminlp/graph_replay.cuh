@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include <cub/cub.cuh>
+#include <cuda/std/limits>
 #include <cuinterval/interval.h>
 #include <cuinterval/cuinterval.h>
 #include "cuda_utils.cuh"
@@ -431,6 +433,35 @@ __global__ void mask_infeasible_kernel(const T* __restrict__ obj_ub,
   }
 }
 
+// Dispatches on V the same way lower_bound_of/upper_bound_of do, so the
+// no-witness case below writes a NaN of the right shape for either graph.
+template<typename T>
+__device__ void fill_nan(cu::interval<T>& v) { v.lb = T(NAN); v.ub = T(NAN); }
+template<typename T>
+__device__ void fill_nan(T& v) { v = T(NAN); }
+
+// Gathers the witness for the candidate: the per-variable values at the flat
+// element index the ArgMin reduction picked out of masked_ub[].
+//
+// CUB seeds the reduction with numeric_limits<T>::max(), so when every element
+// was masked infeasible the winner is a masked +inf (or the untouched seed) and
+// no witness exists; out[] is filled with NaN rather than an infeasible point.
+template<typename T, typename V>
+__global__ void gather_candidate_point_kernel(V* const* __restrict__ var_buffers,
+                                              const std::int64_t* __restrict__ argmin_index,
+                                              const T* __restrict__ candidate,
+                                              V* __restrict__ out,
+                                              std::size_t n_vars) {
+  std::size_t vid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (vid >= n_vars) return;
+
+  if (!(*candidate < ::cuda::std::numeric_limits<T>::max())) {  // also catches +inf and NaN
+    fill_nan(out[vid]);
+    return;
+  }
+  out[vid] = var_buffers[vid][*argmin_index];
+}
+
 // Wires a Problem's shared ExprDAG into the kernel nodes of one CUDA graph.
 // Contains per-Problem state, shared across each expression (objective or constraint),
 // so a node reachable from more than one is allocated and evaluated exactly once.
@@ -704,9 +735,12 @@ public:
     replay.obj_lb_buffer_ = detail::alloc_device<T>(replay.n_elems_);
     replay.obj_ub_buffer_ = detail::alloc_device<T>(replay.n_elems_);
     replay.masked_ub_buffer_ = detail::alloc_device<T>(replay.n_elems_);
-    replay.candidate_buffer_ = detail::alloc_device<T>(1);
+    replay.candidate_obj_buffer_ = detail::alloc_device<T>(1);
+    replay.candidate_index_buffer_ = detail::alloc_device<std::int64_t>(1);
+    replay.candidate_point_buffer_ = detail::alloc_device<V>(replay.n_vars_);
     replay.feasible_host_.resize(replay.n_elems_);
     replay.obj_lb_host_.resize(replay.n_elems_);
+    replay.candidate_point_host_.resize(replay.n_vars_);
 
     // Root memset: feasible[] = 1 each replay, race-free
     // fan-out target for every feasibility_check_kernel node.
@@ -763,19 +797,23 @@ public:
     // single child-graph node. This is a one-time build-time cost, not a
     // per-replay one.
     std::size_t temp_storage_bytes = 0;
-    detail::check(cub::DeviceReduce::Min(nullptr, temp_storage_bytes, replay.masked_ub_buffer_,
-                                         replay.candidate_buffer_, replay.n_elems_),
-                 "cub::DeviceReduce::Min (size query)");
+    detail::check(cub::DeviceReduce::ArgMin(nullptr, temp_storage_bytes, replay.masked_ub_buffer_,
+                                            replay.candidate_obj_buffer_,
+                                            replay.candidate_index_buffer_,
+                                            static_cast<std::int64_t>(replay.n_elems_)),
+                 "cub::DeviceReduce::ArgMin (size query)");
     replay.cub_temp_storage_ = detail::alloc_device<unsigned char>(temp_storage_bytes);
 
     cudaStream_t capture_stream;
     detail::check(cudaStreamCreate(&capture_stream), "cudaStreamCreate");
     detail::check(cudaStreamBeginCapture(capture_stream, cudaStreamCaptureModeThreadLocal),
                  "cudaStreamBeginCapture");
-    detail::check(cub::DeviceReduce::Min(replay.cub_temp_storage_, temp_storage_bytes,
-                                         replay.masked_ub_buffer_, replay.candidate_buffer_,
-                                         replay.n_elems_, capture_stream),
-                 "cub::DeviceReduce::Min (capture)");
+    detail::check(cub::DeviceReduce::ArgMin(replay.cub_temp_storage_, temp_storage_bytes,
+                                            replay.masked_ub_buffer_, replay.candidate_obj_buffer_,
+                                            replay.candidate_index_buffer_,
+                                            static_cast<std::int64_t>(replay.n_elems_),
+                                            capture_stream),
+                 "cub::DeviceReduce::ArgMin (capture)");
     cudaGraph_t captured_graph;
     detail::check(cudaStreamEndCapture(capture_stream, &captured_graph), "cudaStreamEndCapture");
     cudaGraphNode_t reduce_node;
@@ -784,7 +822,17 @@ public:
                  "cudaGraphAddChildGraphNode");
     detail::check(cudaGraphDestroy(captured_graph), "cudaGraphDestroy");
     detail::check(cudaStreamDestroy(capture_stream), "cudaStreamDestroy");
-    // reduce_node is the graph's terminal node; nothing downstream depends on it.
+
+    // One thread per variable, reading the index the reduction just wrote, so
+    // it must fan in off reduce_node. The var buffers it gathers from are
+    // written by root_node_, which reduce_node already transitively depends on.
+    // This is the graph's terminal node; nothing downstream depends on it.
+    detail::add_kernel_node(
+        builder.graph(), {reduce_node}, gather_candidate_point_kernel<T, V>,
+        dim3(static_cast<unsigned int>(detail::ceil_div(replay.n_vars_, 256))), builder.block(),
+        builder.var_buffers_device(), static_cast<const std::int64_t*>(replay.candidate_index_buffer_),
+        static_cast<const T*>(replay.candidate_obj_buffer_), replay.candidate_point_buffer_,
+        replay.n_vars_);
 
     replay.graph_ = builder.graph();
     detail::check(cudaGraphInstantiate(&replay.exec_, replay.graph_, 0), "cudaGraphInstantiate");
@@ -813,7 +861,9 @@ public:
     obj_lb_buffer_ = other.obj_lb_buffer_;
     obj_ub_buffer_ = other.obj_ub_buffer_;
     masked_ub_buffer_ = other.masked_ub_buffer_;
-    candidate_buffer_ = other.candidate_buffer_;
+    candidate_obj_buffer_ = other.candidate_obj_buffer_;
+    candidate_index_buffer_ = other.candidate_index_buffer_;
+    candidate_point_buffer_ = other.candidate_point_buffer_;
     cub_temp_storage_ = other.cub_temp_storage_;
     var_buffers_device_ = other.var_buffers_device_;
     root_node_ = other.root_node_;
@@ -825,7 +875,9 @@ public:
     node_buffers_ = std::move(other.node_buffers_);
     feasible_host_ = std::move(other.feasible_host_);
     obj_lb_host_ = std::move(other.obj_lb_host_);
+    candidate_point_host_ = std::move(other.candidate_point_host_);
     candidate_host_ = other.candidate_host_;
+    candidate_index_host_ = other.candidate_index_host_;
     other.graph_ = nullptr;
     other.exec_ = nullptr;
     other.domain_buffer_ = nullptr;
@@ -833,7 +885,9 @@ public:
     other.obj_lb_buffer_ = nullptr;
     other.obj_ub_buffer_ = nullptr;
     other.masked_ub_buffer_ = nullptr;
-    other.candidate_buffer_ = nullptr;
+    other.candidate_obj_buffer_ = nullptr;
+    other.candidate_index_buffer_ = nullptr;
+    other.candidate_point_buffer_ = nullptr;
     other.cub_temp_storage_ = nullptr;
     other.var_buffers_device_ = nullptr;
     other.root_node_ = nullptr;
@@ -885,9 +939,10 @@ public:
     }
   }
 
-  // Launches the graph and synchronises; feasible[]/obj_lb[]/candidate() D2H
-  // copy is a manual cudaMemcpy for now. candidate() is this launch's own
-  // feasibility-masked min objective upper bound
+  // Launches the graph and synchronises; feasible[]/obj_lb[]/candidate()/
+  // candidate_point() D2H copy is a manual cudaMemcpy for now. candidate() is
+  // this launch's own feasibility-masked min objective upper bound, and
+  // candidate_point() the variable values that attained it.
   void launch(cudaStream_t stream) {
     detail::check(cudaGraphLaunch(exec_, stream), "cudaGraphLaunch");
     detail::check(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
@@ -897,15 +952,35 @@ public:
     detail::check(cudaMemcpy(obj_lb_host_.data(), obj_lb_buffer_, n_elems_ * sizeof(T),
                              cudaMemcpyDeviceToHost),
                  "cudaMemcpy");
-    detail::check(cudaMemcpy(&candidate_host_, candidate_buffer_, sizeof(T), cudaMemcpyDeviceToHost),
+    detail::check(cudaMemcpy(&candidate_host_, candidate_obj_buffer_, sizeof(T), cudaMemcpyDeviceToHost),
+                 "cudaMemcpy");
+    detail::check(cudaMemcpy(&candidate_index_host_, candidate_index_buffer_, sizeof(std::int64_t),
+                             cudaMemcpyDeviceToHost),
+                 "cudaMemcpy");
+    detail::check(cudaMemcpy(candidate_point_host_.data(), candidate_point_buffer_,
+                             n_vars_ * sizeof(V), cudaMemcpyDeviceToHost),
                  "cudaMemcpy");
   }
 
   std::span<const unsigned char> feasible() const { return feasible_host_; }
   std::span<const T> obj_lb() const { return obj_lb_host_; }
   T candidate() const { return candidate_host_; }
+
+  // The argmin witness for candidate(), indexed by variable: for the point
+  // graph the exact sampled values, for the interval graph the argmin sub-box.
+  // All-NaN when this launch found no feasible element (candidate() is then
+  // CUB's numeric_limits<T>::max() seed) -- check has_candidate() first.
+  std::span<const V> candidate_point() const { return candidate_point_host_; }
+
+  // Flat element index the reduction picked; r * SamplePoints + i for the
+  // point graph, the region index for the interval graph.
+  std::int64_t candidate_index() const { return candidate_index_host_; }
+
+  bool has_candidate() const { return candidate_host_ < std::numeric_limits<T>::max(); }
+
   std::size_t n_regions() const { return n_regions_; }
   std::size_t n_elems() const { return n_elems_; }
+  std::size_t n_vars() const { return n_vars_; }
 
 private:
   GraphReplay() = default;
@@ -918,7 +993,9 @@ private:
     if (obj_lb_buffer_) cudaFree(obj_lb_buffer_);
     if (obj_ub_buffer_) cudaFree(obj_ub_buffer_);
     if (masked_ub_buffer_) cudaFree(masked_ub_buffer_);
-    if (candidate_buffer_) cudaFree(candidate_buffer_);
+    if (candidate_obj_buffer_) cudaFree(candidate_obj_buffer_);
+    if (candidate_index_buffer_) cudaFree(candidate_index_buffer_);
+    if (candidate_point_buffer_) cudaFree(candidate_point_buffer_);
     if (cub_temp_storage_) cudaFree(cub_temp_storage_);
     if (var_buffers_device_) cudaFree(var_buffers_device_);
     for (auto* buf : node_buffers_) {
@@ -934,13 +1011,17 @@ private:
   T* obj_lb_buffer_ = nullptr;                 // device, D2H-copied after each launch()
   T* obj_ub_buffer_ = nullptr;                 // device, feeds mask_infeasible_kernel
   T* masked_ub_buffer_ = nullptr;              // device, feeds the CUB reduction
-  T* candidate_buffer_ = nullptr;              // device, CUB reduction output (scalar)
+  T* candidate_obj_buffer_ = nullptr;              // device, CUB reduction output (scalar)
+  std::int64_t* candidate_index_buffer_ = nullptr; // device, CUB reduction output (flat index)
+  V* candidate_point_buffer_ = nullptr;        // device, n_vars_, gathered at the argmin index
   unsigned char* cub_temp_storage_ = nullptr;  // device, CUB scratch, sized once at build
   V** var_buffers_device_ = nullptr;
   std::vector<V*> node_buffers_;                // every op/Var node's buffer, owned here
   std::vector<unsigned char> feasible_host_;
   std::vector<T> obj_lb_host_;
+  std::vector<V> candidate_point_host_;                    // D2H-copied after each launch()
   T candidate_host_ = std::numeric_limits<T>::infinity();  // D2H-copied after each launch()
+  std::int64_t candidate_index_host_ = -1;                 // D2H-copied after each launch()
   std::size_t n_regions_ = 0;
   std::size_t n_elems_ = 0;
   std::size_t n_vars_ = 0;

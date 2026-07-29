@@ -29,6 +29,10 @@ class GraphDriver : public driver
 public:
   using driver::driver;
 
+  // The sampled point that attained GUB_, indexed by variable. Empty until
+  // solve() finds a feasible sample.
+  std::span<const T> best_point() const { return best_point_; }
+
   auto solve(const dag::Problem<T>& problem) -> double
   {
     using search::CompressedInterval;
@@ -92,7 +96,11 @@ public:
       point_replay.set_domain(box, child_cycle_start, iter_idx_);
       point_replay.launch(/*stream=*/0);
       double cand = static_cast<double>(point_replay.candidate());
-      GUB_ = std::min(GUB_, cand);
+      if (cand < GUB_) {
+        GUB_ = cand;
+        auto witness = point_replay.candidate_point();
+        best_point_.assign(witness.begin(), witness.end());
+      }
 
       // Interval analysis of sub-domains, then feasibility and GUB pruning
       interval_replay.set_domain(box, child_cycle_start);
@@ -150,8 +158,25 @@ public:
     std::cout << "Pending size: " << pending.size() << '\n';
     std::cout << "Viable regions: " << viable << '\n';
     std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';
+
+    if (found_incumbent) {
+      std::streamsize const prev_precision = std::cout.precision(12);
+      std::cout << "Argmin (sampled witness for GUB):" << '\n';
+      for (std::size_t i = 0; i < best_point_.size(); ++i) {
+        std::cout << "x[" << i << "], ";
+      }
+      std::cout << '\n' << "[";
+      for (std::size_t i = 0; i < best_point_.size(); ++i) {
+        std::cout << best_point_[i] << ", ";
+      }
+      std::cout << "]" << '\n';
+      std::cout.precision(prev_precision);
+    }
     return GUB_;
   }
+
+private:
+  std::vector<T> best_point_;
 };
 
 }  // namespace cuminlp
