@@ -56,7 +56,6 @@ enum class ErrorKind {
   NonScalar,            ///< sets/loops/tables: not GAMS scalar format
   Discrete,             ///< sos1/sos2/semicont/semiint: still no Problem form
   UnsupportedFunction,  ///< a real GAMS function we decline to approximate
-  UnsupportedExponent,  ///< `x**c` with a non-integer c that is not 0.5
   Unrepresentable,      ///< structurally fine, but has no form in Problem
   Io,                   ///< the file could not be read
 };

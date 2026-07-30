@@ -215,7 +215,7 @@ T sample_rosenbrock_cpu(const std::vector<cu::interval<T>>& iv,
                         std::size_t cycle_start)
 {
   std::size_t const dims = iv.size();
-  std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
+  std::size_t const num_threads = pown<PartitionNum, CycleSize>();
 
   T lub = std::numeric_limits<T>::max();
 
@@ -355,16 +355,16 @@ TEMPLATE_TEST_CASE(
 // gub-monotonicity) are structurally independent of this oracle and of each
 // other, and exist specifically to catch that class of correlated bug.
 template<typename T, std::size_t CycleSize, std::size_t PartitionNum>
-std::array<bool, ipow<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
+std::array<bool, pown<PartitionNum, CycleSize>()> bound_rosenbrock_cpu(
     const std::vector<cu::interval<T>>& iv,
     T gub,
     std::size_t cycle_start,
-    std::array<T, ipow<PartitionNum, CycleSize>()>& lb_out)
+    std::array<T, pown<PartitionNum, CycleSize>()>& lb_out)
 {
   std::size_t const dims = iv.size();
-  std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
+  std::size_t const num_threads = pown<PartitionNum, CycleSize>();
 
-  std::array<bool, ipow<PartitionNum, CycleSize>()> result {};
+  std::array<bool, pown<PartitionNum, CycleSize>()> result {};
 
   for (std::size_t tid = 0; tid < num_threads; ++tid) {
     std::size_t part[CycleSize];
@@ -446,12 +446,12 @@ TEMPLATE_TEST_CASE(
     for (std::size_t i = 0; i < N; ++i) {
       T const gub = gub_dist(rng);
 
-      std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> gpu_res {};
-      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> gpu_lb {};
+      std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> gpu_res {};
+      std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> gpu_lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
           intervals[i], gub, cycle_start, gpu_res, gpu_lb);
 
-      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> cpu_lb {};
+      std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> cpu_lb {};
       auto const cpu_res = bound_rosenbrock_cpu<T, CYCLE_SIZE, PARTITION_NUM>(
           intervals[i], gub, cycle_start, cpu_lb);
 
@@ -489,8 +489,8 @@ TEMPLATE_TEST_CASE(
   // Rosenbrock is a sum of squares, so every subinterval's enclosure lower
   // bound is >= 0; a gub below that prunes every subinterval.
   {
-    std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> res {};
-    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
+    std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> res {};
+    std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> lb {};
     launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
         iv, static_cast<T>(-1), 0, res, lb);
     REQUIRE(std::all_of(res.begin(), res.end(), [](bool p) { return p; }));
@@ -502,8 +502,8 @@ TEMPLATE_TEST_CASE(
   // A gub far above anything achievable over [-30, 30]^DIMS keeps every
   // subinterval.
   {
-    std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> res {};
-    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
+    std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> res {};
+    std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> lb {};
     launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
         iv, static_cast<T>(1e15), 0, res, lb);
     REQUIRE(std::none_of(res.begin(), res.end(), [](bool p) { return p; }));
@@ -553,8 +553,8 @@ TEMPLATE_TEST_CASE(
     for (std::size_t i = 0; i < N; ++i) {
       T const gub = gub_dist(rng);
 
-      std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
-      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
+      std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
+      std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
           intervals[i], gub, cycle_start, pruned, lb);
 
@@ -635,13 +635,13 @@ TEMPLATE_TEST_CASE(
                                  static_cast<T>(1e10)};
 
   for (std::size_t i = 0; i < N; ++i) {
-    std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> prev_pruned {};
+    std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> prev_pruned {};
     prev_pruned.fill(true);
-    std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> first_lb {};
+    std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> first_lb {};
     bool have_first_lb = false;
     for (T const gub : gubs) {
-      std::array<bool, ipow<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
-      std::array<T, ipow<PARTITION_NUM, CYCLE_SIZE>()> lb {};
+      std::array<bool, pown<PARTITION_NUM, CYCLE_SIZE>()> pruned {};
+      std::array<T, pown<PARTITION_NUM, CYCLE_SIZE>()> lb {};
       launch_bound_rosenbrock<T, CYCLE_SIZE, PARTITION_NUM>(
           intervals[i], gub, 0, pruned, lb);
 

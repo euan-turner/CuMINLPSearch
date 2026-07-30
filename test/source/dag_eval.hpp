@@ -62,7 +62,8 @@ auto evaluate(dag::ExprDAG<T> const& graph,
       case Op::Cos:   value[i] = std::cos(arg(0)); break;
       case Op::Tanh:  value[i] = std::tanh(arg(0)); break;
       case Op::Abs:   value[i] = std::fabs(arg(0)); break;
-      case Op::IPow:  value[i] = std::pow(arg(0), node.payload.int_exp); break;
+      case Op::PowN:  value[i] = std::pow(arg(0), node.payload.int_exp); break;
+      case Op::Pow:   value[i] = std::pow(arg(0), arg(1)); break;
       default: throw std::runtime_error("evaluate: unhandled Op");
     }
   }

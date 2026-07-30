@@ -407,6 +407,42 @@ struct MaxOp
   }
 };
 
+// a^b with both a and b general (interval or scalar), as opposed to
+// pown_kernel's integer-exponent path below. cu::pow(interval, interval)
+// clips a negative-base domain to [0, +inf) internally, same as cu::sqrt/
+// cu::log do for their domains, so no extra domain handling is needed here.
+struct PowOp
+{
+  template<typename T>
+  static __device__ cu::interval<T> apply(cu::interval<T> a, cu::interval<T> b)
+  {
+    return pow(a, b);
+  }
+
+  template<typename T>
+  static __device__ cu::interval<T> apply(cu::interval<T> a, T b)
+  {
+    return pow(a, b);
+  }
+
+  template<typename T>
+  static __device__ cu::interval<T> apply(T a, cu::interval<T> b)
+  {
+    return pow(cu::interval<T>(a), b);
+  }
+
+  template<typename T>
+  static __device__ T apply(T a, T b)
+  {
+    if constexpr (std::is_same_v<T, float>) {
+      return ::powf(a, b);
+    } else {
+      using std::pow;
+      return pow(a, b);
+    }
+  }
+};
+
 struct NegOp
 {
   template<typename T>
@@ -585,6 +621,12 @@ struct op_code<MaxOp>
 };
 
 template<>
+struct op_code<PowOp>
+{
+  static constexpr Op value = Op::Pow;
+};
+
+template<>
 struct op_code<NegOp>
 {
   static constexpr Op value = Op::Neg;
@@ -639,7 +681,7 @@ struct op_code<AbsOp>
 };
 
 template<typename T>
-__device__ T ipow_scalar(T base, int exponent)
+__device__ T pown_scalar(T base, int exponent)
 {
   if constexpr (std::is_same_v<T, float>) {
     return ::powf(base, exponent);
@@ -730,22 +772,22 @@ __global__ void binary_op_scalar_scalar_kernel(T a,
   }
 }
 
-// ipow_value dispatches to interval pown() or the scalar ipow_scalar()
+// pown_value dispatches to interval pown() or the scalar pown_scalar()
 // depending on which V this graph is templated on.
 template<typename T>
-__device__ cu::interval<T> ipow_value(cu::interval<T> a, int exponent)
+__device__ cu::interval<T> pown_value(cu::interval<T> a, int exponent)
 {
   return pown(a, exponent);
 }
 
 template<typename T>
-__device__ T ipow_value(T a, int exponent)
+__device__ T pown_value(T a, int exponent)
 {
-  return ipow_scalar(a, exponent);
+  return pown_scalar(a, exponent);
 }
 
 template<typename T, typename V>
-__global__ void ipow_kernel(const V* __restrict__ a,
+__global__ void pown_kernel(const V* __restrict__ a,
                             int exponent,
                             V* __restrict__ out,
                             std::size_t n_regions)
@@ -754,7 +796,7 @@ __global__ void ipow_kernel(const V* __restrict__ a,
   std::size_t num_threads = gridDim.x * blockDim.x;
 
   for (std::size_t i = tid; i < n_regions; i += num_threads) {
-    out[i] = ipow_value(a[i], exponent);
+    out[i] = pown_value(a[i], exponent);
   }
 }
 
@@ -1108,6 +1150,9 @@ public:
       case Op::Max:
         producer_nodes_[id] = wire_binary<MaxOp>(id);
         break;
+      case Op::Pow:
+        producer_nodes_[id] = wire_binary<PowOp>(id);
+        break;
       case Op::Neg:
         producer_nodes_[id] = wire_unary<NegOp>(id);
         break;
@@ -1135,8 +1180,8 @@ public:
       case Op::Abs:
         producer_nodes_[id] = wire_unary<AbsOp>(id);
         break;
-      case Op::IPow:
-        producer_nodes_[id] = wire_ipow(id);
+      case Op::PowN:
+        producer_nodes_[id] = wire_pown(id);
         break;
     }
     return producer_nodes_[id];
@@ -1291,27 +1336,27 @@ private:
                                    n_elems_);
   }
 
-  cudaGraphNode_t wire_ipow(std::size_t id)
+  cudaGraphNode_t wire_pown(std::size_t id)
   {
     const DAGNode<T>& node = problem_.graph.nodes[id];
-    if (node.op != Op::IPow) {
+    if (node.op != Op::PowN) {
       throw std::runtime_error(
-          "wire_ipow called on a node whose op is not Op::IPow");
+          "wire_pown called on a node whose op is not Op::PowN");
     }
     if (node.in.size() != 1) {
       throw std::runtime_error(
-          "wire_ipow called on a node without exactly one operand");
+          "wire_pown called on a node without exactly one operand");
     }
     std::size_t operand_id = node.in[0];
     if (problem_.graph.nodes[operand_id].op == Op::Const) {
-      throw std::runtime_error("Op::IPow applied directly to an Op::Const; unreachable via the "
+      throw std::runtime_error("Op::PowN applied directly to an Op::Const; unreachable via the "
                                "current Expr API");
     }
     cudaGraphNode_t operand_node = ensure_node(operand_id);
     buffers_[id] = detail::alloc_device<V>(n_elems_);
     return detail::add_kernel_node(graph_,
                                    {operand_node},
-                                   ipow_kernel<T, V>,
+                                   pown_kernel<T, V>,
                                    grid_,
                                    block_,
                                    buffers_[operand_id],

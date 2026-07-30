@@ -1,6 +1,8 @@
 // GPU tests for GraphReplay (graph_replay.cuh) -- TEST_EXTENSION.md §5.
 // Requires an actual CUDA device.
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -42,6 +44,18 @@ Problem<double> make_infeasible_problem()
   auto x = p.var(0.0, 10.0);
   p.set_objective(x * x);
   p.add_constraint(x, cuminlp::dag::Cmp::LE, -100.0);
+  return p;
+}
+
+// x, y both variables (not constants), objective pow(x, y) -- exercises
+// Op::Pow's general a^b, wired via wire_binary<PowOp> onto
+// cu::pow(interval, interval).
+Problem<double> make_pow_problem(double x_lb, double x_ub, double y_lb, double y_ub)
+{
+  Problem<double> p;
+  auto x = p.var(x_lb, x_ub);
+  auto y = p.var(y_lb, y_ub);
+  p.set_objective(pow(x, y));
   return p;
 }
 
@@ -227,4 +241,57 @@ TEST_CASE("The interval graph's result is bitwise-identical regardless of salt",
   for (std::size_t i = 0; i < obj_lb_salt1.size(); ++i) {
     CHECK(obj_lb_salt1[i] == obj_lb_salt2[i]);
   }
+}
+
+TEST_CASE("Op::Pow: pow(x, y) on a degenerate box matches std::pow exactly",
+          "[graph_replay][pow]")
+{
+  // A single-point box (x=2, y=3) removes any interval-vs-point rounding
+  // question -- both graphs must agree with plain std::pow(2, 3) == 8.
+  Problem<double> p = make_pow_problem(2.0, 2.0, 3.0, 3.0);
+  Composition<2> comp = {SlotKind::Continuous, SlotKind::Continuous};
+  std::array<std::size_t, 2> var_ids = {0, 1};
+  std::vector<cu::interval<double>> domain = {{2.0, 2.0}, {3.0, 3.0}};
+
+  auto point_replay = PointGraphReplay<double, 2, 4, 8>::build(p, comp);
+  point_replay.set_domain(domain, var_ids);
+  point_replay.launch(0);
+  REQUIRE(point_replay.has_candidate());
+  CHECK(point_replay.candidate() == std::pow(2.0, 3.0));
+
+  // The interval graph's directed-rounding enclosure may be a few ulps wide
+  // even on a degenerate box (cu::pow rounds its result outward), so this
+  // one needs a tolerance rather than bitwise equality.
+  auto interval_replay = IntervalGraphReplay<double, 2, 4>::build(p, comp);
+  interval_replay.set_domain(domain, var_ids);
+  interval_replay.launch(0);
+  REQUIRE(interval_replay.has_candidate());
+  CHECK(std::abs(interval_replay.candidate() - std::pow(2.0, 3.0)) < 1e-9);
+}
+
+TEST_CASE("Op::Pow: interval graph soundly encloses x^y over a real box",
+          "[graph_replay][pow]")
+{
+  // x in [1, 4], y in [2, 2] (a fixed exponent): the true range of x^2 over
+  // [1, 4] is [1, 16]. Regardless of how many sub-regions the partitioner
+  // splits [1, 4] into, every per-region lower bound obj_lb() reports must
+  // be a sound enclosure of its sub-box (so within [0, 16] overall), and the
+  // tightest one must be at most 1 -- the sub-box touching x=1.
+  Problem<double> p = make_pow_problem(1.0, 4.0, 2.0, 2.0);
+  Composition<2> comp = {SlotKind::Continuous, SlotKind::Continuous};
+  std::array<std::size_t, 2> var_ids = {0, 1};
+  std::vector<cu::interval<double>> domain = {{1.0, 4.0}, {2.0, 2.0}};
+
+  auto replay = IntervalGraphReplay<double, 2, 4>::build(p, comp);
+  replay.set_domain(domain, var_ids);
+  replay.launch(0);
+
+  REQUIRE(!replay.obj_lb().empty());
+  double min_lb = std::numeric_limits<double>::infinity();
+  for (double lb : replay.obj_lb()) {
+    CHECK(lb >= 0.0 - 1e-9);
+    CHECK(lb <= 16.0 + 1e-9);
+    min_lb = std::min(min_lb, lb);
+  }
+  CHECK(min_lb <= 1.0 + 1e-9);
 }

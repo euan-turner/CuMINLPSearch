@@ -1033,10 +1033,15 @@ private:
       if (folds[static_cast<std::size_t>(i)]) continue;
 
       Node const& node = m_.ast[i];
-      // Power's second argument is a constant exponent carried in the payload,
-      // not an operand, so it must not be emitted.
+      // Power's second argument is only ever emitted as a DAG operand when it
+      // isn't wholly constant: a constant exponent is baked into the
+      // rewrite/payload at emit_call time (see Func::Power below) rather than
+      // needing a node of its own.
       std::size_t const operands =
-          (node.kind == Kind::Call && node.func == Func::Power) ? 1 : node.args.size();
+          (node.kind == Kind::Call && node.func == Func::Power
+           && folds[static_cast<std::size_t>(node.args[1])])
+          ? 1
+          : node.args.size();
       for (std::size_t k = 0; k < operands; ++k) {
         live[static_cast<std::size_t>(node.args[k])] = 1;
       }
@@ -1122,28 +1127,42 @@ private:
       case Func::Power: {
         auto exponent = m_.ast.fold(args[1]);
         if (!exponent) {
-          throw ParseError(line, "a variable exponent is not supported",
-                           ErrorKind::UnsupportedExponent);
+          // A non-constant exponent is still GAMS's own `**`: exp(y*log(x)),
+          // with y now a DAG operand instead of a payload constant. Same
+          // domain requirement (x > 0) as the constant case below, and the
+          // same reasoning: this is what `**` literally means, not a
+          // rewrite chosen for convenience. `emit_roots` above only marks
+          // args[1] live (so `operand(1)` is valid here) when it isn't
+          // foldable, matching this branch exactly.
+          std::size_t log_base = unary(dag::Op::Log);
+          std::size_t scaled = emit_binary(dag::Op::Mul, log_base, operand(1));
+          return graph().emit(dag::Op::Exp, {scaled});
         }
         // `x**0.5` is sqrt exactly -- same function, same interval enclosure,
         // one op. This is a rename, not the kind of lossy rewrite refused
         // above, and MINLPLib writes Euclidean norms this way.
         if (feq(*exponent, 0.5)) return unary(dag::Op::Sqrt);
 
-        if (std::floor(*exponent) < *exponent
-            || std::fabs(*exponent) > 1e9)
+        // An exact integer exponent that fits in PowN's `int` payload gets
+        // Op::PowN's tighter (repeated-squaring) interval enclosure.
+        // floor(x) <= x always, so !(floor(x) < x) is "already
+        // integer-valued" without an -Wfloat-equal-triggering ==.
+        if (!(std::floor(*exponent) < *exponent)
+            && std::fabs(*exponent) <= 1e9)
         {
-          // Op::Pow (real exponent) is planned; see design/GAMS_FRONTEND.md
-          // section 4.4.1. Rewriting as exp(c*log(x)) would be weaker on bounds
-          // and undefined at x = 0, so refuse instead.
-          throw ParseError(line,
-                           "non-integer exponent " + std::to_string(*exponent)
-                               + " needs Op::Pow, which does not exist yet",
-                           ErrorKind::UnsupportedExponent);
+          dag::DAGNodePayload<T> p;
+          p.int_exp = static_cast<int>(*exponent);
+          return graph().emit(dag::Op::PowN, {operand(0)}, p);
         }
-        dag::DAGNodePayload<T> p;
-        p.int_exp = static_cast<int>(*exponent);
-        return graph().emit(dag::Op::IPow, {operand(0)}, p);
+
+        // Any other constant exponent: lower to exp(c * log(x)), exactly
+        // GAMS's own definition of `**` (see the domain note above this
+        // function/§4.4.1 of design/GAMS_FRONTEND.md) rather than a widening
+        // -- it needs x > 0, same as a literal reading of `**` already does.
+        std::size_t log_base = unary(dag::Op::Log);
+        std::size_t scaled =
+            emit_binary(dag::Op::Mul, log_base, emit_const(*exponent));
+        return graph().emit(dag::Op::Exp, {scaled});
       }
     }
     throw ParseError(line, "unhandled function");

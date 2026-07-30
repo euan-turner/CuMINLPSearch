@@ -21,7 +21,7 @@ constexpr std::size_t DIMS = 100;
 constexpr std::size_t CYCLE_SIZE = 5;
 constexpr std::size_t PARTITION_NUM = 4;
 constexpr std::size_t SAMPLE_POINTS = 10;
-constexpr std::size_t NUM_CHILDREN = ipow<PARTITION_NUM, CYCLE_SIZE>();
+constexpr std::size_t NUM_CHILDREN = pown<PARTITION_NUM, CYCLE_SIZE>();
 }  // namespace
 
 auto FixedRosenbrockDriver::solve() -> double

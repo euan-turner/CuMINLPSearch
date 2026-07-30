@@ -33,7 +33,8 @@ enum class Op
   Sin,
   Cos,
   Tanh,
-  IPow,
+  PowN,
+  Pow,
   Abs,
   Min,
   Max
@@ -55,7 +56,7 @@ union DAGNodePayload
 {
   T constant;  // payload for Op::Const
   std::size_t var_index;  // payload for Op::Var
-  int int_exp;  // payload for Op::IPow
+  int int_exp;  // payload for Op::PowN
 };
 
 /**
@@ -208,7 +209,20 @@ public:
     }
     DAGNodePayload<T> p;
     p.int_exp = n;
-    return {a.graph, a.graph->emit(Op::IPow, {a.node_id}, p)};
+    return {a.graph, a.graph->emit(Op::PowN, {a.node_id}, p)};
+  }
+
+  // a^b, general base and exponent -- as opposed to pow(Expr a, int n)'s
+  // Op::PowN, which stays a separate op: an integer exponent gets a tighter
+  // interval enclosure (repeated squaring) than the general a^b evaluation
+  // gives.
+  friend Expr pow(Expr a, Expr b)
+  {
+    if (a.is_const() && b.is_const()) {
+      return a.constant(
+          static_cast<T>(std::pow(a.const_value(), b.const_value())));
+    }
+    return {a.graph, a.graph->emit(Op::Pow, {a.node_id, b.node_id})};
   }
 
   std::size_t id() const { return node_id; }

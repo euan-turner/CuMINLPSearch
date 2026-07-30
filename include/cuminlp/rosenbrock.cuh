@@ -189,12 +189,12 @@ T rosenbrock(const std::vector<T>& p)
 // Partitioning and Sampling
 
 template<std::size_t Base, std::size_t Exp>
-__host__ __device__ constexpr std::size_t ipow()
+__host__ __device__ constexpr std::size_t pown()
 {
   if constexpr (Exp == 0) {
     return 1;
   } else {
-    return Base * ipow<Base, Exp - 1>();
+    return Base * pown<Base, Exp - 1>();
   }
 }
 
@@ -213,7 +213,7 @@ __global__ void sample_rosenbrock_kernel(
     std::size_t dims,
     std::size_t cycle_start)
 {
-  constexpr std::size_t num_regions = ipow<PartitionNum, CycleSize>();
+  constexpr std::size_t num_regions = pown<PartitionNum, CycleSize>();
   std::size_t const gtid = blockIdx.x * blockDim.x + threadIdx.x;
   if (gtid >= num_regions * SamplePoints) {
     return;
@@ -268,7 +268,7 @@ template<typename T,
 __global__ void reduce_sample_ub_kernel(const T* __restrict__ per_sample_ub,
                                         T* __restrict__ thread_ubs)
 {
-  constexpr std::size_t num_regions = ipow<PartitionNum, CycleSize>();
+  constexpr std::size_t num_regions = pown<PartitionNum, CycleSize>();
   std::size_t const region = blockIdx.x * blockDim.x + threadIdx.x;
   if (region >= num_regions) {
     return;
@@ -350,7 +350,7 @@ T launch_sample_rosenbrock(const std::vector<cu::interval<T>>& interval,
                            std::size_t temp_storage_bytes,
                            cudaStream_t stream)
 {
-  constexpr std::size_t expected_threads = ipow<PartitionNum, CycleSize>();
+  constexpr std::size_t expected_threads = pown<PartitionNum, CycleSize>();
   if (num_threads != expected_threads) {
     throw std::runtime_error("launch_sample_rosenbrock: num_threads does not match "
                              "PartitionNum^CycleSize; d_thread_ubs was allocated for the "
@@ -411,7 +411,7 @@ template<typename T,
 T launch_sample_rosenbrock(const std::vector<cu::interval<T>>& interval,
                            std::size_t cycle_start)
 {
-  std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
+  std::size_t const num_threads = pown<PartitionNum, CycleSize>();
 
   cu::interval<T>* d_interval =
       detail::alloc_device<cu::interval<T>>(interval.size());
@@ -458,7 +458,7 @@ __global__ void bound_rosenbrock_kernel(cu::interval<T>* d_interval,
                                         std::size_t cycle_start)
 {
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid >= ipow<PartitionNum, CycleSize>()) {
+  if (tid >= pown<PartitionNum, CycleSize>()) {
     return;
   }
 
@@ -498,11 +498,11 @@ void launch_bound_rosenbrock(
     bool* d_prune_interval,
     T* d_interval_lb,
     std::size_t num_threads,
-    std::span<bool, ipow<PartitionNum, CycleSize>()> interval_results,
-    std::span<T, ipow<PartitionNum, CycleSize>()> lb_results,
+    std::span<bool, pown<PartitionNum, CycleSize>()> interval_results,
+    std::span<T, pown<PartitionNum, CycleSize>()> lb_results,
     cudaStream_t stream)
 {
-  constexpr std::size_t expected_threads = ipow<PartitionNum, CycleSize>();
+  constexpr std::size_t expected_threads = pown<PartitionNum, CycleSize>();
   if (num_threads != expected_threads) {
     throw std::runtime_error("launch_bound_rosenbrock: num_threads does not match "
                              "PartitionNum^CycleSize; d_prune_interval/d_interval_lb were "
@@ -541,10 +541,10 @@ void launch_bound_rosenbrock(
     const std::vector<cu::interval<T>>& interval,
     T gub,
     std::size_t cycle_start,
-    std::span<bool, ipow<PartitionNum, CycleSize>()> interval_results,
-    std::span<T, ipow<PartitionNum, CycleSize>()> lb_results)
+    std::span<bool, pown<PartitionNum, CycleSize>()> interval_results,
+    std::span<T, pown<PartitionNum, CycleSize>()> lb_results)
 {
-  std::size_t const num_threads = ipow<PartitionNum, CycleSize>();
+  std::size_t const num_threads = pown<PartitionNum, CycleSize>();
 
   cu::interval<T>* d_interval =
       detail::alloc_device<cu::interval<T>>(interval.size());

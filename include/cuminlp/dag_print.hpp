@@ -92,8 +92,10 @@ inline auto op_name(Op op) -> char const*
       return "cos";
     case Op::Tanh:
       return "tanh";
-    case Op::IPow:
-      return "ipow";
+    case Op::PowN:
+      return "pown";
+    case Op::Pow:
+      return "pow";
     case Op::Abs:
       return "abs";
     case Op::Min:
@@ -177,7 +179,7 @@ void write_infix(std::ostream& os,
     case Op::Const:
       os << node.payload.constant;
       return;
-    case Op::IPow:
+    case Op::PowN:
       // The exponent lives in the payload, not in `in`, so this can't fall
       // through to the generic n-ary case below.
       os << '(';
@@ -244,7 +246,7 @@ void write_nodes(std::ostream& os,
       case Op::Const:
         os << ' ' << node.payload.constant;
         break;
-      case Op::IPow:
+      case Op::PowN:
         // Exponent is payload, not an operand, so it can't print like one.
         os << " %" << node.in[0] << ", " << node.payload.int_exp;
         break;

@@ -31,7 +31,6 @@ auto kind_name(gams::ErrorKind kind) -> char const*
     case gams::ErrorKind::NonScalar: return "not-scalar-format";
     case gams::ErrorKind::Discrete: return "discrete-variables";
     case gams::ErrorKind::UnsupportedFunction: return "unsupported-function";
-    case gams::ErrorKind::UnsupportedExponent: return "unsupported-exponent";
     case gams::ErrorKind::Unrepresentable: return "unrepresentable";
     case gams::ErrorKind::Io: return "io";
   }

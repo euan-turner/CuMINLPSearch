@@ -40,12 +40,12 @@ constexpr std::size_t ceil_div(std::size_t x, std::size_t y)
 }
 
 template<std::size_t Base, std::size_t Exp>
-constexpr std::size_t ipow()
+constexpr std::size_t pown()
 {
   if constexpr (Exp == 0) {
     return 1;
   } else {
-    return Base * ipow<Base, Exp - 1>();
+    return Base * pown<Base, Exp - 1>();
   }
 }
 

@@ -111,6 +111,34 @@ TEST_CASE("x**0.5 lowers to sqrt", "[gams][expr]")
   CHECK(close(eval("(sqr(x1) + sqr(x2))**0.5", 3.0, 4.0), 5.0));
 }
 
+TEST_CASE("x**c lowers to exp(c*log(x)) for a non-0.5, non-integer c",
+          "[gams][expr]")
+{
+  // This is GAMS's own definition of `**`, not a widening or approximation
+  // (see design/GAMS_FRONTEND.md §4.4.1): it needs x > 0, exactly as a
+  // literal reading of `**` would. nvs09 (https://www.minlplib.org/nvs09.html)
+  // is the MINLPLib instance that motivated this -- its objective has a
+  // `product**0.2` term, hand-built in nvs09_problem.hpp as
+  // exp(0.2*log(product)).
+  CHECK(close(eval("x1**1.5", 4.0), std::pow(4.0, 1.5)));
+  CHECK(close(eval("x1**0.2", 3.0), std::pow(3.0, 0.2)));
+  CHECK(close(eval("x1**-0.5", 4.0), std::pow(4.0, -0.5)));
+}
+
+TEST_CASE("x**y lowers to exp(y*log(x)) when the exponent is not constant",
+          "[gams][expr]")
+{
+  // A non-constant exponent used to be a ParseError (ErrorKind::
+  // UnsupportedExponent); a corpus run over MINLPLib turned up real
+  // instances of exactly this shape (e.g. contvar.gms's
+  // `10**(-3.5 + 4.9*x/(1+x))`, hda.gms's `4**(0.0001 + 0.333*x1)`), so it
+  // gets the same exp(y*log(x)) treatment as a non-integer constant
+  // exponent, just with y as an ordinary DAG operand instead of a payload
+  // constant.
+  CHECK(close(eval("x1**x2", 2.0, 3.0), std::pow(2.0, 3.0)));
+  CHECK(close(eval("10**(x1 + 0.5*x2)", 2.0, 3.0), std::pow(10.0, 2.0 + 0.5 * 3.0)));
+}
+
 TEST_CASE("GAMS is case-insensitive", "[gams][lex]")
 {
   CHECK(close(eval("POWER(X1,2) + SQR(x1)", 3.0), 18.0));
@@ -303,14 +331,14 @@ TEST_CASE("maximise negates the objective and reports the original sense",
 namespace
 {
 
-/// x^n as an Op::IPow node. Written out rather than via an Expr helper so this
+/// x^n as an Op::PowN node. Written out rather than via an Expr helper so this
 /// test depends on nothing beyond the committed dag.hpp.
-auto ipow(Problem<double>& problem, Expr<double> base, int n) -> Expr<double>
+auto pown(Problem<double>& problem, Expr<double> base, int n) -> Expr<double>
 {
   cuminlp::dag::DAGNodePayload<double> payload;
   payload.int_exp = n;
   return Expr<double>(&problem.graph,
-                      problem.graph.emit(cuminlp::dag::Op::IPow, {base.id()}, payload));
+                      problem.graph.emit(cuminlp::dag::Op::PowN, {base.id()}, payload));
 }
 
 /// Rebuild ex4_1_2 exactly as source/power_series.cu does.
@@ -331,7 +359,7 @@ auto hand_built_ex4_1_2() -> Problem<double>
   auto x = problem.var(1, 2);
   Expr<double> obj = (2.5 * (x * x)) - (500.0 * x);
   for (std::size_t i = 0; i < std::size(kCoeffs); ++i) {
-    obj = obj + (kCoeffs[i] * ipow(problem, x, kFirstPower + static_cast<int>(i)));
+    obj = obj + (kCoeffs[i] * pown(problem, x, kFirstPower + static_cast<int>(i)));
   }
   problem.set_objective(obj);
   return problem;
@@ -556,9 +584,11 @@ TEST_CASE("nvs04.gms agrees with the hand-built DAG", "[gams][minlplib][discrete
   // Rosenbrock-shaped objective over two integers in [0, 200]. Its defining
   // equation is `=E=`, so it eliminates cleanly: 2 integers, no leftover
   // objvar/constraint. (nvs09, this project's original choice, turned out to
-  // need `x**0.2` -- a real, non-0.5 exponent that lowers to Op::Pow, which
-  // this frontend doesn't implement yet -- so nvs04 is the equivalence
-  // fixture instead; nvs09_problem.hpp stays as source/nvs09.cu's builder.)
+  // need `x**0.2` -- a real, non-0.5 exponent, which this frontend now lowers
+  // to exp(0.2*log(x)) rather than rejecting -- see "x**c lowers to
+  // exp(c*log(x))..." below -- so nvs04 is the equivalence fixture instead;
+  // nvs09_problem.hpp stays as source/nvs09.cu's hand-built version, itself
+  // written as exp(0.2*log(product)) for exactly this reason.)
   Problem<double> reference;
   auto i1 = reference.int_var(0, 200);
   auto i2 = reference.int_var(0, 200);
@@ -647,11 +677,6 @@ TEST_CASE("unrepresentable input is rejected with a line number", "[gams][errors
   SECTION("unknown function")
   {
     CHECK(fails_at(model_with("wibble(x1)"), 3));
-  }
-
-  SECTION("non-integer exponent that is not 0.5")
-  {
-    CHECK_THROWS_AS(gams::parse<double>(model_with("x1**1.5")), gams::ParseError);
   }
 
   SECTION("non-scalar format")

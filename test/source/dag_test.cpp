@@ -131,6 +131,23 @@ TEST_CASE("a*a only becomes Op::Sqr when both operands are the same node",
   CHECK(p.graph.nodes[cross_product.id()].op == Op::Mul);
 }
 
+TEST_CASE("pow(Expr, Expr) emits Op::Pow with base and exponent as operands",
+          "[dag]")
+{
+  Problem<double> p;
+  auto x = p.var(0.1, 10.0);
+  auto y = p.var(-2.0, 2.0);
+
+  auto e = pow(x, y);
+  p.set_objective(e);
+
+  CHECK(p.graph.nodes[e.id()].op == Op::Pow);
+  REQUIRE(p.graph.nodes[e.id()].in.size() == 2);
+  CHECK(p.graph.nodes[e.id()].in[0] == x.id());
+  CHECK(p.graph.nodes[e.id()].in[1] == y.id());
+  REQUIRE_NOTHROW(p.validate());
+}
+
 TEST_CASE("live_set_estimate is always 0", "[dag]")
 {
   Problem<double> p;
@@ -165,6 +182,10 @@ TEST_CASE("Unary ops applied directly to fixed() constant-fold", "[dag][1b]")
   auto pow_c = pow(p.fixed(2.0), 3);
   CHECK(p.graph.nodes[pow_c.id()].op == Op::Const);
   CHECK(feq(p.graph.nodes[pow_c.id()].payload.constant, 8.0));
+
+  auto pow_binary_c = pow(p.fixed(2.0), p.fixed(0.5));
+  CHECK(p.graph.nodes[pow_binary_c.id()].op == Op::Const);
+  CHECK(feq(p.graph.nodes[pow_binary_c.id()].payload.constant, std::sqrt(2.0)));
 
   auto sqr_c = sqr(p.fixed(3.0));
   CHECK(p.graph.nodes[sqr_c.id()].op == Op::Const);
