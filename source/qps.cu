@@ -2,8 +2,10 @@
 #include <memory>
 #include <string>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
+#include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_driver.cuh"
 
 using cuminlp::dag::Cmp;
@@ -65,18 +67,23 @@ Problem<double> problem_219()
 
 auto main(int argc, char* argv[]) -> int
 {
-  int problem = std::stoi(argv[1]);
-  int iters = std::stoi(argv[2]);
-  auto policy =
-      std::make_shared<cuminlp::GreedyCompositionPolicy<double, 2, 20>>();
-  if (problem == 212) {
-    std::cout << "Ex. 2.1.2" << '\n';
-    cuminlp::GraphDriver<double, 2, 20, 100> drv_212(policy, iters, 1e-9);
-    drv_212.solve(problem_212());
-  } else if (problem == 219) {
-    std::cout << "Ex. 2.1.9" << '\n';
-    cuminlp::GraphDriver<double, 2, 20, 100> drv_219(policy, iters, 1e-9);
-    drv_219.solve(problem_219());
-  }
-  return 0;
+  return cuminlp::examples::guarded(
+      [&]
+      {
+        int problem = std::stoi(argv[1]);
+        int iters = std::stoi(argv[2]);
+        auto policy =
+            std::make_shared<cuminlp::GreedyCompositionPolicy<double, 8>>(
+                cuminlp::FanOutSpec {20},
+                cuminlp::SearchCalibration {.max_cycle_size = 2});
+        if (problem == 212) {
+          std::cout << "Ex. 2.1.2" << '\n';
+          cuminlp::GraphDriver<double, 8> drv_212(policy, iters, 1e-9, 100);
+          drv_212.solve(problem_212());
+        } else if (problem == 219) {
+          std::cout << "Ex. 2.1.9" << '\n';
+          cuminlp::GraphDriver<double, 8> drv_219(policy, iters, 1e-9, 100);
+          drv_219.solve(problem_219());
+        }
+      });
 }

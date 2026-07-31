@@ -8,15 +8,28 @@
 #include <cstddef>
 #include <vector>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/dag.hpp"
 
 namespace cuminlp::examples::nvs09
 {
 
 constexpr std::size_t NUM_VARS = 10;
-constexpr std::size_t CYCLE_SIZE = 10;
+// 7, not NUM_VARS. Every variable is an integer on [3, 9], i.e. domain size
+// 7 <= enumerate_cap, so all of them enumerate rather than bisect and the
+// region count is 7^CYCLE_SIZE. At CYCLE_SIZE = 10 that is 7^10 = 282M
+// regions, which at 841 B each (102 DAG-node buffers plus bookkeeping) is
+// 221 GiB -- this instance has never actually run on a consumer GPU, it just
+// failed with a bare cudaMalloc OOM. 7^7 = 823543 regions is 0.65 GiB and
+// solves to the published optimum (-43.134336).
+constexpr std::size_t CYCLE_SIZE = 7;
 constexpr std::size_t PARTITION_NUM = 7;  // every integer variable is [3, 9]
 constexpr std::size_t SAMPLE_POINTS = 5;
+// SlotContext is register-resident, so the compiled capacity comes from a
+// ladder rather than being CYCLE_SIZE itself; CYCLE_SIZE stays the cap the
+// policy honours (see include/cuminlp/capacity_ladder.hpp).
+constexpr std::size_t CAPACITY = cuminlp::ladder_rung_or_zero(CYCLE_SIZE);
+static_assert(CAPACITY != 0, "CYCLE_SIZE exceeds the widest compiled rung");
 
 /// @brief Build nvs09: 10 integers in [3, 9], minimising a log/product
 /// objective. See the module comment above for the instance's provenance.

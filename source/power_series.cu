@@ -4,8 +4,10 @@
 #include <memory>
 #include <string>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
+#include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_driver.cuh"
 
 using cuminlp::dag::Expr;
@@ -14,6 +16,11 @@ using cuminlp::dag::Problem;
 namespace
 {
 constexpr std::size_t CYCLE_SIZE = 1;
+// SlotContext is register-resident, so the capacity is chosen from a compiled
+// ladder rather than being CYCLE_SIZE itself; CYCLE_SIZE remains the cap the
+// policy honours (see include/cuminlp/capacity_ladder.hpp).
+constexpr std::size_t CAPACITY = cuminlp::ladder_rung_or_zero(CYCLE_SIZE);
+static_assert(CAPACITY != 0, "CYCLE_SIZE exceeds the widest compiled rung");
 constexpr std::size_t PARTITION_NUM = 10000;
 constexpr std::size_t SAMPLE_POINTS = 10;
 
@@ -75,23 +82,28 @@ constexpr std::size_t NUM_COEFFS = sizeof(COEFFS) / sizeof(COEFFS[0]);
 
 auto main(int argc, char* argv[]) -> int
 {
-  Problem<double> problem;
-  auto x = problem.var(1, 2);
+  return cuminlp::examples::guarded(
+      [&]
+      {
+        Problem<double> problem;
+        auto x = problem.var(1, 2);
 
-  // ex4_1_2's single equation is -(P(x1)) + objvar =E= 0, i.e. objvar = P(x1),
-  // so the polynomial itself is what gets minimised over x1 in [1, 2].
-  Expr<double> obj = (2.5 * (x * x)) - (500.0 * x);
-  for (std::size_t i = 0; i < NUM_COEFFS; ++i) {
-    obj = obj + (COEFFS[i] * pow(x, FIRST_POWER + static_cast<int>(i)));
-  }
-  problem.set_objective(obj);
+        // ex4_1_2's single equation is -(P(x1)) + objvar =E= 0, i.e. objvar =
+        // P(x1), so the polynomial itself is what gets minimised over x1 in [1,
+        // 2].
+        Expr<double> obj = (2.5 * (x * x)) - (500.0 * x);
+        for (std::size_t i = 0; i < NUM_COEFFS; ++i) {
+          obj = obj + (COEFFS[i] * pow(x, FIRST_POWER + static_cast<int>(i)));
+        }
+        problem.set_objective(obj);
 
-  int iters = std::stoi(argv[1]);
-  auto policy = std::make_shared<
-      cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(
-      policy, iters, 1e-9);
-  drv.solve(problem);
-
-  return 0;
+        int iters = std::stoi(argv[1]);
+        auto policy = std::make_shared<
+            cuminlp::GreedyCompositionPolicy<double, CAPACITY>>(
+            cuminlp::FanOutSpec {PARTITION_NUM},
+            cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
+        cuminlp::GraphDriver<double, CAPACITY> drv(
+            policy, iters, 1e-9, SAMPLE_POINTS);
+        drv.solve(problem);
+      });
 }

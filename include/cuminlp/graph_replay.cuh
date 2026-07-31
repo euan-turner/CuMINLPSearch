@@ -46,20 +46,21 @@ __global__ void partition_variables_kernel(
     const cu::interval<T>* __restrict__ parent_domain,  // NUM_VARS (box bounds
                                                         // per variable)
     const std::size_t* __restrict__ slot_var_ids,
-    const int* __restrict__ slot_fan_out,
+    const std::uint32_t* __restrict__ slot_fan_out,
     const SlotKind* __restrict__ slot_kind,
     cu::interval<T>* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS
                                                        // (box bounds per
                                                        // variable per region)
     std::size_t n_vars,
-    std::size_t n_regions)
+    std::size_t n_regions,
+    std::size_t slot_count)
 {
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t num_threads = gridDim.x * blockDim.x;
 
   for (std::size_t r = tid; r < n_regions; r += num_threads) {
     auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind);
+        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
     for (std::size_t vid = 0; vid < n_vars; ++vid) {
       cu::interval<T> v;
       partition::get_slot_bounds(ctx, parent_domain, vid, v);
@@ -96,18 +97,19 @@ template<typename T, std::size_t CycleSize>
 __global__ void enumerate_points_kernel(
     const cu::interval<T>* __restrict__ parent_domain,
     const std::size_t* __restrict__ slot_var_ids,
-    const int* __restrict__ slot_fan_out,
+    const std::uint32_t* __restrict__ slot_fan_out,
     const SlotKind* __restrict__ slot_kind,
     T* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS
     std::size_t n_vars,
-    std::size_t n_regions)
+    std::size_t n_regions,
+    std::size_t slot_count)
 {
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t num_threads = gridDim.x * blockDim.x;
 
   for (std::size_t r = tid; r < n_regions; r += num_threads) {
     auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind);
+        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
     for (std::size_t vid = 0; vid < n_vars; ++vid) {
       cu::interval<T> v;
       partition::get_slot_bounds(ctx, parent_domain, vid, v);
@@ -192,9 +194,15 @@ __device__ __forceinline__ T sample_discrete_from_interval(T lb,
 /**
  * @brief Samples points uniformly from each subdomain
  *
+ * `sample_points` is a kernel argument rather than a template parameter: it
+ * only ever appeared here, as this loop's bound and the row stride into
+ * var_buffers, so making it runtime costs the full unroll of a loop that is
+ * not the hot path (the DAG evaluation kernels dominate, and they see only
+ * n_elems). Everything else that used it -- n_elems, every buffer size --
+ * was already runtime arithmetic.
+ *
  * @tparam T numerical precision
  * @tparam CycleSize number of variables being cycled
- * @tparam SamplePoints number of points sampled per subdomain
  * @param parent_domain interval domain being divided
  * @param slot_var_ids  which variable each of the CycleSize slots acts on
  * @param slot_fan_out  fan-out (radix) of each slot
@@ -204,20 +212,23 @@ __device__ __forceinline__ T sample_discrete_from_interval(T lb,
  * @param var_buffers buffer for sampled points
  * @param n_vars
  * @param n_regions
+ * @param sample_points number of points sampled per subdomain
  * @param salt per-launch seed component, so re-visiting a box draws fresh
  * points
  */
-template<typename T, std::size_t CycleSize, std::size_t SamplePoints>
+template<typename T, std::size_t CycleSize>
 __global__ void sample_points_kernel(
     const cu::interval<T>* __restrict parent_domain,
     const std::size_t* __restrict__ slot_var_ids,
-    const int* __restrict__ slot_fan_out,
+    const std::uint32_t* __restrict__ slot_fan_out,
     const SlotKind* __restrict__ slot_kind,
     const VarKind* __restrict__ var_kinds,
     T* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS x
-                                         // SamplePoints
+                                         // sample_points
     std::size_t n_vars,
     std::size_t n_regions,
+    std::size_t slot_count,
+    std::size_t sample_points,
     std::size_t salt)
 {
   std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -225,16 +236,16 @@ __global__ void sample_points_kernel(
 
   for (std::size_t r = tid; r < n_regions; r += num_threads) {
     auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind);
+        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
     for (std::size_t vid = 0; vid < n_vars; ++vid) {
       cu::interval<T> v;
       partition::get_slot_bounds(ctx, parent_domain, vid, v);
       bool discrete = var_kinds[vid] != VarKind::Continuous;
-      for (std::size_t i = 0; i < SamplePoints; ++i) {
+      for (std::size_t i = 0; i < sample_points; ++i) {
         T p = discrete
             ? sample_discrete_from_interval(v.lb, v.ub, vid, i, r, salt)
             : sample_from_interval(v.lb, v.ub, vid, i, r, salt);
-        var_buffers[vid][r * SamplePoints + i] = p;
+        var_buffers[vid][r * sample_points + i] = p;
       }
     }
   }
@@ -989,12 +1000,7 @@ __global__ void gather_candidate_point_kernel(
 // identical as the kernels and operators are overloaded. Exact (only meaningful
 // when V=T) selects the deterministic enumerate_points_kernel instead of
 // sample_points_kernel's random sampling -- see ExactGraphReplay.
-template<typename T,
-         typename V,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t SamplePoints = 1,
-         bool Exact = false>
+template<typename T, typename V, std::size_t CycleSize, bool Exact = false>
 class GraphBuilder
 {
   static_assert(
@@ -1018,19 +1024,26 @@ public:
    *                  consumed by the point graph's root node (so samples for
    *                  Integer/Binary variables land on the integer lattice);
    *                  the interval graph ignores it.
+   * @param sample_points Points sampled per subdomain. Meaningful only for
+   *                  the sampling point graph; the interval and exact graphs
+   *                  evaluate one element per region and pass 1.
    */
   GraphBuilder(const Problem<T>& problem,
                cu::interval<T>* domain_buffer,
                std::size_t n_regions,
                const std::size_t* slot_var_ids,
-               const int* slot_fan_out,
+               const std::uint32_t* slot_fan_out,
                const SlotKind* slot_kind,
-               const VarKind* var_kinds)
+               const VarKind* var_kinds,
+               std::size_t sample_points,
+               std::size_t slot_count)
       : problem_(problem)
       , n_regions_(n_regions)
+      , sample_points_(sample_points)
+      , slot_count_(slot_count)
       , n_elems_(
             is_point
-                ? n_regions * SamplePoints
+                ? n_regions * sample_points
                 : n_regions)  // the number of V-typed slots to operate over
       , block_(256)
       , grid_(static_cast<unsigned int>(detail::ceil_div(n_elems_, 256)))
@@ -1075,23 +1088,25 @@ public:
                                   slot_kind,
                                   var_buffers_device_,
                                   n_vars,
-                                  n_regions_);
+                                  n_regions_,
+                                  slot_count_);
     } else if constexpr (is_point) {
-      root_node_ = detail::add_kernel_node(
-          graph_,
-          {},
-          sample_points_kernel<T, CycleSize, SamplePoints>,
-          root_grid_,
-          block_,
-          domain_buffer,
-          slot_var_ids,
-          slot_fan_out,
-          slot_kind,
-          var_kinds,
-          var_buffers_device_,
-          n_vars,
-          n_regions_,
-          std::size_t {0});
+      root_node_ = detail::add_kernel_node(graph_,
+                                           {},
+                                           sample_points_kernel<T, CycleSize>,
+                                           root_grid_,
+                                           block_,
+                                           domain_buffer,
+                                           slot_var_ids,
+                                           slot_fan_out,
+                                           slot_kind,
+                                           var_kinds,
+                                           var_buffers_device_,
+                                           n_vars,
+                                           n_regions_,
+                                           slot_count_,
+                                           sample_points_,
+                                           std::size_t {0});
     } else {
       root_node_ =
           detail::add_kernel_node(graph_,
@@ -1105,7 +1120,8 @@ public:
                                   slot_kind,
                                   var_buffers_device_,
                                   n_vars,
-                                  n_regions_);
+                                  n_regions_,
+                                  slot_count_);
     }
 
     for (const auto& node : problem_.graph.nodes) {
@@ -1367,6 +1383,11 @@ private:
 
   const Problem<T>& problem_;
   std::size_t n_regions_;
+  // A member, not a ctor local: add_kernel_node takes the address of what it
+  // is given, so the value must outlive the call that bakes it into the
+  // graph node.
+  std::size_t sample_points_;
+  std::size_t slot_count_;
   std::size_t n_elems_;
   dim3 block_;
   dim3 grid_;
@@ -1379,6 +1400,184 @@ private:
       producer_nodes_;  // indexed by node id, null until added
 };
 
+// ---------------------------------------------------------------------------
+// Device-memory sizing
+//
+// These are free functions rather than GraphReplay members because the
+// quantity that actually decides whether a configuration runs is not any one
+// graph's footprint but the footprint of *every* graph a solve holds at once.
+// GraphDriver caches, per Composition it encounters, a point graph, an
+// interval graph, and -- when the Composition is fully enumerable -- an exact
+// graph, and those are live simultaneously.
+//
+// Sizing against a single graph is what made the old --max-cycle-size
+// suggestion unreachable. The exact graph evaluates one element per region,
+// so when it overflowed, its budget scan recommended a cap at which the point
+// graph -- sample_points elements per region -- promptly overflowed in turn,
+// and the caller got a second out-of-memory failure for having followed the
+// advice in the first.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Number of DAG nodes that will actually get a device buffer.
+ *
+ * Not simply "every non-Const node": GraphBuilder allocates lazily from the
+ * objective and constraint roots (add_expression -> ensure_node), so a node
+ * no root reaches never allocates. Const nodes never allocate either -- their
+ * payload is consumed by value at the use site (see wire_binary).
+ *
+ * Counting all non-Const nodes instead would *over*-estimate, and an
+ * over-estimate is not the safe direction here: it would make build() refuse
+ * configurations that would in fact have fit. A parsed Problem can carry dead
+ * nodes that a hand-built one would not.
+ *
+ * DAGNode ids are topologically ordered (every id in `.in` is < the node's own
+ * id), so one reverse sweep suffices -- no recursion or worklist.
+ */
+template<typename T>
+std::size_t buffer_node_count(const Problem<T>& problem)
+{
+  std::size_t const n = problem.graph.nodes.size();
+  std::vector<bool> reachable(n, false);
+
+  auto mark = [&](std::size_t id)
+  {
+    if (id < n) {
+      reachable[id] = true;
+    }
+  };
+  mark(problem.objective_root);
+  for (const auto& c : problem.constraints) {
+    mark(c.root_id);
+  }
+
+  std::size_t count = 0;
+  for (std::size_t i = n; i-- > 0;) {
+    if (!reachable[i]) {
+      continue;
+    }
+    for (std::size_t in_id : problem.graph.nodes[i].in) {
+      mark(in_id);
+    }
+    if (problem.graph.nodes[i].op != Op::Const) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+/// Bytes one element of a V-valued graph costs: one V per buffer-bearing
+/// node, plus feasible[] (1 byte) and obj_lb/obj_ub/masked_ub (T each). The
+/// interval graph is the expensive one, at sizeof(cu::interval<T>) per node
+/// against the point and exact graphs' sizeof(T).
+template<typename T, typename V>
+std::size_t element_bytes(std::size_t n_buffers)
+{
+  return detail::saturating_mul(n_buffers, sizeof(V)) + 1 + 3 * sizeof(T);
+}
+
+/**
+ * @brief Device bytes a solve holds at once for one Composition producing
+ *        `n_regions` regions.
+ *
+ * The sum of the graphs GraphDriver caches for that Composition: the point
+ * graph at `sample_points` elements per region, the interval graph at one,
+ * and the exact graph at one when `enumerable`. All three genuinely coexist
+ * -- a Composition takes the exact path only when the box's live variables
+ * fit in the slots it filled, so the same Composition is reached both ways
+ * on any problem with more variables than slots.
+ *
+ * Saturating throughout, for the reason composition_fan_out is: with
+ * partition_num a runtime value `n_regions` can arrive already at SIZE_MAX,
+ * and a wrapped total would read as comfortably in budget.
+ */
+template<typename T>
+std::size_t composition_footprint_bytes(std::size_t n_regions,
+                                        std::size_t sample_points,
+                                        std::size_t n_buffers,
+                                        bool enumerable)
+{
+  std::size_t const per_point = element_bytes<T, T>(n_buffers);
+  std::size_t total = detail::saturating_mul(
+      detail::saturating_mul(n_regions, sample_points), per_point);
+  total = detail::saturating_add(
+      total,
+      detail::saturating_mul(n_regions,
+                             element_bytes<T, cu::interval<T>>(n_buffers)));
+  if (enumerable) {
+    total = detail::saturating_add(
+        total, detail::saturating_mul(n_regions, per_point));
+  }
+  return total;
+}
+
+/**
+ * @brief The widest --max-cycle-size whose graphs fit in `budget`, or 0 if
+ *        not even a single slot does.
+ *
+ * What the CLI uses instead of a hardcoded per-shape constant. The region
+ * count is a product over slots, so this is a scan: multiply in one slot's
+ * worst-case fan-out at a time and stop at the first cap that doesn't fit.
+ *
+ * "Worst case" over the whole search, not just the root, on three counts.
+ * Slots are charged in the order GreedyCompositionPolicy fills them
+ * (binaries, then integers, then continuous), because that order decides
+ * which fan-outs a given cap actually buys. Every integer slot is charged
+ * max(partition_num, enumerate_cap), since a slot may enumerate or bisect
+ * depending on how far its domain has narrowed by the time it is chosen. And
+ * the exact graph is charged for any all-binary/all-integer prefix, though a
+ * bisecting integer slot would not in fact produce one -- that over-charges
+ * by one graph in `sample_points + 2`, and over-charging is the safe
+ * direction for a budget.
+ *
+ * A descendant box never has more live variables than the root, so a full
+ * slate of slots at root widths bounds every composition the search reaches.
+ */
+template<typename T>
+std::size_t auto_max_cycle_size(const Problem<T>& problem,
+                                const FanOutSpec& fan_out,
+                                std::size_t sample_points,
+                                std::size_t budget,
+                                std::size_t ceiling)
+{
+  std::size_t n_binary = 0;
+  std::size_t n_integer = 0;
+  std::size_t n_continuous = 0;
+  for (VarKind kind : problem.var_kinds) {
+    if (kind == VarKind::Binary) {
+      ++n_binary;
+    } else if (kind == VarKind::Integer) {
+      ++n_integer;
+    } else {
+      ++n_continuous;
+    }
+  }
+
+  std::size_t const integer_width =
+      std::max(fan_out.partition_num(), fan_out.enumerate_cap());
+  std::size_t const n_buffers = buffer_node_count(problem);
+  std::size_t const slots =
+      std::min(ceiling, n_binary + n_integer + n_continuous);
+
+  std::size_t best = 0;
+  std::size_t regions = 1;
+  for (std::size_t cap = 1; cap <= slots; ++cap) {
+    std::size_t const width = cap <= n_binary ? std::size_t {2}
+        : cap <= n_binary + n_integer         ? integer_width
+                                              : fan_out.partition_num();
+    regions = detail::saturating_mul(regions, width);
+    bool const enumerable = cap <= n_binary + n_integer;
+    if (composition_footprint_bytes<T>(
+            regions, sample_points, n_buffers, enumerable)
+        > budget)
+    {
+      break;
+    }
+    best = cap;
+  }
+  return best;
+}
+
 // Owns the entire graph replay for a problem and value-type V (either T or
 // cu::interval<T>) This includes:
 // - The root node (partition for intervals, sample for points)
@@ -1390,48 +1589,259 @@ private:
 // Exact (only meaningful when V=T) selects the deterministic
 // enumerate_points_kernel as the root node instead of sample_points_kernel's
 // random sampling -- see ExactGraphReplay/GraphBuilder.
-template<typename T,
-         typename V,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t SamplePoints = 1,
-         std::size_t EnumerateCap = PartitionNum,
-         bool Exact = false>
+template<typename T, typename V, std::size_t CycleSize, bool Exact = false>
 class GraphReplay
 {
   static constexpr bool is_point = std::is_same_v<V, T>;
 
 public:
+  /// @copydoc cuminlp::dag::buffer_node_count
+  /// Kept as a member for callers that already have a replay type in hand;
+  /// the implementation is shared with the free sizing functions above.
+  static std::size_t count_buffer_nodes(const Problem<T>& problem)
+  {
+    return buffer_node_count(problem);
+  }
+
+  /**
+   * @brief Device bytes build() would allocate for a composition this wide.
+   *
+   * Every buffer this class owns is sized off `n_elems` (= n_regions, times
+   * sample_points for the point graph), and there is one such buffer per
+   * reachable non-Const DAG node. So the total is linear in n_elems with a
+   * coefficient the Problem fixes, and can be computed before allocating
+   * anything.
+   *
+   * Saturates at SIZE_MAX, for the same reason composition_fan_out does:
+   * with partition_num now a runtime value, `n_regions` can arrive already
+   * saturated, and a wrapped byte count would read as comfortably in budget.
+   */
+  static std::size_t estimate_bytes(const Problem<T>& problem,
+                                    std::size_t n_regions,
+                                    std::size_t sample_points = 1)
+  {
+    return bytes_for(n_regions, sample_points, count_buffer_nodes(problem));
+  }
+
+  // Bytes per element: one V per buffer-bearing node, plus feasible[] (1
+  // byte) and obj_lb/obj_ub/masked_ub (T each).
+  static std::size_t bytes_per_element(std::size_t n_buffers)
+  {
+    return detail::saturating_mul(n_buffers, sizeof(V)) + 1 + 3 * sizeof(T);
+  }
+
+  static std::size_t bytes_for(std::size_t n_regions,
+                               std::size_t sample_points,
+                               std::size_t n_buffers)
+  {
+    std::size_t const n_elems = is_point
+        ? detail::saturating_mul(n_regions, sample_points)
+        : n_regions;
+    return detail::saturating_mul(n_elems, bytes_per_element(n_buffers));
+  }
+
+  /// Which of the three graph shapes this instantiation is, for diagnostics.
+  static const char* graph_kind()
+  {
+    if constexpr (is_point && Exact) {
+      return "exact";
+    } else if constexpr (is_point) {
+      return "point";
+    } else {
+      return "interval";
+    }
+  }
+
+  /**
+   * @brief Explain an over-budget build: where the size came from, and which
+   *        knob to turn.
+   *
+   * The region count is a *product* over slots, so an out-of-budget request
+   * is usually out by orders of magnitude and the raw byte figure alone tells
+   * a caller nothing actionable. This shows the multiplication that produced
+   * it, then does the arithmetic the caller would otherwise have to: the
+   * widest slot cap that would actually fit.
+   *
+   * That last part is the useful half. Because the fan-outs are ordered with
+   * live slots first, the prefix products are exactly the region counts a
+   * smaller max_cycle_size would give, so the answer is a scan.
+   *
+   * The scan charges composition_footprint_bytes -- every graph a solve holds
+   * for a composition at once -- not this graph alone. Scanning this graph
+   * alone is what made the suggestion unfollowable: an exact graph overflowing
+   * at one element per region would recommend a cap at which the point graph,
+   * at `solve_sample_points` elements per region, overflowed in turn.
+   *
+   * Hence the two sample counts. `sample_points` is what *this* graph draws,
+   * and describes the size that failed; `solve_sample_points` is the
+   * solve-wide setting, and is what the recommendation has to be costed
+   * against. They differ exactly when this is not the point graph.
+   */
+  static std::string out_of_memory_report(
+      const Composition<CycleSize>& composition,
+      const FanOutSpec& fan_out,
+      std::size_t sample_points,
+      std::size_t n_buffers,
+      std::size_t needed,
+      std::size_t budget,
+      std::size_t solve_sample_points)
+  {
+    std::size_t const n_regions = composition_fan_out(composition, fan_out);
+
+    std::string msg = std::string(graph_kind()) + " graph needs "
+        + detail::format_bytes(needed) + " of device memory, but only "
+        + detail::format_bytes(budget) + " is available.\n";
+
+    // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)".
+    msg += "  composition: " + std::to_string(composition.count)
+        + " live slot(s) of " + std::to_string(CycleSize) + " compiled";
+    for (int k = 0; k < 5; ++k) {
+      auto const kind = static_cast<SlotKind>(k);
+      if (kind == SlotKind::Padding) {
+        continue;
+      }
+      std::size_t slots = 0;
+      for (std::size_t j = 0; j < composition.count; ++j) {
+        if (composition[j] == kind) {
+          ++slots;
+        }
+      }
+      if (slots > 0) {
+        msg += "\n    " + std::to_string(slots) + " x " + slot_kind_name(kind)
+            + " (fan-out " + std::to_string(slot_fan_out(kind, fan_out))
+            + " each)";
+      }
+    }
+
+    msg += "\n  -> " + detail::format_count(n_regions) + " regions";
+    if (is_point && sample_points > 1) {
+      msg += " x " + std::to_string(sample_points) + " sample points";
+    }
+    msg += "\n  x " + detail::format_bytes(bytes_per_element(n_buffers))
+        + " per element (" + std::to_string(n_buffers)
+        + " DAG-node buffers of " + std::to_string(sizeof(V))
+        + " B, plus " + std::to_string(1 + 3 * sizeof(T))
+        + " B of per-element bookkeeping)"
+        + "\n  = " + detail::format_bytes(needed) + '\n';
+
+    // The region count is a product over slots, so dropping one slot divides
+    // it by that slot's fan-out. Report the widest cap that fits -- costed
+    // against every graph the solve would then hold, so that following the
+    // suggestion cannot fail a second time.
+    std::size_t prefix = 1;
+    std::size_t best_slots = 0;
+    std::size_t best_bytes = 0;
+    Composition<CycleSize> truncated {};
+    truncated.kinds.fill(SlotKind::Padding);
+    for (std::size_t j = 0; j < composition.count; ++j) {
+      prefix = detail::saturating_mul(
+          prefix, slot_fan_out(composition[j], fan_out));
+      truncated[j] = composition[j];
+      truncated.count = j + 1;
+      std::size_t const bytes =
+          composition_footprint_bytes<T>(prefix,
+                                         solve_sample_points,
+                                         n_buffers,
+                                         is_fully_enumerable(truncated));
+      if (bytes <= budget) {
+        best_slots = j + 1;
+        best_bytes = bytes;
+      } else {
+        break;
+      }
+    }
+
+    if (best_slots > 0) {
+      msg += "\n  Acting on " + std::to_string(best_slots)
+          + " variable(s) at a time instead of "
+          + std::to_string(composition.count) + " leaves every graph the "
+            "solve holds for one composition -- point, interval"
+          + (is_fully_enumerable(composition) ? ", exact" : "")
+          + " -- at " + detail::format_bytes(best_bytes)
+          + " together: try --max-cycle-size=" + std::to_string(best_slots)
+          + '\n';
+    } else {
+      msg +=
+          "\n  Even a single slot does not fit, so the per-element cost is "
+          "the problem rather than the slot count: this Problem needs "
+          + detail::format_bytes(bytes_per_element(n_buffers))
+          + " per region for its " + std::to_string(n_buffers) + " DAG nodes\n";
+    }
+    msg +=
+        "  Lowering --partition-num / --enumerate-cap shrinks each slot's "
+        "fan-out, which reduces the product too.";
+    return msg;
+  }
+
   // `composition` fixes this replay's fan-out/shape for its whole lifetime;
   // only which variables fill its slots (set_domain's `var_ids`) varies
   // between launches.
+  //
+  // `budget_bytes` caps what this build may allocate on the device; 0 means
+  // "ask the driver for what's currently free". A composition whose fan-out
+  // exceeds it raises ResourceExhausted *before* allocating anything, rather
+  // than dying partway through with a bare cudaErrorMemoryAllocation. This
+  // guard did not exist while partition_num was a template parameter: the
+  // handful of compile-time shapes were hand-tuned to fit, whereas a runtime
+  // `--partition-num 10` with CycleSize 20 now asks for 10^20 regions from a
+  // command line.
+  //
+  // `sample_points` is ignored by the interval and exact graphs, which
+  // evaluate exactly one element per region; only the sampling point graph
+  // reads it.
   static GraphReplay build(const Problem<T>& problem,
-                           const Composition<CycleSize>& composition)
+                           const Composition<CycleSize>& composition,
+                           const FanOutSpec& fan_out,
+                           std::size_t budget_bytes = 0,
+                           std::size_t sample_points = 1)
   {
+    if (sample_points < 1) {
+      throw cuminlp::InvalidConfiguration(
+          "sample_points must be at least 1; a point graph that samples "
+          "nothing can never produce an incumbent");
+    }
+
     GraphReplay replay;
     replay.composition_ = composition;
-    replay.n_regions_ =
-        composition_fan_out<PartitionNum, EnumerateCap>(composition);
+    replay.n_regions_ = composition_fan_out(composition, fan_out);
     replay.n_vars_ = problem.box_bounds.size();
+    replay.sample_points_ = is_point && !Exact ? sample_points : 1;
+    replay.slot_count_ = composition.count;
+
+    std::size_t const n_buffers = count_buffer_nodes(problem);
+    std::size_t const needed = bytes_for(
+        replay.n_regions_, replay.sample_points_, n_buffers);
+    if (budget_bytes == 0) {
+      std::size_t free_bytes = 0;
+      std::size_t total_bytes = 0;
+      detail::check(cudaMemGetInfo(&free_bytes, &total_bytes),
+                    "cudaMemGetInfo");
+      budget_bytes = free_bytes;
+    }
+    if (needed > budget_bytes) {
+      throw cuminlp::ResourceExhausted(out_of_memory_report(
+          composition, fan_out, replay.sample_points_, n_buffers, needed,
+          budget_bytes, sample_points));
+    }
 
     replay.domain_buffer_ =
         detail::alloc_device<cu::interval<T>>(replay.n_vars_);
     replay.slot_var_ids_device_ = detail::alloc_device<std::size_t>(CycleSize);
-    replay.slot_fan_out_device_ = detail::alloc_device<int>(CycleSize);
+    replay.slot_fan_out_device_ = detail::alloc_device<std::uint32_t>(CycleSize);
     replay.slot_kind_device_ = detail::alloc_device<SlotKind>(CycleSize);
     replay.var_kinds_device_ = detail::alloc_device<VarKind>(replay.n_vars_);
 
     // fan_out/kind are fixed by `composition`, and var_kinds by the problem,
     // so they're all uploaded once here rather than on every set_domain()
     // call like var_ids.
-    std::array<int, CycleSize> fan_out_host {};
+    std::array<std::uint32_t, CycleSize> fan_out_host {};
     for (std::size_t j = 0; j < CycleSize; ++j) {
-      fan_out_host[j] = static_cast<int>(
-          slot_fan_out<PartitionNum, EnumerateCap>(composition[j]));
+      fan_out_host[j] =
+          static_cast<std::uint32_t>(slot_fan_out(composition[j], fan_out));
     }
     detail::check(cudaMemcpy(replay.slot_fan_out_device_,
                              fan_out_host.data(),
-                             CycleSize * sizeof(int),
+                             CycleSize * sizeof(std::uint32_t),
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
     detail::check(cudaMemcpy(replay.slot_kind_device_,
@@ -1445,16 +1855,17 @@ public:
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
 
-    GraphBuilder<T, V, CycleSize, PartitionNum, SamplePoints, Exact> builder(
-        problem,
-        replay.domain_buffer_,
-        replay.n_regions_,
-        replay.slot_var_ids_device_,
-        replay.slot_fan_out_device_,
-        replay.slot_kind_device_,
-        replay.var_kinds_device_);
+    GraphBuilder<T, V, CycleSize, Exact> builder(problem,
+                                                 replay.domain_buffer_,
+                                                 replay.n_regions_,
+                                                 replay.slot_var_ids_device_,
+                                                 replay.slot_fan_out_device_,
+                                                 replay.slot_kind_device_,
+                                                 replay.var_kinds_device_,
+                                                 replay.sample_points_,
+                                                 replay.slot_count_);
 
-    // n_elems_ is n_regions_ for the interval graph, n_regions_ * SamplePoints
+    // n_elems_ is n_regions_ for the interval graph, n_regions_ * sample_points
     // for the point graph -- every per-node buffer (feasible[], obj_lb[]
     // included) is sized off it, not n_regions_ directly.
     replay.n_elems_ = builder.n_elems();
@@ -1646,6 +2057,9 @@ public:
     composition_ = other.composition_;
     n_regions_ = other.n_regions_;
     n_elems_ = other.n_elems_;
+
+    sample_points_ = other.sample_points_;
+    slot_count_ = other.slot_count_;
     n_vars_ = other.n_vars_;
     root_grid_ = other.root_grid_;
     block_ = other.block_;
@@ -1724,6 +2138,7 @@ public:
           &var_buffers_device_,
           &n_vars_,
           &n_regions_,
+          &slot_count_,
       };
       params.func =
           reinterpret_cast<void*>(enumerate_points_kernel<T, CycleSize>);
@@ -1741,10 +2156,12 @@ public:
           &var_buffers_device_,
           &n_vars_,
           &n_regions_,
+          &slot_count_,
+          &sample_points_,
           &salt,
       };
-      params.func = reinterpret_cast<void*>(
-          sample_points_kernel<T, CycleSize, SamplePoints>);
+      params.func =
+          reinterpret_cast<void*>(sample_points_kernel<T, CycleSize>);
       params.kernelParams = kernel_args;
       detail::check(
           cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
@@ -1758,6 +2175,7 @@ public:
           &var_buffers_device_,
           &n_vars_,
           &n_regions_,
+          &slot_count_,
       };
       params.func =
           reinterpret_cast<void*>(partition_variables_kernel<T, CycleSize>);
@@ -1818,7 +2236,7 @@ public:
   // CUB's numeric_limits<T>::max() seed) -- check has_candidate() first.
   std::span<const V> candidate_point() const { return candidate_point_host_; }
 
-  // Flat element index the reduction picked; r * SamplePoints + i for the
+  // Flat element index the reduction picked; r * sample_points + i for the
   // point graph, the region index for the interval graph.
   std::int64_t candidate_index() const { return candidate_index_host_; }
 
@@ -1913,7 +2331,7 @@ private:
   V** var_buffers_device_ = nullptr;
   std::size_t* slot_var_ids_device_ =
       nullptr;  // device, CycleSize entries, written by set_domain()
-  int* slot_fan_out_device_ =
+  std::uint32_t* slot_fan_out_device_ =
       nullptr;  // device, CycleSize entries, fixed by composition_
   SlotKind* slot_kind_device_ =
       nullptr;  // device, CycleSize entries, fixed by composition_
@@ -1929,29 +2347,22 @@ private:
   Composition<CycleSize> composition_ {};
   std::size_t n_regions_ = 0;
   std::size_t n_elems_ = 0;
+
+  std::size_t sample_points_ = 1;
+  std::size_t slot_count_ = 0;
   std::size_t n_vars_ = 0;
   dim3 root_grid_ {};
   dim3 block_ {};
 };
 
-// Convenience aliases: the interval graph doesn't need SamplePoints, the
-// point graph does. EnumerateCap defaults to PartitionNum, same as GraphReplay
-// itself and GreedyCompositionPolicy -- pass it explicitly only when
-// decoupling the enumerate threshold from the bisection width.
-template<typename T,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t EnumerateCap = PartitionNum>
-using IntervalGraphReplay =
-    GraphReplay<T, cu::interval<T>, CycleSize, PartitionNum, 1, EnumerateCap>;
+// Convenience aliases. Neither the fan-out widths nor the sample count are
+// part of the type any more: both arrive as build() arguments, so these
+// differ only in the value type V (and hence in which root kernel runs).
+template<typename T, std::size_t CycleSize>
+using IntervalGraphReplay = GraphReplay<T, cu::interval<T>, CycleSize>;
 
-template<typename T,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t SamplePoints,
-         std::size_t EnumerateCap = PartitionNum>
-using PointGraphReplay =
-    GraphReplay<T, T, CycleSize, PartitionNum, SamplePoints, EnumerateCap>;
+template<typename T, std::size_t CycleSize>
+using PointGraphReplay = GraphReplay<T, T, CycleSize>;
 
 // Deterministic evaluation over a fully-enumerable Composition: every region
 // is an exact grid point rather than a random sample, so its CUB ArgMin
@@ -1960,11 +2371,7 @@ using PointGraphReplay =
 // and uses one of these for Compositions where is_fully_enumerable() holds,
 // and only dispatches to it for a node once every live variable in the box
 // fits in its CycleSize slots (see GraphDriver::solve()).
-template<typename T,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t EnumerateCap = PartitionNum>
-using ExactGraphReplay =
-    GraphReplay<T, T, CycleSize, PartitionNum, 1, EnumerateCap, /*Exact=*/true>;
+template<typename T, std::size_t CycleSize>
+using ExactGraphReplay = GraphReplay<T, T, CycleSize, /*Exact=*/true>;
 
 }  // namespace cuminlp::dag

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "composition_policy.hpp"
 #include "search.hpp"
 #include "slot_decode.hpp"
@@ -94,44 +96,72 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
  *        the hand-rolled FixedRosenbrockDriver/rosenbrock.cuh's own, simpler
  *        model and are untouched by this.
  *
- * @tparam CycleSize Number of dimensions being cycled this iteration
+ * `Capacity` is a compile-time bound; `count` is how many slots are actually
+ * live, so one instantiated capacity serves every narrower assignment (see
+ * design/RUNTIME_SHAPE.md §4). Only `count` entries of each array are ever
+ * read.
+ *
+ * Field widths are chosen for the register file, not for convenience: this
+ * whole struct is per-thread and register-resident, so every byte is
+ * multiplied by the thread count. `std::size_t var_ids` and `int` part/
+ * fan_out cost 20 bytes per slot (5 registers), which put capacity 64 at 320
+ * registers -- past the 255-per-thread hard cap, i.e. unreachable. At 13
+ * bytes per slot (3.25 registers) capacity 64 costs 208 and fits.
+ *
+ * fan_out stays 32-bit rather than 16: a single slot legitimately exceeds
+ * 65535 children (source/power_series.cu bisects one variable 10000 ways,
+ * and --partition-num is unbounded above), so a 16-bit radix would silently
+ * wrap on a configuration the solver is otherwise happy to run.
+ *
+ * @tparam Capacity Maximum number of dimensions cycled in one iteration
  */
-template<std::size_t CycleSize>
+template<std::size_t Capacity>
 struct SlotContext
 {
-  int part[CycleSize];  // this thread's index into each slot's fan-out
-  std::size_t var_ids[CycleSize];  // which variable each slot acts on
-  int fan_out[CycleSize];  // radix used to decode `part` for each slot
-  SlotKind kind[CycleSize];  // operation each slot performs
+  std::uint32_t part[Capacity];  // this thread's index into each slot's fan-out
+  std::uint32_t var_ids[Capacity];  // which variable each slot acts on
+  std::uint32_t fan_out[Capacity];  // radix used to decode `part`
+  SlotKind kind[Capacity];  // operation each slot performs (uint8_t-backed)
+  std::uint32_t count;  // slots in use; entries past this are unread
 };
 
 /**
  * @brief Create the per-thread slot context for a thread
  *
- * @tparam CycleSize    Number of dimensions being cycled
+ * @tparam Capacity     Compile-time slot capacity
  * @param tid           Global thread index
- * @param slot_var_ids  Which variable each of the CycleSize slots acts on
+ * @param slot_var_ids  Which variable each live slot acts on
  * @param slot_fan_out  Fan-out (radix) of each slot, from Composition +
- * PartitionNum
+ * FanOutSpec
  * @param slot_kind     Operation each slot performs
+ * @param slot_count    Live slots; the padding tail past it is skipped
  * @return SlotContext
  */
-template<std::size_t CycleSize>
-__device__ SlotContext<CycleSize> make_slot_context(
+template<std::size_t Capacity>
+__device__ SlotContext<Capacity> make_slot_context(
     std::size_t tid,
     const std::size_t* __restrict__ slot_var_ids,
-    const int* __restrict__ slot_fan_out,
-    const SlotKind* __restrict__ slot_kind)
+    const std::uint32_t* __restrict__ slot_fan_out,
+    const SlotKind* __restrict__ slot_kind,
+    std::size_t slot_count)
 {
-  SlotContext<CycleSize> ctx {};
+  SlotContext<Capacity> ctx {};
+  ctx.count = static_cast<std::uint32_t>(slot_count);
 
   std::size_t idx = tid;
-  for (std::size_t j = 0; j < CycleSize; ++j) {
-    ctx.var_ids[j] = slot_var_ids[j];
+  // Bounded by Capacity so the trip count is still statically known (the
+  // loop unrolls), but exits at `count` so a narrow assignment on a wide
+  // rung doesn't walk its padding tail.
+#pragma unroll
+  for (std::size_t j = 0; j < Capacity; ++j) {
+    if (j >= ctx.count) {
+      break;
+    }
+    ctx.var_ids[j] = static_cast<std::uint32_t>(slot_var_ids[j]);
     ctx.fan_out[j] = slot_fan_out[j];
     ctx.kind[j] = slot_kind[j];
     ctx.part[j] =
-        static_cast<int>(idx % static_cast<std::size_t>(ctx.fan_out[j]));
+        static_cast<std::uint32_t>(idx % static_cast<std::size_t>(ctx.fan_out[j]));
     idx /= static_cast<std::size_t>(ctx.fan_out[j]);
   }
   return ctx;
@@ -143,19 +173,25 @@ __device__ SlotContext<CycleSize> make_slot_context(
  *        value for IntegerEnumerate/BinaryEnumerate).
  *
  * @tparam T Precision used (float/double)
- * @tparam CycleSize Number of dimensions being cycled
+ * @tparam Capacity Compile-time slot capacity
  * @param ctx SlotContext for the thread
  * @param interval Parent interval
  * @param dim Dimension to bound
  * @param bound Result parameter: bounds for dim
  */
-template<typename T, std::size_t CycleSize>
-__device__ void get_slot_bounds(const SlotContext<CycleSize>& ctx,
+template<typename T, std::size_t Capacity>
+__device__ void get_slot_bounds(const SlotContext<Capacity>& ctx,
                                 const cu::interval<T>* interval,
                                 std::size_t dim,
                                 cu::interval<T>& bound)
 {
-  for (std::size_t j = 0; j < CycleSize; ++j) {
+  // Only live slots: the padding tail never matches a real dim anyway (its
+  // var_ids entries are left zeroed), so stopping at count is a pure saving.
+#pragma unroll
+  for (std::size_t j = 0; j < Capacity; ++j) {
+    if (j >= ctx.count) {
+      break;
+    }
     if (ctx.var_ids[j] != dim) {
       continue;
     }

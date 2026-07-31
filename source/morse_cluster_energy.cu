@@ -4,8 +4,10 @@
 #include <memory>
 #include <string>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
+#include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_driver.cuh"
 
 using cuminlp::dag::Expr;
@@ -19,6 +21,11 @@ namespace
 constexpr std::size_t POINTS = 10;
 constexpr std::size_t VARS = 3 * POINTS;
 constexpr std::size_t CYCLE_SIZE = 2;
+// SlotContext is register-resident, so the capacity is chosen from a compiled
+// ladder rather than being CYCLE_SIZE itself; CYCLE_SIZE remains the cap the
+// policy honours (see include/cuminlp/capacity_ladder.hpp).
+constexpr std::size_t CAPACITY = cuminlp::ladder_rung_or_zero(CYCLE_SIZE);
+static_assert(CAPACITY != 0, "CYCLE_SIZE exceeds the widest compiled rung");
 constexpr std::size_t PARTITION_NUM = 20;
 constexpr std::size_t SAMPLE_POINTS = 10;
 }  // namespace
@@ -30,49 +37,53 @@ constexpr std::size_t SAMPLE_POINTS = 10;
 // CYCLE 8, PARTITION 5 =
 auto main(int argc, char* argv[]) -> int
 {
-  Problem<double> problem;
-  std::vector<Expr<double>> x;
-  x.reserve(VARS);
-  // x1, x11, x12, x21, x22, x23 are all fixed to 0 to break translational
-  // symmetry
-  for (std::size_t i = 0; i < VARS; ++i) {
-    if (i == 0 || i == 10 || i == 11 || i == 20 || i == 21 || i == 22) {
-      x.push_back(problem.fixed(0));
-    } else {
-      x.push_back(problem.var(-5, 5));
-    }
-  }
+  return cuminlp::examples::guarded(
+      [&]
+      {
+        Problem<double> problem;
+        std::vector<Expr<double>> x;
+        x.reserve(VARS);
+        // x1, x11, x12, x21, x22, x23 are all fixed to 0 to break translational
+        // symmetry
+        for (std::size_t i = 0; i < VARS; ++i) {
+          if (i == 0 || i == 10 || i == 11 || i == 20 || i == 21 || i == 22) {
+            x.push_back(problem.fixed(0));
+          } else {
+            x.push_back(problem.var(-5, 5));
+          }
+        }
 
-  std::vector<Expr<double>> terms;
-  terms.reserve(POINTS * (POINTS - 1) / 2);
+        std::vector<Expr<double>> terms;
+        terms.reserve(POINTS * (POINTS - 1) / 2);
 
-  for (std::size_t i = 0; i < POINTS; ++i) {
-    for (std::size_t j = i + 1; j < POINTS; ++j) {
-      auto dx = x[i] - x[j];
-      auto dy = x[i + 10] - x[j + 10];
-      auto dz = x[i + 20] - x[j + 20];
-      auto r2 = (dx * dx) + (dy * dy) + (dz * dz);
-      auto r = sqrt(r2);
-      auto t = exp(3 * (1 - r));
-      auto u = 1 - t;
-      auto v = u * u;
-      terms.push_back(v);
-    }
-  }
+        for (std::size_t i = 0; i < POINTS; ++i) {
+          for (std::size_t j = i + 1; j < POINTS; ++j) {
+            auto dx = x[i] - x[j];
+            auto dy = x[i + 10] - x[j + 10];
+            auto dz = x[i + 20] - x[j + 20];
+            auto r2 = (dx * dx) + (dy * dy) + (dz * dz);
+            auto r = sqrt(r2);
+            auto t = exp(3 * (1 - r));
+            auto u = 1 - t;
+            auto v = u * u;
+            terms.push_back(v);
+          }
+        }
 
-  Expr<double> obj = terms[0];
-  for (std::size_t i = 1; i < terms.size(); ++i) {
-    obj = obj + terms[i];
-  }
-  problem.set_objective(-45 + obj);
+        Expr<double> obj = terms[0];
+        for (std::size_t i = 1; i < terms.size(); ++i) {
+          obj = obj + terms[i];
+        }
+        problem.set_objective(-45 + obj);
 
-  int iters = std::stoi(argv[1]);
+        int iters = std::stoi(argv[1]);
 
-  auto policy = std::make_shared<
-      cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(
-      policy, iters, 1e-9);
-  drv.solve(problem);
-
-  return 0;
+        auto policy = std::make_shared<
+            cuminlp::GreedyCompositionPolicy<double, CAPACITY>>(
+            cuminlp::FanOutSpec {PARTITION_NUM},
+            cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
+        cuminlp::GraphDriver<double, CAPACITY> drv(
+            policy, iters, 1e-9, SAMPLE_POINTS);
+        drv.solve(problem);
+      });
 }

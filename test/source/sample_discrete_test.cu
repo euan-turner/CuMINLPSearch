@@ -1,5 +1,6 @@
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <set>
 #include <vector>
 
@@ -47,13 +48,13 @@ SampleResult<T> run_sample_points_kernel()
   std::vector<VarKind> var_kinds_host = {
       VarKind::Continuous, VarKind::Integer, VarKind::Binary};
   std::array<std::size_t, CYCLE_SIZE> slot_var_ids_host = {0};
-  std::array<int, CYCLE_SIZE> slot_fan_out_host = {4};
+  std::array<std::uint32_t, CYCLE_SIZE> slot_fan_out_host = {4};
   std::array<SlotKind, CYCLE_SIZE> slot_kind_host = {SlotKind::Continuous};
 
   auto* domain = cuminlp::detail::alloc_device<cu::interval<T>>(N_VARS);
   auto* var_kinds = cuminlp::detail::alloc_device<VarKind>(N_VARS);
   auto* slot_var_ids = cuminlp::detail::alloc_device<std::size_t>(CYCLE_SIZE);
-  auto* slot_fan_out = cuminlp::detail::alloc_device<int>(CYCLE_SIZE);
+  auto* slot_fan_out = cuminlp::detail::alloc_device<std::uint32_t>(CYCLE_SIZE);
   auto* slot_kind = cuminlp::detail::alloc_device<SlotKind>(CYCLE_SIZE);
 
   cuminlp::detail::check(cudaMemcpy(domain,
@@ -73,7 +74,7 @@ SampleResult<T> run_sample_points_kernel()
                          "cudaMemcpy");
   cuminlp::detail::check(cudaMemcpy(slot_fan_out,
                                     slot_fan_out_host.data(),
-                                    CYCLE_SIZE * sizeof(int),
+                                    CYCLE_SIZE * sizeof(std::uint32_t),
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
   cuminlp::detail::check(cudaMemcpy(slot_kind,
@@ -94,7 +95,7 @@ SampleResult<T> run_sample_points_kernel()
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
 
-  cuminlp::dag::sample_points_kernel<T, CYCLE_SIZE, SamplePoints>
+  cuminlp::dag::sample_points_kernel<T, CYCLE_SIZE>
       <<<1, 256>>>(domain,
                    slot_var_ids,
                    slot_fan_out,
@@ -103,6 +104,8 @@ SampleResult<T> run_sample_points_kernel()
                    var_buffers,
                    N_VARS,
                    N_REGIONS,
+                   /*slot_count=*/CYCLE_SIZE,
+                   SamplePoints,
                    /*salt=*/42);
   cuminlp::detail::check(cudaGetLastError(), "sample_points_kernel launch");
   cuminlp::detail::check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");

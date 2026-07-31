@@ -14,6 +14,7 @@
 #include "cuminlp/cuda_utils.cuh"
 #include "cuminlp/cuminlp.hpp"
 #include "cuminlp/dag.hpp"
+#include "cuminlp/errors.hpp"
 #include "cuminlp/graph_replay.cuh"
 #include "cuminlp/search.hpp"
 
@@ -25,32 +26,43 @@ namespace cuminlp
 // (point, interval) GraphReplay pair -- point for GUB candidates, interval
 // for sound lower bounds / pruning -- is built lazily on first use and
 // cached (find_graphs/find_exact_graphs), since possible_compositions() can
-// be large and most entries may go unused for a given problem/CycleSize.
+// be large and most entries may go unused for a given problem/Capacity.
 //
-// If a node's live dimensions all fit within CycleSize and the chosen
+// If a node's live dimensions all fit within Capacity and the chosen
 // Composition is fully enumerable, an ExactGraphReplay evaluates it exactly
 // in one shot and fathoms it directly instead of enqueueing children for
 // interval pruning.
 //
 // CompositionPolicy is a runtime constructor argument (not a template
-// parameter) so it can be chosen via CLI flag without recompiling.
-// EnumerateCap defaults to PartitionNum; override only to decouple the
-// enumerate threshold from the bisection width (must match the policy's own).
-template<typename T,
-         std::size_t CycleSize,
-         std::size_t PartitionNum,
-         std::size_t SamplePoints,
-         std::size_t EnumerateCap = PartitionNum>
+// parameter) so it can be chosen via CLI flag without recompiling. The
+// fan-out widths (formerly the PartitionNum/EnumerateCap template
+// parameters) come from that same policy via CompositionPolicy::fan_out, so
+// the driver and the policy cannot disagree about them -- previously they
+// were independent template arguments whose agreement nothing checked.
+template<typename T, std::size_t Capacity>
 class GraphDriver : public driver
 {
 public:
+  // `sample_points` is how many points the point graph draws per subdomain
+  // (formerly the SamplePoints template parameter); it does not reach the
+  // interval or exact graphs, which evaluate one element per region.
+  // `budget_bytes` caps device memory per built graph; 0 means "whatever is
+  // free at the time each graph is built". See GraphReplay::build.
   explicit GraphDriver(
-      std::shared_ptr<const CompositionPolicy<T, CycleSize>> policy,
+      std::shared_ptr<const CompositionPolicy<T, Capacity>> policy,
       uint32_t iter_limit = 1000000,
-      double tolerance = 1e-9)
+      double tolerance = 1e-9,
+      std::size_t sample_points = 1,
+      std::size_t budget_bytes = 0)
       : driver(iter_limit, tolerance)
       , policy_(std::move(policy))
+      , sample_points_(sample_points)
+      , budget_bytes_(budget_bytes)
   {
+    if (policy_ == nullptr) {
+      throw cuminlp::InvalidConfiguration(
+          "GraphDriver requires a non-null CompositionPolicy");
+    }
   }
 
   // The sampled point that attained GUB_, indexed by variable. Empty until
@@ -64,27 +76,22 @@ public:
     using search::IntervalPQueue;
 
     std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
+    FanOutSpec const& fan_out = policy_->fan_out();
 
     // One (point, interval) replay pair per Composition actually encountered,
     // built lazily and cached -- eagerly building every possible_compositions()
     // entry could waste enormous GPU memory on graphs nothing ever launches.
     struct CompositionGraphs
     {
-      Composition<CycleSize> composition;
-      dag::PointGraphReplay<T,
-                            CycleSize,
-                            PartitionNum,
-                            SamplePoints,
-                            EnumerateCap>
-          point;
-      dag::IntervalGraphReplay<T, CycleSize, PartitionNum, EnumerateCap>
-          interval;
+      Composition<Capacity> composition;
+      dag::PointGraphReplay<T, Capacity> point;
+      dag::IntervalGraphReplay<T, Capacity> interval;
     };
 
     std::vector<CompositionGraphs> graphs;
     auto find_graphs =
-        [&graphs, &problem](
-            const Composition<CycleSize>& composition) -> CompositionGraphs&
+        [&graphs, &problem, &fan_out, this](
+            const Composition<Capacity>& composition) -> CompositionGraphs&
     {
       for (auto& g : graphs) {
         if (g.composition == composition) {
@@ -93,13 +100,14 @@ public:
       }
       graphs.push_back(CompositionGraphs {
           composition,
-          dag::PointGraphReplay<T,
-                                CycleSize,
-                                PartitionNum,
-                                SamplePoints,
-                                EnumerateCap>::build(problem, composition),
-          dag::IntervalGraphReplay<T, CycleSize, PartitionNum, EnumerateCap>::
-              build(problem, composition),
+          dag::PointGraphReplay<T, Capacity>::build(
+              problem, composition, fan_out, budget_bytes_, sample_points_),
+          // sample_points_ reaches the interval graph only so its
+          // out-of-memory report can cost a suggested cap against the point
+          // graph too; build() clamps its own allocation to one element per
+          // region regardless (GraphReplay::build, `is_point && !Exact`).
+          dag::IntervalGraphReplay<T, Capacity>::build(
+              problem, composition, fan_out, budget_bytes_, sample_points_),
       });
       return graphs.back();
     };
@@ -108,14 +116,14 @@ public:
     // Composition actually encountered.
     struct ExactGraphs
     {
-      Composition<CycleSize> composition;
-      dag::ExactGraphReplay<T, CycleSize, PartitionNum, EnumerateCap> exact;
+      Composition<Capacity> composition;
+      dag::ExactGraphReplay<T, Capacity> exact;
     };
 
     std::vector<ExactGraphs> exact_graphs;
     auto find_exact_graphs =
-        [&exact_graphs,
-         &problem](const Composition<CycleSize>& composition) -> ExactGraphs*
+        [&exact_graphs, &problem, &fan_out, this](
+            const Composition<Capacity>& composition) -> ExactGraphs*
     {
       if (!is_fully_enumerable(composition)) {
         return nullptr;
@@ -127,28 +135,28 @@ public:
       }
       exact_graphs.push_back(ExactGraphs {
           composition,
-          dag::ExactGraphReplay<T, CycleSize, PartitionNum, EnumerateCap>::
-              build(problem, composition),
+          // Likewise for the exact graph: reporting only, never allocation.
+          dag::ExactGraphReplay<T, Capacity>::build(
+              problem, composition, fan_out, budget_bytes_, sample_points_),
       });
       return &exact_graphs.back();
     };
 
-    IntervalPQueue<
-        T,
-        CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap>>
-        pending(1000);
+    IntervalPQueue<T, CompositionInterval<T, Capacity>> pending(1000);
     IntervalHistory<T> history;
 
     std::vector<cu::interval<T>> origin {};
     history.enqueue(origin);
 
-    pending.enqueue(
-        CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> {
-            .sidx = 0,
-            .pidx = 0,
-            .depth = 0,
-            .lb = GLB_,
-        });
+    pending.enqueue(CompositionInterval<T, Capacity> {
+        .sidx = 0,
+        .pidx = 0,
+        .depth = 0,
+        .lb = GLB_,
+        // The root has no parent to decode against, so materialise() returns
+        // root_box directly and never reaches the tripwire.
+        .slot_count = 0,
+    });
 
     bool converged = false;
     std::size_t pruned_infeasible = 0;
@@ -158,8 +166,7 @@ public:
     {
       ++iter_idx_;
 
-      CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> cur =
-          pending.dequeue();
+      CompositionInterval<T, Capacity> cur = pending.dequeue();
 
       if (cur.lb > GUB_) {
         converged = true;
@@ -235,13 +242,15 @@ public:
           continue;
         }
 
-        pending.enqueue(
-            CompositionInterval<T, CycleSize, PartitionNum, EnumerateCap> {
-                .sidx = tid,
-                .pidx = box_idx,
-                .depth = cur.depth + 1,
-                .lb = obj_lb[tid],
-            });
+        pending.enqueue(CompositionInterval<T, Capacity> {
+            .sidx = tid,
+            .pidx = box_idx,
+            .depth = cur.depth + 1,
+            .lb = obj_lb[tid],
+            // Recorded so materialise() can prove the policy re-derives the
+            // same assignment when this child is dequeued.
+            .slot_count = assignment.composition.count,
+        });
       }
 
       std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_
@@ -291,7 +300,9 @@ public:
 
 private:
   std::vector<T> best_point_;
-  std::shared_ptr<const CompositionPolicy<T, CycleSize>> policy_;
+  std::shared_ptr<const CompositionPolicy<T, Capacity>> policy_;
+  std::size_t sample_points_;
+  std::size_t budget_bytes_;
 };
 
 }  // namespace cuminlp

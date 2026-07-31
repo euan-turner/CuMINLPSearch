@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 #include <type_traits>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
@@ -16,8 +18,10 @@
 
 using cuminlp::Composition;
 using cuminlp::composition_fan_out;
+using cuminlp::FanOutSpec;
 using cuminlp::ShapeMismatch;
 using cuminlp::SlotKind;
+using cuminlp::dag::Expr;
 using cuminlp::dag::IntervalGraphReplay;
 using cuminlp::dag::PointGraphReplay;
 using cuminlp::dag::Problem;
@@ -61,9 +65,9 @@ Problem<double> make_pow_problem(double x_lb, double x_ub, double y_lb, double y
 
 }  // namespace
 
-static_assert(!std::is_copy_constructible_v<PointGraphReplay<double, 1, 4, 8>>);
-static_assert(!std::is_copy_assignable_v<PointGraphReplay<double, 1, 4, 8>>);
-static_assert(std::is_move_constructible_v<PointGraphReplay<double, 1, 4, 8>>);
+static_assert(!std::is_copy_constructible_v<PointGraphReplay<double, 1>>);
+static_assert(!std::is_copy_assignable_v<PointGraphReplay<double, 1>>);
+static_assert(std::is_move_constructible_v<PointGraphReplay<double, 1>>);
 
 TEST_CASE(
     "GraphReplay::n_regions matches composition_fan_out for its Composition",
@@ -72,8 +76,8 @@ TEST_CASE(
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
 
-  auto replay = IntervalGraphReplay<double, 1, 4>::build(p, comp);
-  CHECK(replay.n_regions() == composition_fan_out<4, 4>(comp));
+  auto replay = IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4});
+  CHECK(replay.n_regions() == composition_fan_out(comp, FanOutSpec {4}));
   CHECK(replay.n_regions() == 4);
 }
 
@@ -84,7 +88,7 @@ TEST_CASE(
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
-  auto replay = IntervalGraphReplay<double, 1, 4>::build(p, comp);
+  auto replay = IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4});
 
   std::vector<cu::interval<double>> wrong_size_domain = {{0.0, 10.0},
                                                          {0.0, 1.0}};
@@ -98,7 +102,7 @@ TEST_CASE("A moved-from GraphReplay is not launchable", "[graph_replay][5]")
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
-  auto replay = IntervalGraphReplay<double, 1, 4>::build(p, comp);
+  auto replay = IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4});
 
   auto moved_to = std::move(replay);
 
@@ -125,7 +129,7 @@ TEST_CASE(
   SECTION("a domain with a feasible point has a non-NaN candidate")
   {
     Problem<double> p = make_problem();
-    auto replay = PointGraphReplay<double, 1, 4, 16>::build(p, comp);
+    auto replay = PointGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 0, 16);
 
     std::vector<cu::interval<double>> domain = {
         {0.0, 5.0}};  // entirely feasible (x <= 5)
@@ -144,7 +148,7 @@ TEST_CASE(
       "all-NaN")
   {
     Problem<double> p = make_infeasible_problem();
-    auto replay = PointGraphReplay<double, 1, 4, 16>::build(p, comp);
+    auto replay = PointGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 0, 16);
 
     std::vector<cu::interval<double>> domain = {{0.0, 10.0}};
     replay.set_domain(domain, var_ids, /*salt=*/1);
@@ -164,7 +168,7 @@ TEST_CASE(
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
-  auto replay = PointGraphReplay<double, 1, 4, 32>::build(p, comp);
+  auto replay = PointGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 0, 32);
 
   std::vector<cu::interval<double>> domain = {{0.0, 5.0}};
   std::array<std::size_t, 1> var_ids = {0};
@@ -195,7 +199,7 @@ TEST_CASE("Replay determinism: different salts draw different sample points",
 {
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
-  auto replay = PointGraphReplay<double, 1, 4, 32>::build(p, comp);
+  auto replay = PointGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 0, 32);
 
   std::vector<cu::interval<double>> domain = {{0.0, 5.0}};
   std::array<std::size_t, 1> var_ids = {0};
@@ -222,7 +226,7 @@ TEST_CASE("The interval graph's result is bitwise-identical regardless of salt",
   // (point and interval graphs), and must be silently ignored here.
   Problem<double> p = make_problem();
   Composition<1> comp = {SlotKind::Continuous};
-  auto replay = IntervalGraphReplay<double, 1, 4>::build(p, comp);
+  auto replay = IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4});
 
   std::vector<cu::interval<double>> domain = {{0.0, 10.0}};
   std::array<std::size_t, 1> var_ids = {0};
@@ -253,7 +257,7 @@ TEST_CASE("Op::Pow: pow(x, y) on a degenerate box matches std::pow exactly",
   std::array<std::size_t, 2> var_ids = {0, 1};
   std::vector<cu::interval<double>> domain = {{2.0, 2.0}, {3.0, 3.0}};
 
-  auto point_replay = PointGraphReplay<double, 2, 4, 8>::build(p, comp);
+  auto point_replay = PointGraphReplay<double, 2>::build(p, comp, FanOutSpec {4}, 0, 8);
   point_replay.set_domain(domain, var_ids);
   point_replay.launch(0);
   REQUIRE(point_replay.has_candidate());
@@ -262,7 +266,7 @@ TEST_CASE("Op::Pow: pow(x, y) on a degenerate box matches std::pow exactly",
   // The interval graph's directed-rounding enclosure may be a few ulps wide
   // even on a degenerate box (cu::pow rounds its result outward), so this
   // one needs a tolerance rather than bitwise equality.
-  auto interval_replay = IntervalGraphReplay<double, 2, 4>::build(p, comp);
+  auto interval_replay = IntervalGraphReplay<double, 2>::build(p, comp, FanOutSpec {4});
   interval_replay.set_domain(domain, var_ids);
   interval_replay.launch(0);
   REQUIRE(interval_replay.has_candidate());
@@ -282,7 +286,7 @@ TEST_CASE("Op::Pow: interval graph soundly encloses x^y over a real box",
   std::array<std::size_t, 2> var_ids = {0, 1};
   std::vector<cu::interval<double>> domain = {{1.0, 4.0}, {2.0, 2.0}};
 
-  auto replay = IntervalGraphReplay<double, 2, 4>::build(p, comp);
+  auto replay = IntervalGraphReplay<double, 2>::build(p, comp, FanOutSpec {4});
   replay.set_domain(domain, var_ids);
   replay.launch(0);
 
@@ -294,4 +298,228 @@ TEST_CASE("Op::Pow: interval graph soundly encloses x^y over a real box",
     min_lb = std::min(min_lb, lb);
   }
   CHECK(min_lb <= 1.0 + 1e-9);
+}
+
+// --- Device-memory budget --------------------------------------------------
+//
+// New with runtime fan-out widths: while partition_num was a template
+// parameter the handful of compile-time shapes were hand-tuned to fit in
+// memory, so build() could allocate unconditionally. `--partition-num=10` at
+// CycleSize 20 now asks for 10^20 regions from a command line, and the
+// failure has to be a diagnosable exception rather than a partway-through
+// cudaErrorMemoryAllocation (or, worse, a wrapped size_t sizing every buffer
+// too small).
+
+TEST_CASE("build rejects a composition that exceeds its device-memory budget",
+          "[graph_replay][5][config]")
+{
+  Problem<double> p = make_problem();
+  Composition<1> comp = {SlotKind::Continuous};
+
+  // 4 regions of a handful of nodes cannot fit in 16 bytes.
+  CHECK_THROWS_AS(
+      (IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 16)),
+      cuminlp::ResourceExhausted);
+
+  // The same build succeeds under a budget that accommodates it, so the
+  // rejection above is the budget talking and not an unrelated failure.
+  CHECK_NOTHROW(
+      (IntervalGraphReplay<double, 1>::build(p, comp, FanOutSpec {4}, 1u << 30)));
+}
+
+TEST_CASE("build rejects a saturated fan-out before allocating",
+          "[graph_replay][5][config]")
+{
+  Problem<double> p = make_problem();
+
+  // 8 continuous slots at partition_num 10^7: composition_fan_out saturates
+  // at SIZE_MAX, and estimate_bytes must carry that through rather than
+  // wrapping to something that looks affordable.
+  Composition<8> huge {};
+  huge.fill(SlotKind::Continuous);
+
+  CHECK(cuminlp::composition_fan_out(huge, FanOutSpec {10000000})
+        == std::numeric_limits<std::size_t>::max());
+  CHECK(IntervalGraphReplay<double, 8>::estimate_bytes(
+            p, std::numeric_limits<std::size_t>::max())
+        == std::numeric_limits<std::size_t>::max());
+  CHECK_THROWS_AS((IntervalGraphReplay<double, 8>::build(
+                      p, huge, FanOutSpec {10000000})),
+                  cuminlp::ResourceExhausted);
+}
+
+TEST_CASE("estimate_bytes counts only DAG nodes a root actually reaches",
+          "[graph_replay][5][config]")
+{
+  // GraphBuilder allocates lazily from the objective/constraint roots, so a
+  // node nothing reaches never gets a buffer. Counting every non-Const node
+  // would over-estimate, and over-estimating is the dangerous direction: the
+  // budget guard would refuse configurations that would in fact have fit.
+  Problem<double> p = make_problem();
+  std::size_t const reachable = IntervalGraphReplay<double, 1>::
+      count_buffer_nodes(p);
+
+  // Add an expression no root refers to.
+  auto dead = p.var(0.0, 1.0) * p.var(0.0, 1.0);
+  (void)dead;
+
+  CHECK(IntervalGraphReplay<double, 1>::count_buffer_nodes(p) == reachable);
+  CHECK(reachable < p.graph.nodes.size());
+}
+
+TEST_CASE("An over-budget build reports the cause and a cap that would fit",
+          "[graph_replay][5][config]")
+{
+  // The raw byte figure alone is not actionable: the region count is a
+  // product over slots, so an over-budget request is usually out by orders
+  // of magnitude. The report has to name the multiplication and do the
+  // arithmetic for the caller.
+  Problem<double> p = make_problem();
+  Composition<4> comp {};
+  comp.fill(SlotKind::Continuous);  // 4 live slots
+
+  FanOutSpec const fan_out {50};  // 50^4 = 6.25M regions
+
+  std::string what;
+  try {
+    IntervalGraphReplay<double, 4>::build(p, comp, fan_out, /*budget=*/100000);
+    FAIL("expected ResourceExhausted");
+  } catch (const cuminlp::ResourceExhausted& e) {
+    what = e.what();
+  }
+
+  INFO(what);
+  CHECK(what.find("interval graph") != std::string::npos);  // which graph
+  CHECK(what.find("Continuous") != std::string::npos);  // which slot kind
+  CHECK(what.find("fan-out 50") != std::string::npos);  // and its width
+  CHECK(what.find("6,250,000 regions") != std::string::npos);  // the product
+  CHECK(what.find("--max-cycle-size=") != std::string::npos);  // the knob
+  CHECK(what.find("--partition-num") != std::string::npos);  // the other knob
+}
+
+TEST_CASE("The suggested cap is one the budget actually admits",
+          "[graph_replay][5][config]")
+{
+  // A suggestion that still doesn't fit would be worse than none. Extract the
+  // number the report recommends and check a build at that cap succeeds.
+  //
+  // Checking only the graph that failed is what let a broken suggestion ship:
+  // GraphDriver holds a point, an interval and (when enumerable) an exact
+  // graph for the same composition at once, so the report has to be costed
+  // against all of them. Every kind is rebuilt below, and the point graph at
+  // the *solve-wide* sample count -- the one that is not 1 -- is the case
+  // that used to be missed.
+  Problem<double> p = make_problem();
+  Composition<4> comp {};
+  comp.fill(SlotKind::Continuous);
+  FanOutSpec const fan_out {50};
+
+  std::size_t const budget = 50u * 1024 * 1024;  // 50 MiB
+  std::size_t const solve_sample_points = 10;
+  std::string what;
+  try {
+    IntervalGraphReplay<double, 4>::build(
+        p, comp, fan_out, budget, solve_sample_points);
+    FAIL("expected ResourceExhausted");
+  } catch (const cuminlp::ResourceExhausted& e) {
+    what = e.what();
+  }
+
+  auto const pos = what.find("--max-cycle-size=");
+  REQUIRE(pos != std::string::npos);
+  std::size_t const suggested =
+      std::stoul(what.substr(pos + std::string("--max-cycle-size=").size()));
+  REQUIRE(suggested >= 1);
+  REQUIRE(suggested < comp.count);
+
+  // Same composition truncated to the suggested number of live slots.
+  Composition<4> narrowed {};
+  narrowed.kinds.fill(SlotKind::Padding);
+  for (std::size_t j = 0; j < suggested; ++j) {
+    narrowed.kinds[j] = SlotKind::Continuous;
+  }
+  narrowed.count = suggested;
+
+  INFO(what);
+  CHECK_NOTHROW((IntervalGraphReplay<double, 4>::build(
+      p, narrowed, fan_out, budget, solve_sample_points)));
+  CHECK_NOTHROW((PointGraphReplay<double, 4>::build(
+      p, narrowed, fan_out, budget, solve_sample_points)));
+
+  // And the combined figure the report quotes is the one the budget has to
+  // admit, not any single graph's share of it.
+  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
+  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+            composition_fan_out(narrowed, fan_out),
+            solve_sample_points,
+            n_buffers,
+            cuminlp::is_fully_enumerable(narrowed))
+        <= budget);
+}
+
+TEST_CASE("auto_max_cycle_size picks a cap whose whole graph set fits",
+          "[graph_replay][5][config]")
+{
+  // The CLI's default for --max-cycle-size. Two properties matter and are
+  // both checked against composition_footprint_bytes rather than against a
+  // hardcoded number: the cap it returns fits, and one slot wider does not.
+  // Anything weaker would admit both a cap that OOMs (the bug this replaced)
+  // and a cap of 1 that never OOMs but wastes the device.
+  Problem<double> p;
+  Expr<double> sum = p.int_var(3.0, 9.0);
+  for (int i = 1; i < 10; ++i) {
+    sum = sum + p.int_var(3.0, 9.0);
+  }
+  p.set_objective(sum);
+
+  FanOutSpec const fan_out {7};
+  std::size_t const sample_points = 5;
+  std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
+  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
+
+  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
+      p, fan_out, sample_points, budget, cuminlp::max_capacity());
+  REQUIRE(cap >= 1);
+  REQUIRE(cap <= 10);  // never more slots than the problem has variables
+
+  // Every integer here has domain 7 == enumerate_cap, so the region count at
+  // `cap` slots is exactly 7^cap and the composition is fully enumerable.
+  auto regions = [](std::size_t slots)
+  {
+    std::size_t r = 1;
+    for (std::size_t i = 0; i < slots; ++i) {
+      r *= 7;
+    }
+    return r;
+  };
+  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+            regions(cap), sample_points, n_buffers, true)
+        <= budget);
+  if (cap < 10) {
+    CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+              regions(cap + 1), sample_points, n_buffers, true)
+          > budget);
+  }
+}
+
+TEST_CASE("auto_max_cycle_size never exceeds the ladder's widest rung",
+          "[graph_replay][5][config]")
+{
+  // A budget nothing can exhaust must still return a cap the ladder can
+  // dispatch on, or the CLI would hand ladder_rung_for a value it rejects.
+  Problem<double> p;
+  Expr<double> sum = p.var(0.0, 1.0);
+  for (int i = 1; i < 200; ++i) {
+    sum = sum + p.var(0.0, 1.0);
+  }
+  p.set_objective(sum);
+
+  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
+      p,
+      FanOutSpec {2},
+      /*sample_points=*/1,
+      std::numeric_limits<std::size_t>::max(),
+      cuminlp::max_capacity());
+  CHECK(cap == cuminlp::max_capacity());
+  CHECK_NOTHROW(cuminlp::ladder_rung_for(cap));
 }

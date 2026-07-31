@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdio>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,6 +40,66 @@ namespace cuminlp::detail
 constexpr std::size_t ceil_div(std::size_t x, std::size_t y)
 {
   return (x + y - 1) / y;
+}
+
+// Saturates at SIZE_MAX instead of wrapping. Used wherever a device
+// allocation size is computed from runtime-configurable search parameters:
+// a wrapped product would read as comfortably affordable and then size every
+// buffer far too small, whereas a saturated one is rejected loudly by the
+// memory-budget guard (see GraphReplay::build).
+constexpr std::size_t saturating_mul(std::size_t a, std::size_t b)
+{
+  if (a == 0 || b == 0) {
+    return 0;
+  }
+  if (a > std::numeric_limits<std::size_t>::max() / b) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return a * b;
+}
+
+// Companion to saturating_mul, for totalling the footprints of several
+// already-saturating buffer sizes. Wrapping here would be worse than for a
+// product: a sum of three plausible sizes that wraps to a small number reads
+// as an easily affordable total.
+constexpr std::size_t saturating_add(std::size_t a, std::size_t b)
+{
+  if (a > std::numeric_limits<std::size_t>::max() - b) {
+    return std::numeric_limits<std::size_t>::max();
+  }
+  return a + b;
+}
+
+// Byte counts in diagnostics, e.g. "221.2 GiB". Plain bytes below 1 KiB.
+inline std::string format_bytes(std::size_t bytes)
+{
+  if (bytes == std::numeric_limits<std::size_t>::max()) {
+    return "more than 2^64 bytes (the size computation saturated)";
+  }
+  static const char* const units[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
+  auto value = static_cast<double>(bytes);
+  std::size_t unit = 0;
+  while (value >= 1024.0 && unit + 1 < std::size(units)) {
+    value /= 1024.0;
+    ++unit;
+  }
+  char buf[64];
+  std::snprintf(
+      buf, sizeof(buf), unit == 0 ? "%.0f %s" : "%.1f %s", value, units[unit]);
+  return buf;
+}
+
+// Thousands separators, so a nine-digit region count is readable at a glance.
+inline std::string format_count(std::size_t n)
+{
+  std::string s = std::to_string(n);
+  for (std::size_t pos = s.size() > 3 ? s.size() - 3 : 0; pos > 0; pos -= 3) {
+    s.insert(pos, ",");
+    if (pos < 3) {
+      break;
+    }
+  }
+  return s;
 }
 
 template<std::size_t Base, std::size_t Exp>

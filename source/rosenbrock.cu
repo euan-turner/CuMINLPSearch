@@ -4,8 +4,10 @@
 #include <memory>
 #include <vector>
 
+#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
+#include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_driver.cuh"
 
 using cuminlp::dag::Expr;
@@ -16,6 +18,11 @@ namespace
 
 constexpr std::size_t DIMS = 100;
 constexpr std::size_t CYCLE_SIZE = 5;
+// SlotContext is register-resident, so the capacity is chosen from a compiled
+// ladder rather than being CYCLE_SIZE itself; CYCLE_SIZE remains the cap the
+// policy honours (see include/cuminlp/capacity_ladder.hpp).
+constexpr std::size_t CAPACITY = cuminlp::ladder_rung_or_zero(CYCLE_SIZE);
+static_assert(CAPACITY != 0, "CYCLE_SIZE exceeds the widest compiled rung");
 constexpr std::size_t PARTITION_NUM = 4;
 constexpr std::size_t SAMPLE_POINTS = 10;
 
@@ -46,13 +53,17 @@ Problem<double> make_rosenbrock(std::size_t num_vars)
 
 auto main() -> int
 {
-  Problem<double> problem = make_rosenbrock(DIMS);
+  return cuminlp::examples::guarded(
+      [&]
+      {
+        Problem<double> problem = make_rosenbrock(DIMS);
 
-  auto policy = std::make_shared<
-      cuminlp::GreedyCompositionPolicy<double, CYCLE_SIZE, PARTITION_NUM>>();
-  cuminlp::GraphDriver<double, CYCLE_SIZE, PARTITION_NUM, SAMPLE_POINTS> drv(
-      policy);
-  drv.solve(problem);
-
-  return 0;
+        auto policy = std::make_shared<
+            cuminlp::GreedyCompositionPolicy<double, CAPACITY>>(
+            cuminlp::FanOutSpec {PARTITION_NUM},
+            cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
+        cuminlp::GraphDriver<double, CAPACITY> drv(
+            policy, 1000000, 1e-9, SAMPLE_POINTS);
+        drv.solve(problem);
+      });
 }

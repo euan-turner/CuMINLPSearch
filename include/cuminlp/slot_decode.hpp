@@ -67,9 +67,19 @@ CUMINLP_HD inline void slot_bounds(SlotKind kind,
     case SlotKind::Padding: {
       // fan_out is always 1 (part always 0): no live variable assigned to
       // this slot, so the dimension it would otherwise touch is untouched
-      // by it -- but Padding never matches a real dim in the caller's
-      // var_ids, so this branch is unreachable in practice; kept only for
-      // switch exhaustiveness.
+      // by it.
+      //
+      // This branch is emphatically NOT unreachable, and a comment here once
+      // claiming so hid a bug. GreedyCompositionPolicy fills a Padding slot's
+      // var_id by *repeating the last variable it assigned*, so a Padding
+      // slot's var_id routinely names a real, live dimension. Callers must
+      // therefore not iterate the padding tail: `bound = parent` here undoes
+      // any narrowing an earlier real slot applied to that same dimension.
+      //
+      // partition::get_slot_bounds is safe because it returns on its first
+      // var_ids match; search::CompositionInterval::materialise is safe
+      // because it stops at Composition::count. Any third caller needs to do
+      // one or the other.
       bound = parent;
       break;
     }
