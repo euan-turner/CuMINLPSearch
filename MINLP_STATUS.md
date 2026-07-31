@@ -69,9 +69,29 @@ configuration cannot lose ground. The count is scraped from the log's
 `iter` lines and the shape from its `PARAMS` line; `--iters` and
 `--params` set them by hand, which is the only way to record either
 alongside a manual `--primal`/`--dual`. A `-dirty` suffix on a hash
-means the tree had uncommitted changes and the number is not
+means a **build input** was uncommitted, so the number is not
 reproducible from that hash alone -- the shape is pinned but the code
-that ran is not.
+that ran is not. Both commands stop and list those files before
+stamping one, because only the person looking at the diff can say
+whether it reaches the solver; answer `n` to go and commit first, or
+pass `-y` to skip the question.
+
+Uncommitted files that cannot reach a run -- notes, logs, this file --
+neither earn the suffix nor raise the question: a hash with no suffix
+means the code that ran is at that commit, which is the claim worth
+making, and it stays worth making only while it is not made about
+every tree with an unsaved paragraph in it. What counts as a build
+input is a heuristic in `tools/minlp_status.py`, biased towards
+suffixing: `source/`, `include/`, `test/`, `cmake/`, anything that
+compiles, and the CMake files.
+
+Two flags overrule that. `--force` overwrites a bound the run did not
+improve; `--replace` goes further and makes the run *the* row, clearing
+any bound it did not report rather than leaving it standing. Reach for
+`--replace` when the recorded numbers stopped being comparable rather
+than merely being beaten -- a commit that changed what the search does,
+or a row recorded against the wrong shape -- because "best ever seen"
+is only a useful record while every entry in it means the same thing.
 
 ## Instances
 
@@ -440,7 +460,7 @@ that ran is not.
 | ex3pb | yes | min | 32 | 31 | 191 | — | — | — | — | — | — | — | — | default-bound |
 | ex4 | yes | min | 36 | 30 | 997 | — | — | — | — | — | — | — | — | default-bound |
 | ex4_1_1 | yes | min | 1 | 0 | 21 | — | — | — | — | — | — | — | — | — |
-| ex4_1_2 | yes | min | 1 | 0 | 195 | -663.500096611 | 170ff73-dirty | 71 | --partition-num=10000 --enumerate-cap=10000 --sample-points=10 --max-cycle-size=1 | -663.500096611 | 170ff73-dirty | 71 | --partition-num=10000 --enumerate-cap=10000 --sample-points=10 --max-cycle-size=1 | — |
+| ex4_1_2 | yes | min | 1 | 0 | 195 | -663.500096611 | 9f3c633 | 71 | --partition-num=10000 --enumerate-cap=10000 --sample-points=10 --max-cycle-size=1 | -663.500096611 | 9f3c633 | 71 | --partition-num=10000 --enumerate-cap=10000 --sample-points=10 --max-cycle-size=1 | — |
 | ex4_1_3 | yes | min | 1 | 0 | 19 | — | — | — | — | — | — | — | — | — |
 | ex4_1_4 | yes | min | 1 | 0 | 10 | — | — | — | — | — | — | — | — | — |
 | ex4_1_5 | yes | min | 2 | 0 | 17 | — | — | — | — | — | — | — | — | default-bound |
@@ -923,7 +943,7 @@ that ran is not.
 | nvs06 | yes | min | 2 | 0 | 22 | — | — | — | — | — | — | — | — | — |
 | nvs07 | yes | min | 3 | 2 | 24 | — | — | — | — | — | — | — | — | — |
 | nvs08 | yes | min | 3 | 3 | 42 | — | — | — | — | — | — | — | — | — |
-| nvs09 | yes | min | 10 | 0 | 123 | -43.134336918 | 423c115-dirty | 1248 | — | -43.134336918 | 423c115-dirty | 1248 | — | — |
+| nvs09 | yes | min | 10 | 0 | 123 | -43.134336918 | 9f3c633 | 2071 | --partition-num=7 --enumerate-cap=7 --sample-points=5 --max-cycle-size=6 | -43.134336918 | 9f3c633 | 2071 | --partition-num=7 --enumerate-cap=7 --sample-points=5 --max-cycle-size=6 | — |
 | nvs10 | yes | min | 2 | 2 | 41 | — | — | — | — | — | — | — | — | — |
 | nvs11 | yes | min | 3 | 3 | 102 | — | — | — | — | — | — | — | — | — |
 | nvs12 | yes | min | 4 | 4 | 203 | — | — | — | — | — | — | — | — | — |

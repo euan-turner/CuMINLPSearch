@@ -80,16 +80,142 @@ def git(*args):
     ).stdout.strip()
 
 
-def current_commit():
-    """Short HEAD, marked if the tree is dirty.
+def dirty_paths():
+    """Paths git reports as changed, in porcelain order. Empty when clean."""
+    paths = []
+    for line in git("status", "--porcelain").splitlines():
+        path = line[3:].strip()
+        # A rename reads "R  old -> new"; the new name is the one that exists.
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        paths.append(path.strip('"'))
+    return paths
 
-    A bound found against uncommitted changes is not reproducible from the
-    hash alone, and silently recording the hash anyway would make the file
-    claim more than it knows.
+
+def affects_a_run(path):
+    """Could editing this file change what a solve computes?
+
+    A heuristic, and deliberately a generous one, because it decides whether
+    the tool stops to ask: a false "yes" costs one keystroke, a false "no"
+    records a bound against code nobody looked at. Anything that compiles, or
+    lives where things that compile live, counts.
+    """
+    p = Path(path)
+    if p.name in ("CMakeLists.txt", "CMakePresets.json"):
+        return True
+    if path.startswith(("source/", "include/", "test/", "cmake/")):
+        return True
+    return p.suffix in (".cu", ".cuh", ".cpp", ".hpp", ".h", ".cmake")
+
+
+def current_commit():
+    """Short HEAD, suffixed `-dirty` when a build input is uncommitted.
+
+    The suffix means "this hash does not identify the code that ran", so it
+    answers to the build and not to `git status`. A bound recorded while a
+    design note or a stray log was unsaved *is* reproducible from the hash
+    alone, and marking it otherwise spends the reader's suspicion on nothing
+    -- a suffix that is always there is a suffix nobody reads.
+
+    The trade is that the file can no longer distinguish "clean tree" from
+    "dirty in ways this heuristic forgave", which is why affects_a_run stays
+    biased towards saying yes: it is now the thing standing between a bound
+    and a hash that overstates it.
     """
     head = git("rev-parse", "--short", "HEAD")
-    dirty = git("status", "--porcelain") != ""
+    dirty = any(affects_a_run(path) for path in dirty_paths())
     return head + "-dirty" if dirty else head
+
+
+def confirm_dirty(what, assume_yes):
+    """Show the uncommitted build inputs and ask whether to go ahead.
+
+    The `-dirty` suffix records that a build input was uncommitted but not
+    which one or what it said, and by the time anyone reads the row the answer
+    is gone. Only the person at the keyboard right now can say whether the
+    diff in front of them is a real change to the search or a stray printf, so
+    this asks them while they can still tell.
+
+    It asks only when there is something to ask about. A clean tree says
+    nothing at all, and a tree dirty in ways that cannot reach a run -- an
+    edited design note, a stray log, this file -- says one line and carries
+    on. Stopping there would train the answer to be reflexive, which is the
+    one way a confirmation prompt can be worse than no prompt.
+    """
+    paths = dirty_paths()
+    if not paths:
+        return
+
+    code = [p for p in paths if affects_a_run(p)]
+    other = [p for p in paths if not affects_a_run(p)]
+
+    if not code:
+        # Says which way the call went, because the interesting part is the
+        # hash *without* a suffix on a tree that git calls dirty. Read as a
+        # bare "-dirty is missing" that looks like a bug in the tool.
+        print(f"note: {len(other)} uncommitted file(s), none of them build "
+              f"inputs, so {what} is\n"
+              f"      stamped `{current_commit()}` with no -dirty suffix.",
+              file=sys.stderr)
+        return
+
+    def show(title, group):
+        if not group:
+            return
+        print(f"  {title}", file=sys.stderr)
+        for path in group[:12]:
+            print(f"    {path}", file=sys.stderr)
+        if len(group) > 12:
+            print(f"    ... and {len(group) - 12} more", file=sys.stderr)
+
+    print(f"warning: the working tree is dirty, so {what} will be stamped "
+          f"`{current_commit()}` --\n"
+          f"         a hash that does not identify the code that ran.",
+          file=sys.stderr)
+    show("changed, and could change what a run computes:", code)
+    show("changed, but not build inputs:", other)
+
+    if assume_yes:
+        print("proceeding (--yes).", file=sys.stderr)
+        return
+
+    answer = ask("proceed? [y/N] ")
+    if answer is None:
+        # No terminal to ask on -- a cron job, or a pipeline. Refusing here
+        # would break a workflow that never asked to be interactive, and the
+        # `-dirty` suffix still records the fact permanently.
+        print("not a terminal; proceeding without confirmation.", file=sys.stderr)
+        return
+    if answer.strip().lower() not in ("y", "yes"):
+        die("aborted; nothing written")
+
+
+def ask(prompt):
+    """One line of input, or None when there is nothing to read it from.
+
+    Three sources, in the order that gets the answer from whoever actually
+    has it. The terminal first, and /dev/tty rather than stdin because
+    `record --log -` takes the log on stdin -- a question asked there would be
+    answered by the log. Then stdin, so a piped `yes |` still works where
+    there is no terminal at all. An empty read means neither exists (a spent
+    log pipe, /dev/null, a cron job) and is reported as no answer rather than
+    as a refusal.
+    """
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    if sys.stdin.isatty():
+        return sys.stdin.readline()
+    try:
+        with open("/dev/tty") as tty:
+            return tty.readline()
+    except OSError:
+        pass
+    line = sys.stdin.readline()
+    if line:
+        sys.stderr.write(line if line.endswith("\n") else line + "\n")
+        return line
+    sys.stderr.write("\n")
+    return None
 
 
 def fmt(value):
@@ -307,9 +433,29 @@ def render(rows, corpus, measured_at, stale=()):
     out.append("`iter` lines and the shape from its `PARAMS` line; `--iters` and")
     out.append("`--params` set them by hand, which is the only way to record either")
     out.append("alongside a manual `--primal`/`--dual`. A `-dirty` suffix on a hash")
-    out.append("means the tree had uncommitted changes and the number is not")
+    out.append("means a **build input** was uncommitted, so the number is not")
     out.append("reproducible from that hash alone -- the shape is pinned but the code")
-    out.append("that ran is not.")
+    out.append("that ran is not. Both commands stop and list those files before")
+    out.append("stamping one, because only the person looking at the diff can say")
+    out.append("whether it reaches the solver; answer `n` to go and commit first, or")
+    out.append("pass `-y` to skip the question.")
+    out.append("")
+    out.append("Uncommitted files that cannot reach a run -- notes, logs, this file --")
+    out.append("neither earn the suffix nor raise the question: a hash with no suffix")
+    out.append("means the code that ran is at that commit, which is the claim worth")
+    out.append("making, and it stays worth making only while it is not made about")
+    out.append("every tree with an unsaved paragraph in it. What counts as a build")
+    out.append("input is a heuristic in `tools/minlp_status.py`, biased towards")
+    out.append("suffixing: `source/`, `include/`, `test/`, `cmake/`, anything that")
+    out.append("compiles, and the CMake files.")
+    out.append("")
+    out.append("Two flags overrule that. `--force` overwrites a bound the run did not")
+    out.append("improve; `--replace` goes further and makes the run *the* row, clearing")
+    out.append("any bound it did not report rather than leaving it standing. Reach for")
+    out.append("`--replace` when the recorded numbers stopped being comparable rather")
+    out.append("than merely being beaten -- a commit that changed what the search does,")
+    out.append("or a row recorded against the wrong shape -- because \"best ever seen\"")
+    out.append("is only a useful record while every entry in it means the same thing.")
     out.append("")
 
     if stale:
@@ -338,6 +484,11 @@ def render(rows, corpus, measured_at, stale=()):
 # ---------------------------------------------------------------- commands
 
 def cmd_refresh(args):
+    # Asked before the corpus run rather than before the write: the
+    # measurement is minutes long, and there is no reason to spend them on a
+    # stamp that is about to be abandoned.
+    confirm_dirty("the parse status", args.yes)
+
     existing = read_status(args.status)
     measured = run_report(args.report, args.corpus, args.reject_discrete)
 
@@ -503,6 +654,15 @@ def cmd_record(args):
     sense = row["Sense"] if row["Sense"] != EMPTY else "min"
     commit = args.commit or current_commit()
 
+    # Only when the hash is being taken from this tree. An explicit --commit
+    # is an assertion about some other revision, and the dirt here says
+    # nothing about that one.
+    #
+    # Late enough that the log has already been read: `--log -` takes it on
+    # stdin, and a question asked before that would be answered by the log.
+    if args.commit is None:
+        confirm_dirty("this bound", args.yes)
+
     changed = []
     for kind, value, value_col, commit_col, iters_col, params_col in (
         ("primal", primal, "Best primal", "Primal @", "Primal iters",
@@ -524,7 +684,24 @@ def cmd_record(args):
         # The shape travels with the commit and the count, always: the three
         # together describe one run, and leaving a stale shape beside a new
         # bound would describe a run that never happened.
-        if args.force and value is not None:
+        if args.replace:
+            # Not a comparison at all: the recorded half of the row becomes
+            # this run outright. A bound this run does not have clears rather
+            # than survives -- the point of asking for a replace is that the
+            # old numbers are no longer to be trusted, and a leftover bound
+            # from a superseded commit is exactly what would be trusted.
+            row[value_col] = fmt(value)
+            keep = value is not None
+            row[commit_col] = commit if keep else EMPTY
+            row[iters_col] = fmt_iters(iters) if keep else EMPTY
+            row[params_col] = fmt_params(params) if keep else EMPTY
+            if keep:
+                changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
+                               f"in {fmt_iters(iters)} iters (replaced)")
+            else:
+                changed.append(f"{kind} {fmt(old)} -> cleared, this run "
+                               f"reported none (replaced)")
+        elif args.force and value is not None:
             row[value_col] = fmt(value)
             row[commit_col] = commit
             row[iters_col] = fmt_iters(iters)
@@ -561,6 +738,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", type=Path, default=STATUS)
     parser.add_argument("--corpus", type=Path, default=CORPUS)
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="skip the dirty-tree confirmation")
     sub = parser.add_subparsers(dest="command", required=True)
 
     refresh = sub.add_parser(
@@ -583,9 +762,20 @@ def main():
                              "'--partition-num=7 --sample-points=5' (default: "
                              "scraped from --log's PARAMS line)")
     record.add_argument("--commit", help="override the recorded hash "
-                                         "(default: current HEAD)")
+                                         "(default: current HEAD; also "
+                                         "suppresses the dirty-tree "
+                                         "confirmation, which is about this "
+                                         "tree and not the revision named)")
     record.add_argument("--force", action="store_true",
-                        help="overwrite even if the new bound is worse")
+                        help="overwrite even if the new bound is worse; only "
+                             "touches the bounds this run reported")
+    record.add_argument("--replace", action="store_true",
+                        help="make this run the row outright: every recorded "
+                             "cell becomes this run's, and a bound this run "
+                             "did not report is cleared rather than kept. For "
+                             "when the old numbers are no longer comparable "
+                             "-- a commit that changed the search, a shape "
+                             "recorded wrong. Stronger than --force.")
     record.set_defaults(func=cmd_record)
 
     args = parser.parse_args()

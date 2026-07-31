@@ -440,10 +440,72 @@ two runs on the same GPU with something else resident. Recording the resolved
 value is what makes the row reproducible without having to remember to pin the
 flag by hand beforehand.
 
-A `-dirty` suffix on the commit means the tree had uncommitted changes, so the
+A `-dirty` suffix on the commit means a **build input** was uncommitted, so the
 number is **not** reproducible from that hash alone — treat it as provisional
 until re-measured on a clean tree. An empty `params` cell means the bound was
 recorded before the column existed, not that the run used no flags.
+
+The suffix answers to the build, not to `git status`. A bound recorded while a
+design note, a log or MINLP_STATUS.md itself was uncommitted *is* reproducible
+from the hash alone, gets no suffix, and raises no question — a mark that
+appears on every tree with an unsaved paragraph in it is a mark nobody reads.
+Both `record` and `refresh` stop only when the uncommitted files could
+actually have changed the run:
+
+```
+warning: the working tree is dirty, so this bound will be stamped `9f3c633-dirty` --
+         a hash that does not identify the code that ran.
+  changed, and could change what a run computes:
+    source/gams/solve.cu
+  changed, but not build inputs:
+    USAGE.md
+    run.log
+proceed? [y/N]
+```
+
+A tree dirty only in notes, logs and status files says one line and carries on
+— the line exists because a missing `-dirty` on a tree `git status` calls dirty
+otherwise reads as a bug in the tool:
+
+```
+note: 6 uncommitted file(s), none of them build inputs, so this bound is
+      stamped `9f3c633` with no -dirty suffix.
+```
+
+"Build input" is a heuristic — paths under `source/`, `include/`, `test/`,
+`cmake/`, plus anything that compiles and the CMake files — biased towards
+suffixing, since a needless question costs one keystroke and a missed one
+costs a bound recorded against code nobody looked at. It is now the only thing
+between a bound and a hash that overstates it, so widen it rather than argue
+with it if it ever forgives something that matters. Answer `n` to go and
+commit first; `-y` skips the question for scripted runs, and it is skipped
+automatically when there is no terminal to ask on. Passing `--commit` also
+skips it, since that names a revision this tree's dirt says nothing about.
+
+### Overruling a recorded bound
+
+"Keeps whichever is better" is the right default and the wrong one when the
+old number has stopped meaning the same thing — a commit that changed what the
+search does, or a row recorded against a shape you have since found to be
+wrong. Two flags overrule it:
+
+| Flag | Effect |
+|---|---|
+| `--force` | overwrite even if this run's bound is worse. Only touches the bounds this run actually reported; the other stays as it was. |
+| `--replace` | make this run *the* row. Every recorded cell becomes this run's, and a bound this run did not report is **cleared**, not kept. |
+
+```sh
+# this commit changed the search; the old bounds are not comparable
+tools/minlp_status.py record nvs09 --log run.log --replace
+```
+
+The difference only shows when a run reports one bound and not the other:
+`--force` leaves the missing one alone, `--replace` clears it, because a bound
+carried over from a superseded commit is precisely the one that would be
+trusted by mistake. Both also stamp the commit, count and params of the run
+that overruled, so the row keeps describing one run rather than a merge of
+several. `--commit` overrides the recorded hash if you are re-recording a run
+made at some other revision.
 
 ### What the columns are telling you
 
