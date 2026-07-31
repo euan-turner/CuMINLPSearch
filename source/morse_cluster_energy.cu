@@ -83,7 +83,7 @@ auto main(int argc, char* argv[]) -> int
             cuminlp::FanOutSpec {PARTITION_NUM},
             cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
         cuminlp::GraphDriver<double, CAPACITY> drv(
-            policy, iters, 1e-9, SAMPLE_POINTS);
+            policy, iters, 1e-6, SAMPLE_POINTS);
         drv.solve(problem);
       });
 }

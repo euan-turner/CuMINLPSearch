@@ -44,12 +44,42 @@ cmake --build build/dev -t gams_report
 ./build/dev/gams_report path/to/gms/directory
 ```
 
+The summary groups rejections into a histogram of reasons. A count on its own
+is not something you can open, so `--list` names the files behind each row (and
+drops the 25-row cap, since the one-instance reasons are the cheapest to fix):
+
+```sh
+./build/dev/gams_report --list path/to/gms/directory
+```
+
+`--list` also names the instances that *parsed* but gave an integer or binary
+variable the 1e6 default bound — they appear in no rejection table, but a
+2e6-wide integer domain is a search-quality cliff worth knowing about before
+quoting a benchmark built on them. `--reject-discrete` reproduces the
+pre-integrality baseline for an A/B.
+
 To solve any parseable instance directly, with no per-instance code:
 
 ```sh
 cmake --build build/dev -t gams_solve
 ./build/dev/gams_solve test/data/gams/ex8_6_2.gms 300
 ```
+
+`Problem::validate()` proves the lowered DAG is well-formed, not that it is the
+*right* DAG — outside the two instances with a hand-built oracle in
+`cuminlp_gams_test`, reading the expression back is the only check there is.
+`--dump-dag` prints it, and `--dump-only` stops before the solve, so it needs no
+GPU:
+
+```sh
+./build/dev/gams_solve --dump-only test/data/gams/nvs01.gms
+./build/dev/gams_solve --dump-only --dump-dag=nodes test/data/gams/nvs01.gms
+```
+
+`infix` (the default) reconstructs the expression for comparison against the
+`.gms` source; `nodes` lists the DAG in SSA order, showing shared
+subexpressions once. Use `nodes` on large instances — infix rendering is capped
+and degrades to a placeholder past ~4000 operators.
 
 ## Formatting
 

@@ -3,12 +3,19 @@
 // Runs the parser over a directory of .gms files and tallies what happened, so
 // that "which operator should I add next" is a measurement rather than a guess.
 //
-//   gams_report [--reject-discrete] [--list] <directory-or-file>...
+//   gams_report [--reject-discrete] [--list] [--per-instance] <directory-or-file>...
 //
 // Parsed instances are counted, and their variable/constraint/node counts
 // totalled; rejections are grouped by ErrorKind, with a histogram of the
 // specific reasons. --list additionally names the files behind each histogram
 // row, since a bare count is not something you can open and read.
+//
+// --per-instance instead writes one TSV row per file and nothing else. The
+// aggregate above answers "what should I implement next"; the per-instance
+// form answers "can this specific instance be attempted", which is what
+// MINLP_STATUS.md tracks. It is a separate mode rather than an addition
+// because its consumer is a script, and a summary printed around the rows
+// would only have to be skipped back off.
 
 #include <algorithm>
 #include <cstdio>
@@ -89,6 +96,7 @@ auto main(int argc, char** argv) -> int
   // change touched.
   gams::ParseOptions options;
   bool list = false;
+  bool per_instance = false;
   std::vector<std::filesystem::path> files;
   for (int i = 1; i < argc; ++i) {
     std::string const arg = argv[i];
@@ -98,6 +106,10 @@ auto main(int argc, char** argv) -> int
     }
     if (arg == "--list") {
       list = true;
+      continue;
+    }
+    if (arg == "--per-instance") {
+      per_instance = true;
       continue;
     }
     std::filesystem::path root(arg);
@@ -112,10 +124,18 @@ auto main(int argc, char** argv) -> int
   std::sort(files.begin(), files.end());
 
   if (files.empty()) {
-    std::fprintf(stderr,
-                 "usage: %s [--reject-discrete] [--list] <directory-or-file>...\n",
-                 argv[0]);
+    std::fprintf(
+        stderr,
+        "usage: %s [--reject-discrete] [--list] [--per-instance] <directory-or-file>...\n",
+        argv[0]);
     return 2;
+  }
+
+  // Named here rather than left implicit in the row order: the consumer is a
+  // script, and a header it can key off survives a column being added.
+  if (per_instance) {
+    std::printf(
+        "file\tstatus\tsense\tkind\treason\tvars\tconstraints\tnodes\tflags\n");
   }
 
   Totals totals;
@@ -155,16 +175,51 @@ auto main(int argc, char** argv) -> int
       totals.defaulted_integer += defaulted_integer ? 1 : 0;
       totals.defaulted_continuous_only += (defaulted && !defaulted_integer) ? 1 : 0;
       if (defaulted_integer) defaulted_integer_files.push_back(file);
+
+      if (per_instance) {
+        // Quality caveats, not failures: each of these parses and solves, so
+        // it appears in no rejection table, but each is a reason to distrust
+        // a bound obtained from it. The tracker needs them next to the bound.
+        std::string flags;
+        auto flag = [&flags](char const* name) {
+          if (!flags.empty()) flags += ',';
+          flags += name;
+        };
+        if (fallback) flag("objvar-kept");
+        if (defaulted_integer) flag("default-bound-integer");
+        else if (defaulted) flag("default-bound");
+        // The sense is what makes "the best bound so far" an ordering rather
+        // than just a number: for a maximisation a larger incumbent is the
+        // better one. It is emitted per instance because the frontend has
+        // already negated a Maximise objective, so nothing downstream of the
+        // Problem can recover it.
+        std::printf("%s\tparsed\t%s\t\t\t%zu\t%zu\t%zu\t%s\n",
+                    file.filename().c_str(),
+                    parsed.sense == gams::Sense::Maximise ? "max" : "min",
+                    parsed.problem.box_bounds.size(),
+                    parsed.problem.constraints.size(),
+                    parsed.problem.graph.nodes.size(), flags.c_str());
+      }
     } catch (gams::ParseError const& e) {
       ++totals.rejected;
       by_kind[kind_name(e.kind)].push_back(file);
       by_reason[reason(e.what())].push_back(file);
+      if (per_instance) {
+        std::printf("%s\trejected\t\t%s\t%s\t\t\t\t\n", file.filename().c_str(),
+                    kind_name(e.kind), reason(e.what()).c_str());
+      }
     } catch (std::exception const& e) {
       ++totals.rejected;
       by_kind["exception"].push_back(file);
       by_reason[e.what()].push_back(file);
+      if (per_instance) {
+        std::printf("%s\trejected\t\texception\t%s\t\t\t\t\n",
+                    file.filename().c_str(), e.what());
+      }
     }
   }
+
+  if (per_instance) return 0;
 
   int const total = totals.parsed + totals.rejected;
   std::printf("GAMS frontend coverage over %d instances\n\n", total);

@@ -78,11 +78,11 @@ auto main(int argc, char* argv[]) -> int
                 cuminlp::SearchCalibration {.max_cycle_size = 2});
         if (problem == 212) {
           std::cout << "Ex. 2.1.2" << '\n';
-          cuminlp::GraphDriver<double, 8> drv_212(policy, iters, 1e-9, 100);
+          cuminlp::GraphDriver<double, 8> drv_212(policy, iters, 1e-6, 100);
           drv_212.solve(problem_212());
         } else if (problem == 219) {
           std::cout << "Ex. 2.1.9" << '\n';
-          cuminlp::GraphDriver<double, 8> drv_219(policy, iters, 1e-9, 100);
+          cuminlp::GraphDriver<double, 8> drv_219(policy, iters, 1e-6, 100);
           drv_219.solve(problem_219());
         }
       });

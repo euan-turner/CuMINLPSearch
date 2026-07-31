@@ -1,5 +1,7 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -51,7 +53,7 @@ public:
   explicit GraphDriver(
       std::shared_ptr<const CompositionPolicy<T, Capacity>> policy,
       uint32_t iter_limit = 1000000,
-      double tolerance = 1e-9,
+      double tolerance = 1e-6,
       std::size_t sample_points = 1,
       std::size_t budget_bytes = 0)
       : driver(iter_limit, tolerance)
@@ -74,6 +76,12 @@ public:
     using search::CompositionInterval;
     using search::IntervalHistory;
     using search::IntervalPQueue;
+
+    // Full double precision throughout: at this magnitude-vs-tolerance ratio
+    // (e.g. objective ~1e3, tolerance ~1e-9) the default 6-sig-fig cout
+    // format prints the same rounded value for boxes that are still ~1e-8
+    // apart, which reads as "converged" long before gap_closed() agrees.
+    std::streamsize const prev_precision = std::cout.precision(17);
 
     std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
     FanOutSpec const& fan_out = policy_->fan_out();
@@ -161,14 +169,22 @@ public:
     bool converged = false;
     std::size_t pruned_infeasible = 0;
 
-    while (iter_idx_ < iter_limit_ && !pending.empty()
-           && GUB_ - GLB_ > tolerance_)
-    {
+    // tolerance_ is now relative to |GUB_| (floored at 1.0), not absolute:
+    // an absolute 1e-9 on an objective of magnitude ~1e3 asks for ~1e-12
+    // relative precision, which a wide-fan-out policy can take thousands of
+    // extra iterations to certify even after the bound has visually
+    // "arrived" at the printed value. bound is the tightest lower bound
+    // known for the remaining search (the least pending lb, or GLB_).
+    auto const gap_closed = [this](double bound) {
+      return GUB_ - bound <= tolerance_ * std::max(1.0, std::fabs(GUB_));
+    };
+
+    while (iter_idx_ < iter_limit_ && !pending.empty() && !gap_closed(GLB_)) {
       ++iter_idx_;
 
       CompositionInterval<T, Capacity> cur = pending.dequeue();
 
-      if (cur.lb > GUB_) {
+      if (gap_closed(cur.lb)) {
         converged = true;
         break;
       }
@@ -259,9 +275,25 @@ public:
 
     bool const found_incumbent = GUB_ < std::numeric_limits<double>::max();
 
-    if ((converged || pending.empty()) && found_incumbent) {
-      // Fully explored: everything else pruned or dominated, so GUB_ is
-      // optimal.
+    // Regions not yet proven suboptimal against the final GUB_. Computed
+    // before the bounds are finalised, because whether the incumbent is
+    // *proven* optimal is exactly the question "is this zero".
+    std::size_t const viable = pending.count_viable(GUB_);
+
+    // Three ways to have proved it, not two. `converged` is the loop noticing
+    // that the least pending lb already exceeds GUB_; an empty frontier is the
+    // same thing having consumed the queue. But hitting the iteration limit
+    // with every remaining region already dominated proves just as much, and
+    // used to be reported as an unfinished run: nvs09 at 1248 iterations left
+    // 5825 pending regions, all of them dominated, and printed a *lower* bound
+    // above its own incumbent (-43.1244 <= min <= -43.1343) plus a RESULT line
+    // whose dual was on the wrong side of its primal. tools/minlp_status.py
+    // records that line, so the inversion did not stay cosmetic.
+    bool const proven_optimal =
+        found_incumbent && (converged || pending.empty() || viable == 0);
+
+    if (proven_optimal) {
+      // Everything else pruned or dominated, so GUB_ is optimal.
       GLB_ = GUB_;
     } else if (pending.empty()) {
       // Frontier emptied by feasibility pruning without ever sampling a
@@ -270,20 +302,30 @@ public:
                    "problem is infeasible or point sampling never satisfied the "
                    "constraints (likely for equalities).\n";
     } else {
-      GLB_ = pending.peek().lb;
+      // Clamped, never merely assigned. A region is enqueued only when its
+      // interval lb is <= the GUB_ *at the time*, so a later improvement to
+      // GUB_ can leave the whole frontier above it; the sound global lower
+      // bound is then the incumbent, not the frontier's minimum. Reporting
+      // the raw frontier minimum yields lower > upper, which is not a weak
+      // bound but a false one.
+      GLB_ = std::min(pending.peek().lb, GUB_);
     }
-
-    // Regions not yet proven suboptimal against the final GUB_.
-    std::size_t const viable = pending.count_viable(GUB_);
 
     std::cout << "------------ Finished ------------" << '\n'
               << GLB_ << " <= min <= " << GUB_ << '\n';
+    if (proven_optimal) {
+      std::cout << "Proven optimal: no pending region can beat the incumbent"
+                << (iter_idx_ >= iter_limit_
+                        ? " (the iteration limit was reached, but every"
+                          " remaining region is already dominated)"
+                        : "")
+                << ".\n";
+    }
     std::cout << "Pending size: " << pending.size() << '\n';
     std::cout << "Viable regions: " << viable << '\n';
     std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';
 
     if (found_incumbent) {
-      std::streamsize const prev_precision = std::cout.precision(12);
       std::cout << "Argmin (sampled witness for GUB):" << '\n';
       for (std::size_t i = 0; i < best_point_.size(); ++i) {
         std::cout << "x[" << i << "], ";
@@ -293,8 +335,8 @@ public:
         std::cout << best_point_[i] << ", ";
       }
       std::cout << "]" << '\n';
-      std::cout.precision(prev_precision);
     }
+    std::cout.precision(prev_precision);
     return GUB_;
   }
 

@@ -26,6 +26,14 @@ public:
 
   virtual ~driver() = default;
 
+  // The bracket the search finished on: lower_bound() <= min <= upper_bound().
+  // solve() returns only the incumbent, so without these a caller recording
+  // both a primal and a dual bound would have to scrape the driver's own
+  // progress output. Meaningless before solve() runs; upper_bound() stays at
+  // double's max if no feasible point was ever sampled.
+  double lower_bound() const { return GLB_; }
+  double upper_bound() const { return GUB_; }
+
 protected:
   double GUB_;
   double GLB_;
