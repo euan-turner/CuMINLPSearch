@@ -367,11 +367,15 @@ parse it at all and the best bounds any run has ever found on it.
 |---|---|
 | `Parses`, `Sense`, `Vars`, `Cons`, `Nodes`, `Notes` | re-measured from the corpus on every `refresh` |
 | `Best primal`, `Best dual`, `Primal @`, `Dual @`, `Primal iters`, `Dual iters`, `Primal params`, `Dual params` | accumulated from `gams_solve` runs, one `record` at a time |
+| `Ref primal`, `Ref dual` | downloaded from MINLPLib by `reference` |
 
 The split is the whole design. Parse status is cheap, deterministic and true
 of the corpus all at once, so it is thrown away and re-derived. A bound is one
 expensive GPU run of one instance and only ever improves, so it is carried
-across refreshes untouched and never recomputed.
+across refreshes untouched and never recomputed. The reference bounds are
+neither: they are one download, replaceable at any time but not by anything
+`refresh` can do offline, so they have a command of their own and are carried
+across a `refresh` like a recorded bound.
 
 ### Refreshing the parse status
 
@@ -401,6 +405,64 @@ something you can open and read.
 ```sh
 ./build/dev/gams_report --list /vol/bitbucket/et422/minlplib_gms/minlplib/gms
 ```
+
+### Refreshing the reference bounds
+
+```sh
+tools/minlp_status.py reference
+```
+
+`Best primal` and `Best dual` say what this solver found; on their own they do
+not say whether that is any good. `reference` fills the two columns that do:
+the bounds MINLPLib publishes for each instance, the best anyone has reported
+to them.
+
+It downloads [`instancedata.csv`](https://www.minlplib.org/instancedata.csv),
+the machine-readable form of the per-instance table on
+`minlplib.org/instances.html` — same numbers, in a file with eighty-odd
+semicolon-separated columns, of which `primalbound`, `dualbound` and
+`objsense` are read. `--from` takes a path instead of the URL, for a machine
+with no route out or to re-run against a copy already on disk:
+
+```sh
+curl -O https://www.minlplib.org/instancedata.csv
+tools/minlp_status.py reference --from instancedata.csv
+```
+
+The whole corpus is refilled at once and the header line records where the
+numbers came from and when — they are only as current as that date, and
+MINLPLib's move as other solvers improve them. Rows MINLPLib has no entry for
+are left alone and listed; so are rows whose `objsense` disagrees with our
+`Sense`, since a disagreement there means the two names are not the same model
+and a plausible number in the right column is worse than an empty one.
+
+Both bounds are in the instance's own sense, so together they bracket the
+optimum, and reading a row across is the point:
+
+| Reading | Means |
+|---|---|
+| `Ref primal` = `Ref dual` | solved in the literature; that number is the optimum |
+| `Best primal` worse than `Ref primal` | someone else's solver found a better solution than this run |
+| `Best primal` better than `Ref primal` | a new best solution — or a bug, and the second is likelier |
+| `Ref dual` empty | nobody has published a lower bound; ours is not being compared to anything |
+| `Ref dual` infinite | the instance is known **infeasible**, so any primal we record is wrong |
+
+The bracket also checks us. `Best primal` past `Ref dual`, or `Best dual` past
+`Ref primal`, contradicts the literature — an infeasible point counted as a
+solution, or a relaxation that cut off the optimum — and `record` says so when
+it writes one, as does `reference` when a fresh download makes an existing row
+contradictory:
+
+```
+warning: nvs09 primal -43.2 is past MINLPLib's dual bound -43.13433692,
+         which no feasible point can be; one of the two is wrong
+```
+
+A bound merely *tighter* than MINLPLib's is not an error and gets a `note:`
+rather than a warning, because it is the same event one step short of being
+provable: either a result worth reporting upstream or the same bug. Both
+comparisons carry a 1e-6 relative slack, since MINLPLib publishes about ten
+significant figures and this table stores twelve.
 
 ### Recording a bound
 
@@ -514,6 +576,11 @@ will get as far as a `Problem` — not that the search converges, and not that i
 converges in a time you would wait for. The sizing section above is what
 decides that, and `Vars` / `Nodes` are in the table to let you pick instances
 that will fit before spending a run on them.
+
+`Ref primal` and `Ref dual` are the only columns in the table this project did
+not produce. They are a target and a sanity check, not a measurement of this
+solver: an instance MINLPLib has closed says what number to aim at, and one
+they have not says the gap you are looking at may be theirs as much as yours.
 
 `Notes` carries the rejection reason on a `no` row. On a `yes` row it carries
 caveats that do not stop a solve but should temper trust in its bounds:

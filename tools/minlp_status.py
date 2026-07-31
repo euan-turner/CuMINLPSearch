@@ -11,6 +11,14 @@ comes from one GPU run of one instance, and is only ever meant to improve, so
     tools/minlp_status.py refresh
     tools/minlp_status.py record <instance> --log <gams_solve output>
     tools/minlp_status.py record <instance> --primal <v> --dual <v> --iters <n>
+    tools/minlp_status.py reference
+
+A third kind of column joins those two: the bounds MINLPLib itself publishes,
+which are neither measured here nor found here but downloaded, and which exist
+so a recorded bound can be read against what other solvers have managed. They
+have their own command because they have their own cadence -- they change when
+minlplib.org changes, which is on nobody's schedule but MINLPLib's, and
+fetching them needs a network that `refresh` must not start depending on.
 
 Each recorded bound carries the commit it was found at, the number of search
 iterations that run took, and the search shape it was run with, all scraped
@@ -31,9 +39,13 @@ an improvement from a regression.
 """
 
 import argparse
+import csv
+import io
+import math
 import re
 import subprocess
 import sys
+import urllib.request
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +53,13 @@ REPO = Path(__file__).resolve().parent.parent
 STATUS = REPO / "MINLP_STATUS.md"
 REPORT = REPO / "build" / "dev" / "gams_report"
 CORPUS = Path("/vol/bitbucket/et422/minlplib_gms/minlplib/gms")
+
+# MINLPLib's own per-instance metadata, the machine-readable form of the table
+# on minlplib.org/instances.html: one semicolon-separated row per instance,
+# `primalbound` and `dualbound` among some eighty columns. Preferred to
+# scraping the page because it is the same numbers without an HTML parser
+# between us and them.
+MINLPLIB_DATA = "https://www.minlplib.org/instancedata.csv"
 
 # One place the column order is written down. The row parser keys off the
 # header rather than off positions, so adding a column here does not silently
@@ -52,6 +71,11 @@ COLUMNS = [
     "Vars",
     "Cons",
     "Nodes",
+    # Left of our own numbers, and the two together, because they are what the
+    # row is being read against: the interval every other solver has already
+    # narrowed the optimum to, known before a run is spent and unchanged by it.
+    "Ref primal",
+    "Ref dual",
     "Best primal",
     "Primal @",
     "Primal iters",
@@ -63,9 +87,18 @@ COLUMNS = [
     "Notes",
 ]
 
-# Only these survive a refresh; everything else is re-measured.
+# Bounds this solver found. Only ever improve, cost a GPU run each, and are
+# what a `record` accumulates.
 RECORDED = ["Best primal", "Primal @", "Primal iters", "Primal params",
             "Best dual", "Dual @", "Dual iters", "Dual params"]
+
+# Bounds MINLPLib published. Re-derivable at any time from one download, so
+# unlike RECORDED they are replaceable rather than precious -- but they still
+# survive a refresh, which has no network and no business clearing them.
+REFERENCE = ["Ref primal", "Ref dual"]
+
+# Everything a refresh must carry across rather than re-measure.
+CARRIED = RECORDED + REFERENCE
 
 EMPTY = "—"  # em dash: reads as "nothing here", unlike a blank cell
 
@@ -270,6 +303,31 @@ def read_measured_at(path):
     return current_commit(), date.today().isoformat()
 
 
+# Deliberately unanchored at the end: the rendered line carries a coverage
+# count after the date, and that count is re-derived on every write. Anchoring
+# here would fail to match the very line this tool just wrote, and the stamp
+# would vanish on the next `record`.
+REFERENCE_AT_RE = re.compile(
+    r"^- Reference bounds: `(?P<source>[^`]*)`, retrieved (?P<date>[0-9-]+)",
+    re.MULTILINE)
+
+
+def read_reference_at(path):
+    """Where the reference bounds came from and when, or None if never fetched.
+
+    Carried across `refresh` and `record` for the same reason as the parse
+    stamp: neither command re-fetches, so re-dating the line would claim a
+    download that did not happen. None means the columns are empty and the
+    header line is left out entirely, which is more honest than a stamp on
+    nothing.
+    """
+    if path.exists():
+        m = REFERENCE_AT_RE.search(path.read_text())
+        if m:
+            return m["source"], m["date"]
+    return None
+
+
 def read_status(path):
     """Return {instance: {column: cell}} for the rows already in the file.
 
@@ -327,10 +385,58 @@ def run_report(report, corpus, reject_discrete=False):
     return [dict(zip(fields, line.split("\t"))) for line in lines[1:] if line]
 
 
+def fetch_reference(source):
+    """The raw instancedata.csv text, from a URL or a local path.
+
+    A path is accepted so the fetch and the fill can be separated: a machine
+    with no route to minlplib.org can still be given the file, and a download
+    kept on disk makes `reference` repeatable against fixed input.
+    """
+    source = str(source)
+    if source.startswith(("http://", "https://")):
+        try:
+            with urllib.request.urlopen(source, timeout=60) as response:
+                return response.read().decode("utf-8")
+        except OSError as error:
+            die(f"could not fetch {source}: {error}\n"
+                f"  download it by hand and pass the file to --from")
+    path = Path(source)
+    if not path.exists():
+        die(f"{path} not found")
+    return path.read_text()
+
+
+def parse_reference(text):
+    """Return {instance: (primal, dual, objsense)} from instancedata.csv.
+
+    Semicolon-separated, and wide -- some eighty columns, of which four are
+    read. The header is checked rather than assumed: MINLPLib is free to
+    reshape its own file, and a silently missing column would fill the table
+    with em dashes that look like "no bound known" instead of "not read".
+    """
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
+    needed = ("name", "primalbound", "dualbound", "objsense")
+    missing = [c for c in needed if c not in (reader.fieldnames or [])]
+    if missing:
+        die(f"instancedata.csv has no {', '.join(missing)} column; its format "
+            f"has changed (columns seen: {', '.join(reader.fieldnames or [])})")
+
+    data = {}
+    for row in reader:
+        name = (row["name"] or "").strip()
+        if name:
+            data[name] = (parse_number((row["primalbound"] or "").strip()),
+                          parse_number((row["dualbound"] or "").strip()),
+                          (row["objsense"] or "").strip())
+    if not data:
+        die("instancedata.csv had no rows")
+    return data
+
+
 # ---------------------------------------------------------------- writing
 
 def build_row(measured, carried):
-    """One table row: measured columns fresh, recorded columns carried over."""
+    """One table row: measured columns fresh, carried columns carried over."""
     parsed = measured["status"] == "parsed"
     row = {
         "Instance": Path(measured["file"]).stem,
@@ -345,15 +451,16 @@ def build_row(measured, carried):
                   else f"{measured['kind']}: {measured['reason']}").replace("|", "\\|")
                  or EMPTY,
     }
-    for column in RECORDED:
+    for column in CARRIED:
         row[column] = (carried or {}).get(column, EMPTY) or EMPTY
     return row
 
 
-def render(rows, corpus, measured_at, stale=()):
+def render(rows, corpus, measured_at, reference_at=None, stale=()):
     parsed = [r for r in rows if r["Parses"] == "yes"]
     solved = [r for r in parsed if r["Best primal"] != EMPTY]
     bounded = [r for r in parsed if r["Best dual"] != EMPTY]
+    referenced = [r for r in rows if r["Ref primal"] != EMPTY or r["Ref dual"] != EMPTY]
 
     out = []
     out.append("# MINLPLib status")
@@ -363,6 +470,10 @@ def render(rows, corpus, measured_at, stale=()):
     out.append("")
     out.append(f"- Corpus: `{corpus}`")
     out.append(f"- Parse status measured at: `{measured_at[0]}` on {measured_at[1]}")
+    if reference_at is not None:
+        out.append(f"- Reference bounds: `{reference_at[0]}`, "
+                   f"retrieved {reference_at[1]} "
+                   f"({len(referenced)} of {len(rows)} instances)")
     out.append(f"- Instances: **{len(rows)}** total, "
                f"**{len(parsed)}** parse ({100.0 * len(parsed) / max(len(rows), 1):.1f}%), "
                f"**{len(rows) - len(parsed)}** rejected")
@@ -382,6 +493,26 @@ def render(rows, corpus, measured_at, stale=()):
     out.append("proved. Equal bounds mean the instance was solved to tolerance. Each has")
     out.append("its own `@` column, the commit it was found at, because the two rarely")
     out.append("improve in the same run.")
+    out.append("")
+    out.append("**Ref primal / Ref dual** are MINLPLib's own published bounds for the")
+    out.append("instance, the best any solver has reported to them, in the same sense as")
+    out.append("the columns beside them. Together they bracket the optimum, so they say")
+    out.append("what a run here is aiming at and what is already known to be reachable:")
+    out.append("a `Best primal` no better than `Ref primal` is a solution someone else")
+    out.append("already had, and one *better* than it is either a find or a bug. Equal")
+    out.append("reference bounds mean the instance is solved in the literature; an empty")
+    out.append("cell means MINLPLib publishes no bound of that kind, and an infinite one")
+    out.append("means the instance is known infeasible.")
+    out.append("")
+    out.append("They also bound our own numbers from the other side, which is the cheap")
+    out.append("correctness check on this table. In the instance's own sense the optimum")
+    out.append("lies between the two reference bounds, so `Best primal` past `Ref dual`,")
+    out.append("or `Best dual` past `Ref primal`, is a claim that contradicts the")
+    out.append("literature: a bug here, or a bound recorded against the wrong row.")
+    out.append("`record` says so when it writes one.")
+    out.append("")
+    out.append("These are downloaded, not measured -- a `refresh` neither re-fetches nor")
+    out.append("clears them -- and they are only as current as the date in the header.")
     out.append("")
     out.append("**Primal iters / Dual iters** is how many search iterations the run")
     out.append("that produced that bound took -- the last `iter N:` the driver printed,")
@@ -457,6 +588,21 @@ def render(rows, corpus, measured_at, stale=()):
     out.append("or a row recorded against the wrong shape -- because \"best ever seen\"")
     out.append("is only a useful record while every entry in it means the same thing.")
     out.append("")
+    out.append("## Refreshing the reference bounds")
+    out.append("")
+    out.append("```")
+    out.append("tools/minlp_status.py reference")
+    out.append("```")
+    out.append("")
+    out.append("Downloads `instancedata.csv` from minlplib.org and refills the two `Ref`")
+    out.append("columns from its `primalbound` and `dualbound` fields, which is the same")
+    out.append("data as the table on `minlplib.org/instances.html` without an HTML parser")
+    out.append("in between. `--from` takes a path instead, for a machine with no route")
+    out.append("out or for a re-run against a file already downloaded. Rows MINLPLib does")
+    out.append("not know, and rows whose objective sense disagrees with ours, are left")
+    out.append("alone and listed -- a sense mismatch means the two names are not the same")
+    out.append("model, and filling it would be worse than leaving it empty.")
+    out.append("")
 
     if stale:
         # Loud, because the alternative is a bound quietly outliving the
@@ -501,7 +647,8 @@ def cmd_refresh(args):
     )
 
     measured_at = (current_commit(), date.today().isoformat())
-    args.status.write_text(render(rows, args.corpus, measured_at, stale))
+    args.status.write_text(
+        render(rows, args.corpus, measured_at, read_reference_at(args.status), stale))
     parsed = sum(1 for r in rows if r["Parses"] == "yes")
     print(f"{args.status}: {len(rows)} instances, {parsed} parse, "
           f"{len(rows) - parsed} rejected")
@@ -608,6 +755,69 @@ def cheaper(new_iters, old_iters):
     shorter. Only ever consulted for a tie: a worse bound found faster is
     still a worse bound."""
     return new_iters is not None and (old_iters is None or new_iters < old_iters)
+
+
+REF_TOL = 1e-6
+
+
+def contradictions(sense, row):
+    """Ways this row's recorded bounds disagree with MINLPLib's, as messages.
+
+    The optimum lies between the two reference bounds, so in the instance's own
+    sense our primal cannot be past `Ref dual` and our dual cannot be past
+    `Ref primal`. Either would mean a bound this solver cannot actually
+    justify -- an infeasible point counted as a solution, a relaxation that cut
+    off the optimum, or a log recorded against the wrong instance.
+
+    Compared with a relative slack, because both sides are rounded: MINLPLib
+    publishes about ten significant figures and this table stores twelve, and a
+    disagreement in the last of them is arithmetic, not a bug. An infinite
+    reference bound gets no slack -- it is not an approximation of anything.
+    """
+    sign = -1.0 if sense == "max" else 1.0  # normalise both senses to `min`
+    primal = parse_number(row["Best primal"])
+    dual = parse_number(row["Best dual"])
+    ref_primal = parse_number(row["Ref primal"])
+    ref_dual = parse_number(row["Ref dual"])
+
+    def slack(value):
+        return 0.0 if math.isinf(value) else REF_TOL * max(1.0, abs(value))
+
+    out = []
+    if primal is not None and ref_dual is not None:
+        if sign * primal < sign * ref_dual - slack(ref_dual):
+            out.append(f"primal {fmt(primal)} is past MINLPLib's dual bound "
+                       f"{fmt(ref_dual)}, which no feasible point can be")
+    if dual is not None and ref_primal is not None:
+        if sign * dual > sign * ref_primal + slack(ref_primal):
+            out.append(f"dual {fmt(dual)} is past MINLPLib's primal bound "
+                       f"{fmt(ref_primal)}, so it cuts off a known solution")
+    return out
+
+
+def improvements(sense, row):
+    """Ways this row's recorded bounds beat MINLPLib's, as messages.
+
+    Not an error and not routine either: a bound tighter than the published one
+    is either a result worth reporting upstream or the same bug a
+    contradiction would have caught, one step short of being provable. Said out
+    loud so it gets looked at either way.
+    """
+    sign = -1.0 if sense == "max" else 1.0
+    out = []
+    for kind, ours, theirs, direction in (
+        ("primal", parse_number(row["Best primal"]),
+         parse_number(row["Ref primal"]), 1.0),
+        ("dual", parse_number(row["Best dual"]),
+         parse_number(row["Ref dual"]), -1.0),
+    ):
+        if ours is None or theirs is None or math.isinf(theirs):
+            continue
+        margin = REF_TOL * max(1.0, abs(theirs))
+        if direction * sign * ours < direction * sign * theirs - margin:
+            out.append(f"{kind} {fmt(ours)} is tighter than MINLPLib's "
+                       f"{fmt(theirs)}")
+    return out
 
 
 def cmd_record(args):
@@ -730,8 +940,81 @@ def cmd_record(args):
             changed.append(f"{kind} {fmt(value)} not better than {fmt(old)}, kept")
 
     ordered = sorted(rows.values(), key=lambda r: r["Instance"])
-    args.status.write_text(render(ordered, args.corpus, measured_at))
+    args.status.write_text(
+        render(ordered, args.corpus, measured_at, read_reference_at(args.status)))
     print(f"{name} ({sense}): " + "; ".join(changed))
+
+    # Checked against the row as written, not against this run's numbers, so a
+    # bound that was kept rather than taken is still measured against the
+    # literature. Reported after the write: the row is what it is, and burying
+    # a contradiction by refusing to record it only hides the thing worth
+    # seeing.
+    for message in improvements(sense, row):
+        print(f"note: {name} {message} -- worth checking before believing",
+              file=sys.stderr)
+    for message in contradictions(sense, row):
+        print(f"warning: {name} {message}; one of the two is wrong",
+              file=sys.stderr)
+
+
+def cmd_reference(args):
+    rows = read_status(args.status)
+    if not rows:
+        die(f"{args.status} has no table yet; run `refresh` first")
+
+    data = parse_reference(fetch_reference(args.source))
+
+    filled, unknown, mismatched, cleared = 0, [], [], 0
+    for name, row in rows.items():
+        entry = data.get(name)
+        if entry is None:
+            unknown.append(name)
+            continue
+        primal, dual, objsense = entry
+        # A row whose sense disagrees is not this model under another name, so
+        # its bounds are not ours to copy -- and the mistake would be invisible
+        # afterwards, a plausible-looking number in the right column.
+        if row["Sense"] not in (EMPTY, "") and objsense and objsense != row["Sense"]:
+            mismatched.append(f"{name} (ours {row['Sense']}, theirs {objsense})")
+            continue
+        # Assigned unconditionally, including back to EMPTY: this command's job
+        # is to make the columns say what MINLPLib says now, and a bound they
+        # have withdrawn should disappear here too.
+        if primal is None and row["Ref primal"] != EMPTY:
+            cleared += 1
+        if dual is None and row["Ref dual"] != EMPTY:
+            cleared += 1
+        row["Ref primal"] = fmt(primal)
+        row["Ref dual"] = fmt(dual)
+        filled += 1
+
+    ordered = sorted(rows.values(), key=lambda r: r["Instance"])
+    reference_at = (str(args.source), date.today().isoformat())
+    args.status.write_text(
+        render(ordered, args.corpus, read_measured_at(args.status), reference_at))
+    print(f"{args.status}: reference bounds for {filled} of {len(rows)} instances"
+          + (f", {cleared} cell(s) cleared" if cleared else ""))
+
+    def report(title, names):
+        if not names:
+            return
+        print(f"warning: {len(names)} {title}:", file=sys.stderr)
+        for name in names[:12]:
+            print(f"    {name}", file=sys.stderr)
+        if len(names) > 12:
+            print(f"    ... and {len(names) - 12} more", file=sys.stderr)
+
+    report("instance(s) MINLPLib has no row for, left as they were", unknown)
+    report("instance(s) whose objective sense disagrees with MINLPLib's, "
+           "skipped", mismatched)
+
+    # The whole point of the columns, so it is checked the moment they land
+    # rather than waiting for the next `record` on each row.
+    for row in ordered:
+        sense = row["Sense"] if row["Sense"] != EMPTY else "min"
+        for message in contradictions(sense, row):
+            print(f"warning: {row['Instance']} {message}; one of the two is wrong",
+                  file=sys.stderr)
 
 
 def main():
@@ -777,6 +1060,14 @@ def main():
                              "-- a commit that changed the search, a shape "
                              "recorded wrong. Stronger than --force.")
     record.set_defaults(func=cmd_record)
+
+    reference = sub.add_parser(
+        "reference", help="refill the MINLPLib reference bounds from "
+                          "instancedata.csv")
+    reference.add_argument("--from", dest="source", default=MINLPLIB_DATA,
+                           help=f"URL or path to instancedata.csv "
+                                f"(default: {MINLPLIB_DATA})")
+    reference.set_defaults(func=cmd_reference)
 
     args = parser.parse_args()
     args.func(args)
