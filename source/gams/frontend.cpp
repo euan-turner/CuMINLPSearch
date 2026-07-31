@@ -740,10 +740,67 @@ auto split(Ast& ast, int root, int sym) -> std::optional<Split>
   return table[static_cast<std::size_t>(root)];
 }
 
-/// Returns the objective's AST index, or nullopt if no equation defines the
-/// objective variable linearly (the caller then takes the fallback path).
+/// How the objective variable was solved for. Downstream bound handling
+/// depends on which: an `=E=` definition pins objvar to the expression for
+/// every point, while an inequality only pins it *at the optimum*, which is
+/// enough to substitute but not enough to keep both of objvar's own bounds --
+/// see Lowerer::add_objective_variable_bounds.
+struct Elimination {
+  std::optional<int> expr;  ///< objective AST index; nullopt => fallback
+  bool from_inequality = false;
+};
+
+/// True when `rel` with the objective variable's net coefficient `coeff`
+/// bounds objvar from below (`objvar >= ...`) rather than from above. `L` is
+/// `lhs <= rhs`, so with objvar collected on the left the relation reads
+/// `coeff*objvar <= rhs_rem - lhs_rem`, and a negative coeff flips it.
+auto bounds_objvar_below(Rel rel, double coeff) -> bool
+{
+  return (rel == Rel::L) == (coeff < 0.0);
+}
+
+/// True if any equation other than `skip` mentions the objective variable.
+/// `=N=` equations assert nothing and are dropped before they reach a
+/// constraint, so a mention there does not count.
+auto objvar_used_elsewhere(Model const& m, std::size_t skip) -> bool
+{
+  for (std::size_t i = 0; i < m.equations.size(); ++i) {
+    if (i == skip) continue;
+    auto const& eq = m.equations[i];
+    if (eq.rel == Rel::N) continue;
+    if (m.ast.contains(eq.lhs, m.objvar) || m.ast.contains(eq.rhs, m.objvar)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @brief Solve some equation for the objective variable, so `Problem` can be
+ * given an objective `Expr` rather than a bare variable plus a constraint.
+ *
+ * Two passes, `=E=` first. An equality definition is unconditionally valid, so
+ * a model carrying both shapes is never made to rely on the weaker argument
+ * below.
+ *
+ * The second pass is the inequality case. `min objvar s.t. objvar >= f(x)` has
+ * objvar tight at every optimum -- nothing else pushes it down -- so it is
+ * exactly `min f(x)`, and mirror-image for `max objvar s.t. objvar <= f(x)`.
+ * The rearrangement is the same one the equality pass does; only the
+ * admissibility test is new. Two conditions guard it, because the argument is
+ * about the optimum rather than about every feasible point:
+ *
+ *  - the implied direction must match the sense. `min objvar s.t. objvar <= f`
+ *    is unbounded below (and `Problem` has no way to say so), not `min f`.
+ *  - objvar must appear in no other equation. "Nothing else pushes it down"
+ *    is only true when nothing else constrains it, and a second equation
+ *    could make the tight value infeasible.
+ *
+ * Its own declared bounds are handled separately, and asymmetrically, in
+ * Lowerer::add_objective_variable_bounds.
+ */
 auto eliminate_objective(Model& m, std::vector<Diagnostic>& warnings)
-    -> std::optional<int>
+    -> Elimination
 {
   std::optional<int> objective;
   int candidates = 0;
@@ -774,7 +831,39 @@ auto eliminate_objective(Model& m, std::vector<Diagnostic>& warnings)
     warnings.push_back(
         {0, "several equations define the objective variable; used the first"});
   }
-  return objective;
+  if (objective) return {objective, false};
+
+  for (std::size_t i = 0; i < m.equations.size(); ++i) {
+    auto& eq = m.equations[i];
+    if (eq.rel != Rel::L && eq.rel != Rel::G) continue;
+    if (!m.ast.contains(eq.lhs, m.objvar) && !m.ast.contains(eq.rhs, m.objvar)) {
+      continue;
+    }
+
+    auto lhs = split(m.ast, eq.lhs, m.objvar);
+    auto rhs = split(m.ast, eq.rhs, m.objvar);
+    if (!lhs || !rhs) continue;
+
+    double const coeff = lhs->coeff - rhs->coeff;
+    if (std::fabs(coeff) < 1e-12) continue;
+
+    // Minimise needs objvar bounded below by the expression, maximise above.
+    if (bounds_objvar_below(eq.rel, coeff) == m.maximise) continue;
+    if (objvar_used_elsewhere(m, i)) continue;
+
+    int const remainder = m.ast.sub(rhs->rem, lhs->rem);
+    Elimination out {m.ast.div(remainder, m.ast.num(coeff)), true};
+    eq.consumed = true;
+    warnings.push_back(
+        {eq.line,
+         "'" + m.symbols[static_cast<std::size_t>(m.objvar)].name
+             + "' is defined by the inequality '" + eq.name
+             + "', which is tight at every optimum; substituted it away rather "
+               "than spending a search dimension on it"});
+    return out;
+  }
+
+  return {};
 }
 
 // ---------------------------------------------------------------------------
@@ -884,15 +973,20 @@ public:
     if (graph().nodes[root].op == dag::Op::Const) {
       throw ParseError(0, "the objective is constant", ErrorKind::Unrepresentable);
     }
+    // What `objvar` *is*, before the solver-facing negation. A surviving
+    // reference to the objective variable means the value the file wrote, and
+    // so does a bound stated on it, so both resolve to this rather than to the
+    // negated root: `objvar.up = 25` under `maximizing` is `f(x) <= 25`, not
+    // `-f(x) <= 25`.
+    objective_expr_root_ = root;
     if (m_.maximise) {
       root = graph().emit(dag::Op::Neg, {root});
       out_.sense = Sense::Maximise;
     }
     if (m_.objvar >= 0) {
-      sym_node_[static_cast<std::size_t>(m_.objvar)] = root;
+      sym_node_[static_cast<std::size_t>(m_.objvar)] = objective_expr_root_;
     }
     out_.problem.set_objective(dag::Expr<T>(&graph(), root));
-    objective_root_ = root;
   }
 
   void add_constraints()
@@ -961,23 +1055,50 @@ public:
   }
 
   /// A bound stated on an eliminated objective variable is a real constraint on
-  /// the objective expression and must not vanish with the variable.
-  void add_objective_variable_bounds()
+  /// the objective expression and must not vanish with the variable -- unless
+  /// the elimination came from an inequality, where one of the two bounds was
+  /// never a constraint on the model in the first place.
+  ///
+  /// After eliminating `objvar >= f(x)` under minimise, `objvar` is no longer
+  /// a free value that has to satisfy both bounds simultaneously with f: the
+  /// bounds apply to it, and it merely has to sit somewhere above f. So
+  /// `objvar.up = U` still restricts x (no feasible objvar exists unless
+  /// f(x) <= U) and survives, while `objvar.lo = L` restricts nothing -- any x
+  /// admits a feasible objvar, just a higher one. Emitting the latter as
+  /// `f(x) >= L` would cut off feasible points and can report a model
+  /// infeasible when it is not; the substituted value is then a lower bound on
+  /// the reported optimum, which only differs from the truth when the file's
+  /// own stated bound was wrong. Maximise is the mirror image.
+  void add_objective_variable_bounds(bool from_inequality)
   {
     if (m_.objvar < 0) return;
     Symbol const& s = m_.symbols[static_cast<std::size_t>(m_.objvar)];
     if (!s.eliminated) return;
 
-    if (std::isfinite(s.up)) {
-      out_.problem.add_constraint(dag::Expr<T>(&graph(), objective_root_),
+    bool const drop_lower = from_inequality && !m_.maximise;
+    bool const drop_upper = from_inequality && m_.maximise;
+
+    if (std::isfinite(s.up) && !drop_upper) {
+      out_.problem.add_constraint(dag::Expr<T>(&graph(), objective_expr_root_),
                                   dag::Cmp::LE, static_cast<T>(s.up));
       out_.constraint_names.push_back(s.name + ".up");
     }
-    if (std::isfinite(s.lo)) {
-      std::size_t negated = graph().emit(dag::Op::Neg, {objective_root_});
+    if (std::isfinite(s.lo) && !drop_lower) {
+      std::size_t negated = graph().emit(dag::Op::Neg, {objective_expr_root_});
       out_.problem.add_constraint(dag::Expr<T>(&graph(), negated), dag::Cmp::LE,
                                   static_cast<T>(-s.lo));
       out_.constraint_names.push_back(s.name + ".lo");
+    }
+
+    // Dropping a bound the file states is exactly the kind of thing that must
+    // not be silent, even when it is the right thing to do.
+    if (drop_lower && std::isfinite(s.lo)) {
+      warn(s.decl_line, "'" + s.name + ".lo' constrains only the objective "
+                            "variable, which was substituted away; dropped");
+    }
+    if (drop_upper && std::isfinite(s.up)) {
+      warn(s.decl_line, "'" + s.name + ".up' constrains only the objective "
+                            "variable, which was substituted away; dropped");
     }
   }
 
@@ -1173,7 +1294,7 @@ private:
   ParsedModel<T>& out_;
   std::vector<std::size_t> sym_node_;
   std::vector<std::size_t> memo_;
-  std::size_t objective_root_ = 0;
+  std::size_t objective_expr_root_ = 0;
 };
 
 }  // namespace
@@ -1219,22 +1340,22 @@ auto parse(std::string_view source, ParseOptions const& options) -> ParsedModel<
     if (any) m.ast.substitute_literals(literal);
   }
 
-  auto objective = eliminate_objective(m, out.warnings);
-  if (objective) {
+  auto elimination = eliminate_objective(m, out.warnings);
+  if (elimination.expr) {
     m.symbols[static_cast<std::size_t>(m.objvar)].eliminated = true;
   } else {
     out.warnings.push_back(
         {0, "could not solve any equation for '"
                 + m.symbols[static_cast<std::size_t>(m.objvar)].name
                 + "'; keeping it as a variable, which costs one search dimension"});
-    objective = m.ast.var(m.objvar, 0);
+    elimination.expr = m.ast.var(m.objvar, 0);
   }
 
   Lowerer<T> lowerer(m, options, out);
   lowerer.create_variables();
-  lowerer.set_objective(*objective);
+  lowerer.set_objective(*elimination.expr);
   lowerer.add_constraints();
-  lowerer.add_objective_variable_bounds();
+  lowerer.add_objective_variable_bounds(elimination.from_inequality);
 
   // Every structural invariant validate() checks is either guaranteed by how
   // the lowerer builds the DAG (topology, op_count, bare-Const roots) or by

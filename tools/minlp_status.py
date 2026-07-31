@@ -546,6 +546,10 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("| --- | --- |")
     out.append("| `objvar-kept` | the objective variable could not be eliminated, so it "
                "remains a search dimension tied by an equality |")
+    out.append("| `objvar-ineq` | the objective variable was eliminated through an "
+               "inequality, exact at the optimum rather than pointwise; a `.lo` stated "
+               "on it (minimising, or `.up` maximising) constrained nothing and was "
+               "dropped |")
     out.append("| `default-bound` | some free variable was given the artificial "
                "`ParseOptions::default_bound` box |")
     out.append("| `default-bound-integer` | as above, but on an integer/binary variable, "

@@ -155,10 +155,18 @@ auto main(int argc, char** argv) -> int
       totals.nodes += parsed.problem.graph.nodes.size();
 
       bool fallback = false;
+      bool objvar_ineq = false;
       bool defaulted = false;
       bool defaulted_integer = false;
       for (auto const& w : parsed.warnings) {
         fallback = fallback || w.message.find("keeping it as a variable") != std::string::npos;
+        // eliminate_objective (gams/frontend.cpp) phrases the inequality
+        // path's warning around "tight at every optimum" so this is greppable.
+        // Unlike the =E= path the substitution is exact only at the optimum,
+        // and it may have dropped a stated objvar bound, so a bound obtained
+        // from such an instance is worth being able to pick out.
+        objvar_ineq = objvar_ineq
+            || w.message.find("tight at every optimum") != std::string::npos;
         if (w.message.find("bound; using") != std::string::npos) {
           defaulted = true;
           // create_variables() (gams/frontend.cpp) names the domain size
@@ -186,6 +194,7 @@ auto main(int argc, char** argv) -> int
           flags += name;
         };
         if (fallback) flag("objvar-kept");
+        if (objvar_ineq) flag("objvar-ineq");
         if (defaulted_integer) flag("default-bound-integer");
         else if (defaulted) flag("default-bound");
         // The sense is what makes "the best bound so far" an ordering rather

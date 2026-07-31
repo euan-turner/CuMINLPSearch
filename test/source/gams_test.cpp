@@ -207,6 +207,29 @@ auto try_eliminate(std::string const& equation) -> Eliminated
           parsed.problem.box_bounds.size()};
 }
 
+/// try_eliminate's sibling for the inequality path, which is sense-dependent
+/// and so cannot be pinned to `minimizing` the way try_eliminate is. Also
+/// leaves objvar unbounded, since the bound rules differ between the two paths
+/// and get their own test below.
+auto try_eliminate_ineq(std::string const& equations,
+                        char const* sense = "minimizing",
+                        char const* declare = "Equations e1;\n") -> Eliminated
+{
+  auto parsed = gams::parse<double>(
+      "Variables x1,objvar;\n"
+      + std::string(declare)
+      + equations + "\n"
+      "x1.lo = -10; x1.up = 10;\n"
+      "Solve m using NLP " + sense + " objvar;\n");
+
+  bool kept = false;
+  for (auto const& name : parsed.var_names) kept = kept || name == "objvar";
+
+  std::vector<double> point(parsed.problem.box_bounds.size(), 3.0);
+  return {!kept, evaluate_objective(parsed.problem, point),
+          parsed.problem.box_bounds.size()};
+}
+
 }  // namespace
 
 TEST_CASE("objective rearrangement handles the shapes Convert emits",
@@ -287,10 +310,84 @@ TEST_CASE("nonlinear occurrences of the objective variable fall back cleanly",
     CHECK_FALSE(r.eliminated);
   }
 
-  SECTION("only an inequality mentions objvar")
+  SECTION("only an inequality mentions objvar, pointing the wrong way")
   {
+    // objvar <= sqr(x1) under `minimizing` is unbounded below, not min sqr(x1).
     auto r = try_eliminate("e1.. objvar - sqr(x1) =L= 0;");
     CHECK_FALSE(r.eliminated);
+  }
+}
+
+TEST_CASE("an inequality that is tight at the optimum eliminates objvar",
+          "[gams][elimination]")
+{
+  // `min objvar s.t. objvar >= f(x)` is `min f(x)`: nothing pushes objvar
+  // below f, so it sits on it at every optimum. The same rearrangement as the
+  // =E= path, admissible only when the direction matches the sense.
+  SECTION("autocorr_bern20-03's shape: f(x) - objvar =L= 0, minimising")
+  {
+    auto r = try_eliminate_ineq("e1.. sqr(x1) - objvar =L= 0;");
+    CHECK(r.eliminated);
+    CHECK(r.vars == 1);
+    CHECK(close(r.value, 9.0));
+  }
+
+  SECTION("the same relation written =G=")
+  {
+    auto r = try_eliminate_ineq("e1.. -(sqr(x1)) + objvar =G= 0;");
+    CHECK(r.eliminated);
+    CHECK(close(r.value, 9.0));
+  }
+
+  SECTION("coefficient other than 1, and a non-zero right-hand side")
+  {
+    // 2*objvar >= sqr(x1) - 8, so objvar >= (sqr(x1) - 8)/2.
+    auto r = try_eliminate_ineq("e1.. 2*objvar - sqr(x1) =G= -8;");
+    CHECK(r.eliminated);
+    CHECK(close(r.value, 0.5));
+  }
+
+  SECTION("maximising is the mirror image")
+  {
+    // max objvar s.t. objvar <= sqr(x1) is max sqr(x1); the reported objective
+    // is negated because the driver only minimises.
+    auto r = try_eliminate_ineq("e1.. sqr(x1) - objvar =G= 0;", "maximizing");
+    CHECK(r.eliminated);
+    CHECK(close(r.value, -9.0));
+  }
+
+  SECTION("the wrong direction for the sense falls back")
+  {
+    // objvar >= sqr(x1) under `maximizing` is unbounded above.
+    auto r = try_eliminate_ineq("e1.. sqr(x1) - objvar =L= 0;", "maximizing");
+    CHECK_FALSE(r.eliminated);
+    CHECK(r.vars == 2);
+  }
+
+  SECTION("objvar in a second equation falls back")
+  {
+    // "Nothing else pushes objvar down" stops being true: e2 could make the
+    // tight value infeasible, so the substitution is not sound.
+    auto r = try_eliminate_ineq("e1.. sqr(x1) - objvar =L= 0;\n"
+                                "e2.. objvar + x1 =L= 4;",
+                                "minimizing",
+                                "Equations e1,e2;\n");
+    CHECK_FALSE(r.eliminated);
+    CHECK(r.vars == 2);
+  }
+
+  SECTION("an =E= definition is preferred when the model has both")
+  {
+    // e2 would also be admissible; the equality is unconditionally valid, so a
+    // model carrying both never relies on the weaker argument.
+    auto r = try_eliminate_ineq("e1.. -(sqr(x1)) + objvar =E= 0;\n"
+                                "e2.. 2*x1 - objvar =L= 0;",
+                                "minimizing",
+                                "Equations e1,e2;\n");
+    CHECK(r.eliminated);
+    CHECK(close(r.value, 9.0));
+    // e2 is not the defining equation, so it stays a real constraint.
+    CHECK(r.vars == 1);
   }
 }
 
@@ -309,6 +406,82 @@ TEST_CASE("a bound on the eliminated objective variable survives as a constraint
   REQUIRE(parsed.problem.constraints.size() == 1);  // but its bound is not
   CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
   CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
+}
+
+TEST_CASE("a surviving objvar bound is stated in the file's own sense",
+          "[gams][elimination]")
+{
+  // The negation that turns `maximizing` into the driver's minimise is a
+  // solver-facing rewrite; a bound the file states is about the value the file
+  // wrote. `objvar.up = 25` while maximising means f(x) <= 25, so the
+  // constraint must be aimed at f, not at -f -- which would silently mean
+  // f(x) >= -25, a different feasible set.
+  auto parsed = gams::parse<double>(
+      "Variables x1,objvar;\n"
+      "Equations e1;\n"
+      "e1.. -(sqr(x1)) + objvar =E= 0;\n"
+      "x1.lo = -10; x1.up = 10;\n"
+      "objvar.up = 25;\n"
+      "Solve m using NLP maximizing objvar;\n");
+
+  REQUIRE(parsed.problem.constraints.size() == 1);
+  CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+  CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
+  // f(3) = 9, not -9.
+  CHECK(close(cuminlp::testing::evaluate(parsed.problem.graph,
+                                         parsed.problem.constraints[0].root_id,
+                                         {3.0}),
+              9.0));
+}
+
+TEST_CASE("an inequality elimination keeps only the binding objvar bound",
+          "[gams][elimination]")
+{
+  auto parse_bounded = [](char const* bounds, char const* sense) {
+    return gams::parse<double>(
+        "Variables x1,objvar;\n"
+        "Equations e1;\n"
+        "e1.. sqr(x1) - objvar =L= 0;\n"
+        "x1.lo = -10; x1.up = 10;\n"
+        + std::string(bounds)
+        + "Solve m using NLP " + sense + " objvar;\n");
+  };
+
+  SECTION("an upper bound still restricts x and survives")
+  {
+    // No feasible objvar exists at all unless sqr(x1) <= 25.
+    auto parsed = parse_bounded("objvar.up = 25;\n", "minimizing");
+    REQUIRE(parsed.problem.constraints.size() == 1);
+    CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+    CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
+  }
+
+  SECTION("a lower bound restricts nothing and is dropped, loudly")
+  {
+    // Every x admits a feasible objvar (just a higher one), so `objvar.lo = 5`
+    // is not a constraint on the model. Emitting it as sqr(x1) >= 5 would cut
+    // off x1 = 0, which is feasible with objvar = 5.
+    auto parsed = parse_bounded("objvar.lo = 5;\n", "minimizing");
+    CHECK(parsed.problem.constraints.empty());
+
+    bool mentioned = false;
+    for (auto const& w : parsed.warnings) {
+      mentioned = mentioned || w.message.find("objvar.lo") != std::string::npos;
+    }
+    CHECK(mentioned);
+  }
+
+  SECTION("the =E= path keeps both, since objvar is pinned there")
+  {
+    auto parsed = gams::parse<double>(
+        "Variables x1,objvar;\n"
+        "Equations e1;\n"
+        "e1.. -(sqr(x1)) + objvar =E= 0;\n"
+        "x1.lo = -10; x1.up = 10;\n"
+        "objvar.lo = 5; objvar.up = 25;\n"
+        "Solve m using NLP minimizing objvar;\n");
+    CHECK(parsed.problem.constraints.size() == 2);
+  }
 }
 
 TEST_CASE("maximise negates the objective and reports the original sense",
@@ -618,22 +791,22 @@ TEST_CASE("autocorr_bern20-03.gms agrees with the hand-built DAG",
 {
   using cuminlp::examples::autocorr_bern20_03::make_autocorr_bern20_03;
 
-  // Its defining equation is `=L=`, not `=E=`: objvar is NOT eliminated (see
-  // the "only an inequality mentions objvar" fallback rule above), so this
-  // parses to 20 binaries plus a free objvar, with the inequality surviving
-  // as a real constraint -- not the 20-binary/no-constraint shape of
-  // make_autocorr_bern20_03(). The oracle still applies, aimed at the parsed
-  // constraint's expression (objective - objvar <= 0) instead of the parsed
-  // objective (which is just bare objvar).
+  // Its defining equation is `=L=`, not `=E=`, and `f(b) - objvar =L= 0` under
+  // `minimizing` is tight at every optimum -- so objvar is eliminated through
+  // it and this parses to exactly make_autocorr_bern20_03()'s shape: 20
+  // binaries, no leftover objvar dimension, no constraint. It did not always:
+  // while the inequality path was unimplemented, the fallback kept objvar as a
+  // 21st continuous variable with a +-1e6 default box, which pinned the search
+  // driver's dual bound at -1e6 (the objective being the bare variable) and
+  // left the instance unsolvable at any search shape.
   auto parsed = gams::parse_file<double>(data_file("autocorr_bern20-03.gms"));
   auto reference = make_autocorr_bern20_03();
 
-  REQUIRE(parsed.problem.var_kinds.size() == 21);
+  REQUIRE(parsed.problem.var_kinds.size() == 20);
   for (std::size_t i = 0; i < 20; ++i) {
     CHECK(parsed.problem.var_kinds[i] == cuminlp::dag::VarKind::Binary);
   }
-  CHECK(parsed.problem.var_kinds[20] == cuminlp::dag::VarKind::Continuous);
-  REQUIRE(parsed.problem.constraints.size() == 1);
+  CHECK(parsed.problem.constraints.empty());
 
   std::mt19937 rng(20260730);
   std::uniform_int_distribution<int> pick(0, 1);
@@ -642,14 +815,10 @@ TEST_CASE("autocorr_bern20-03.gms agrees with the hand-built DAG",
     b.reserve(20);
     for (int j = 0; j < 20; ++j) b.push_back(static_cast<double>(pick(rng)));
 
-    double const objvar = evaluate_objective(reference, b);
-    std::vector<double> point = b;
-    point.push_back(objvar);  // parsed model's 21st variable
-
-    double const constraint_lhs = cuminlp::testing::evaluate(
-        parsed.problem.graph, parsed.problem.constraints[0].root_id, point);
-    INFO("sample " << s << " objvar " << objvar);
-    CHECK(close(constraint_lhs, 0.0, 1e-9));
+    double const want = evaluate_objective(reference, b);
+    double const got = evaluate_objective(parsed.problem, b);
+    INFO("sample " << s << " expected " << want << " got " << got);
+    CHECK(close(got, want, 1e-9));
   }
 }
 
