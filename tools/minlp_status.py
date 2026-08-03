@@ -21,15 +21,17 @@ minlplib.org changes, which is on nobody's schedule but MINLPLib's, and
 fetching them needs a network that `refresh` must not start depending on.
 
 Each recorded bound carries the commit it was found at, the number of search
-iterations that run took, and the search shape it was run with, all scraped
-from the log alongside the bound itself: the same number reached in fewer
+iterations that run took, and the policy it was run under, all scraped from
+the log alongside the bound itself: the same number reached in fewer
 iterations is progress, and the table cannot show that without recording it.
 
-The shape is recorded as the flags that reproduce it, because none of those
-four values has a fixed default -- two come from a table keyed on the model's
-variable kinds and one is fitted to whatever the GPU had free at the time.
-Without them a row says what was found but not how, and the run behind it
-cannot be repeated.
+The policy is recorded as its name, not as the shape it resolved to. With
+partition_num and max_cycle_size now fitted to whatever the GPU had free at
+the time, pasting the resolved numbers back onto a different GPU reproduces a
+shape but not the decision -- and the decision, paired with the commit hash
+(the roster lives in include/, so a rule change is a differing hash), is what
+the row is a record of. `--policy=<name>` is what the cell pastes back onto a
+command line; an experimental run's overrides ride alongside it.
 
 Bounds are stored in the instance's own sense: for a `min` model the primal
 bound is an upper bound on the optimum and the dual bound a lower one, and for
@@ -79,18 +81,18 @@ COLUMNS = [
     "Best primal",
     "Primal @",
     "Primal iters",
-    "Primal params",
+    "Primal policy",
     "Best dual",
     "Dual @",
     "Dual iters",
-    "Dual params",
+    "Dual policy",
     "Notes",
 ]
 
 # Bounds this solver found. Only ever improve, cost a GPU run each, and are
 # what a `record` accumulates.
-RECORDED = ["Best primal", "Primal @", "Primal iters", "Primal params",
-            "Best dual", "Dual @", "Dual iters", "Dual params"]
+RECORDED = ["Best primal", "Primal @", "Primal iters", "Primal policy",
+            "Best dual", "Dual @", "Dual iters", "Dual policy"]
 
 # Bounds MINLPLib published. Re-derivable at any time from one download, so
 # unlike RECORDED they are replaceable rather than precious -- but they still
@@ -259,9 +261,9 @@ def fmt_iters(value):
     return EMPTY if value is None else str(value)
 
 
-def fmt_params(value):
+def fmt_policy(value):
     # Escaped like Notes: a pipe would end the cell early and shift every
-    # column after it. Nothing gams_solve prints contains one, but --params
+    # column after it. Nothing gams_solve prints contains one, but --policy
     # takes whatever the caller typed.
     return EMPTY if value is None else value.replace("|", "\\|")
 
@@ -521,22 +523,25 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("bound is only displaced by a better bound, or by an equal one reached in")
     out.append("fewer iterations.")
     out.append("")
-    out.append("**Primal params / Dual params** is the search shape that run used,")
-    out.append("written as the flags that set it. Every one of those four has a default")
-    out.append("that moves -- two are read off a table keyed on the model's variable")
-    out.append("kinds, and `--max-cycle-size` is fitted to whatever the GPU had free --")
-    out.append("so re-running the bare command is not the same experiment. Pasting the")
-    out.append("cell back pins all four:")
+    out.append("**Primal policy / Dual policy** is the policy that run used, as a")
+    out.append("pasteable `--policy=<name>` -- and, for an experimental run, whatever")
+    out.append("`--partition-num`/`--enumerate-cap`/`--sample-points`/`--max-cycle-size`")
+    out.append("overrides rode alongside it. The policy name, not the four resolved")
+    out.append("numbers, is the reproducible unit: partition_num and max_cycle_size are")
+    out.append("now fitted to whatever the GPU had free at the time, so pasting them back")
+    out.append("reproduces a shape but not the decision, while the policy name paired")
+    out.append("with the commit column reproduces the decision exactly. Pasting the cell")
+    out.append("back reruns the same policy:")
     out.append("")
     out.append("```")
-    out.append("gams_solve <corpus>/<instance>.gms <iters> <params>")
+    out.append("gams_solve <corpus>/<instance>.gms <iters> <policy>")
     out.append("```")
     out.append("")
     out.append("with `<iters>` the matching iteration count from the column beside it.")
     out.append("That reproduces the run whether it converged or hit the limit: a run")
     out.append("that converged at iteration N converges at N under a limit of N too.")
     out.append("An empty cell means the bound predates this column, not that the run")
-    out.append("used no flags.")
+    out.append("used no policy.")
     out.append("")
     out.append("**Notes** carries the rejection reason for a `no` row. For a `yes` row it")
     out.append("carries quality caveats that do not stop a solve but should temper trust")
@@ -563,10 +568,10 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("```")
     out.append("")
     out.append("`record` keeps whichever bound is better and stamps the commit, the")
-    out.append("iteration count and the search shape it came from, so re-running a worse")
+    out.append("iteration count and the policy it came from, so re-running a worse")
     out.append("configuration cannot lose ground. The count is scraped from the log's")
-    out.append("`iter` lines and the shape from its `PARAMS` line; `--iters` and")
-    out.append("`--params` set them by hand, which is the only way to record either")
+    out.append("`iter` lines and the policy from its `PARAMS` line; `--iters` and")
+    out.append("`--policy` set them by hand, which is the only way to record either")
     out.append("alongside a manual `--primal`/`--dual`. A `-dirty` suffix on a hash")
     out.append("means a **build input** was uncommitted, so the number is not")
     out.append("reproducible from that hash alone -- the shape is pinned but the code")
@@ -589,7 +594,7 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("any bound it did not report rather than leaving it standing. Reach for")
     out.append("`--replace` when the recorded numbers stopped being comparable rather")
     out.append("than merely being beaten -- a commit that changed what the search does,")
-    out.append("or a row recorded against the wrong shape -- because \"best ever seen\"")
+    out.append("or a row recorded against the wrong policy -- because \"best ever seen\"")
     out.append("is only a useful record while every entry in it means the same thing.")
     out.append("")
     out.append("## Refreshing the reference bounds")
@@ -672,31 +677,35 @@ RESULT_RE = re.compile(
 # the count on the RESULT line, and it works on logs already on disk.
 ITER_RE = re.compile(r"^iter (?P<n>\d+):", re.MULTILINE)
 
-# gams_solve prints this once, after resolving every default, before the
-# search. `shape=` is on the line too but is not recorded: it only selects
-# defaults for the four values below, so once those are pinned it changes
-# nothing, and a cell that repeats it would invite reproducing a run by the
-# shape name instead of by the numbers it happened to imply that day.
+# gams_solve prints this once, after resolving the policy, before the search.
+# `source=` is on the line too (auto/named/overridden) but is not recorded
+# itself: `--policy=<name>` reproduces a `named` run outright, and an
+# `overridden` run is exactly `--policy=<name>` plus whatever `overrides=`
+# lists, so the source word adds nothing a reader could paste back that the
+# other two fields don't already say.
 PARAMS_RE = re.compile(r"^PARAMS\t(?P<fields>\S.*)$", re.MULTILINE)
 
-# Recorded as flags rather than as bare numbers so a cell can be pasted onto a
-# gams_solve command line unedited. The key is the name gams_solve prints; the
-# flag is the one that sets it, and they are deliberately the same word.
-PARAM_FLAGS = (
-    ("partition_num", "--partition-num"),
-    ("enumerate_cap", "--enumerate-cap"),
-    ("sample_points", "--sample-points"),
-    ("max_cycle_size", "--max-cycle-size"),
-)
+# The experimental-override keys gams_solve's `overrides=` field can list, and
+# the flag that sets each -- deliberately the same word, so the mapping is
+# just spelling. Only ever appended to a scraped policy cell; an ordinary
+# auto/named run has no `overrides=` field at all.
+OVERRIDE_FLAGS = {
+    "partition_num": "--partition-num",
+    "enumerate_cap": "--enumerate-cap",
+    "sample_points": "--sample-points",
+    "max_cycle_size": "--max-cycle-size",
+}
 
 
-def scrape_params(text):
-    """The search shape of the run in `text`, as a pasteable flag string.
+def scrape_policy(text):
+    """The policy (and any overrides) of the run in `text`, as a pasteable
+    `--policy=<name> [--flag=value ...]` string.
 
-    None when the log has no usable PARAMS line -- a log from a build before
-    this was printed, or a truncated one. That records as "unknown", which is
-    what it is; refusing the whole record would throw away a real bound over a
-    missing annotation.
+    None when the log has no usable `policy=` field -- a log from a build
+    before this was printed (including one from before the policy-selection
+    change, whose PARAMS line carried `shape=` instead), or a truncated one.
+    That records as "unknown", which is what it is; refusing the whole record
+    would throw away a real bound over a missing annotation.
     """
     matches = list(PARAMS_RE.finditer(text))
     if not matches:
@@ -706,12 +715,16 @@ def scrape_params(text):
         key, sep, value = field.partition("=")
         if sep:
             fields[key] = value
-    # All four or nothing: a partial shape reads as reproducible while leaving
-    # the reader to guess which default filled the gap, and the guess depends
-    # on a GPU they do not have.
-    if any(key not in fields for key, _ in PARAM_FLAGS):
+    policy = fields.get("policy")
+    if policy is None:
         return None
-    return " ".join(f"{flag}={fields[key]}" for key, flag in PARAM_FLAGS)
+    cell = f"--policy={policy}"
+    for pair in fields.get("overrides", "").split(","):
+        key, sep, value = pair.partition("=")
+        flag = OVERRIDE_FLAGS.get(key)
+        if sep and flag:
+            cell += f" {flag}={value}"
+    return cell
 
 
 def scrape_log(text):
@@ -727,9 +740,9 @@ def scrape_log(text):
     fitting in the root launch) yields None, which records as "no count" and
     not as zero.
 
-    The search shape is windowed the same way, and for the same reason:
-    gams_solve prints it before its own search, so the PARAMS line inside the
-    window is the one belonging to this run and not to the run before it.
+    The policy is windowed the same way, and for the same reason: gams_solve
+    prints it before its own search, so the PARAMS line inside the window is
+    the one belonging to this run and not to the run before it.
     """
     matches = list(RESULT_RE.finditer(text))
     if not matches:
@@ -740,7 +753,7 @@ def scrape_log(text):
     window = text[start:m.start()]
     iters = [int(i["n"]) for i in ITER_RE.finditer(window)]
     return m["sense"], parse_number(m["primal"]), parse_number(m["dual"]), \
-        (max(iters) if iters else None), scrape_params(window)
+        (max(iters) if iters else None), scrape_policy(window)
 
 
 def better(kind, sense, new, old):
@@ -840,20 +853,20 @@ def cmd_record(args):
 
     if args.log is not None:
         text = sys.stdin.read() if str(args.log) == "-" else Path(args.log).read_text()
-        log_sense, primal, dual, iters, params = scrape_log(text)
+        log_sense, primal, dual, iters, policy = scrape_log(text)
         # An explicit --iters wins: the log's count is an inference from the
         # printed trace, and the caller may know better (a truncated log, or a
         # run whose trace was not captured).
         if args.iters is not None:
             iters = args.iters
-        if args.params is not None:
-            params = args.params
-        elif params is None:
+        if args.policy is not None:
+            policy = args.policy
+        elif policy is None:
             # Warned about rather than passed over: the row will claim a bound
             # nobody can reproduce, and that is worth one line of noise.
-            print(f"warning: no PARAMS line in the log, so the search shape "
-                  f"behind this bound is not recorded; pass --params to supply "
-                  f"it, or re-run with a build that prints it", file=sys.stderr)
+            print(f"warning: no PARAMS line in the log, so the policy behind "
+                  f"this bound is not recorded; pass --policy to supply it, "
+                  f"or re-run with a build that prints it", file=sys.stderr)
         # A sense mismatch means the log is from a different instance than the
         # one named. Recording it would attach real numbers to the wrong row,
         # which is worse than recording nothing.
@@ -861,7 +874,7 @@ def cmd_record(args):
             die(f"log says the model is a {log_sense} but '{name}' is a "
                 f"{row['Sense']}; is this log from a different instance?")
     else:
-        primal, dual, iters, params = args.primal, args.dual, args.iters, args.params
+        primal, dual, iters, policy = args.primal, args.dual, args.iters, args.policy
     if primal is None and dual is None:
         die("nothing to record: pass --log, or --primal and/or --dual")
 
@@ -878,10 +891,10 @@ def cmd_record(args):
         confirm_dirty("this bound", args.yes)
 
     changed = []
-    for kind, value, value_col, commit_col, iters_col, params_col in (
+    for kind, value, value_col, commit_col, iters_col, policy_col in (
         ("primal", primal, "Best primal", "Primal @", "Primal iters",
-         "Primal params"),
-        ("dual", dual, "Best dual", "Dual @", "Dual iters", "Dual params"),
+         "Primal policy"),
+        ("dual", dual, "Best dual", "Dual @", "Dual iters", "Dual policy"),
     ):
         old = parse_number(row[value_col])
         old_iters = parse_iters(row[iters_col])
@@ -895,8 +908,8 @@ def cmd_record(args):
         # overwrite a shorter one's iteration count on a bound that did not
         # actually move.
         tied = value is not None and old is not None and fmt(value) == fmt(old)
-        # The shape travels with the commit and the count, always: the three
-        # together describe one run, and leaving a stale shape beside a new
+        # The policy travels with the commit and the count, always: the three
+        # together describe one run, and leaving a stale policy beside a new
         # bound would describe a run that never happened.
         if args.replace:
             # Not a comparison at all: the recorded half of the row becomes
@@ -908,7 +921,7 @@ def cmd_record(args):
             keep = value is not None
             row[commit_col] = commit if keep else EMPTY
             row[iters_col] = fmt_iters(iters) if keep else EMPTY
-            row[params_col] = fmt_params(params) if keep else EMPTY
+            row[policy_col] = fmt_policy(policy) if keep else EMPTY
             if keep:
                 changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
                                f"in {fmt_iters(iters)} iters (replaced)")
@@ -919,14 +932,14 @@ def cmd_record(args):
             row[value_col] = fmt(value)
             row[commit_col] = commit
             row[iters_col] = fmt_iters(iters)
-            row[params_col] = fmt_params(params)
+            row[policy_col] = fmt_policy(policy)
             changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
                            f"in {fmt_iters(iters)} iters (forced)")
         elif tied:
             if cheaper(iters, old_iters):
                 row[commit_col] = commit
                 row[iters_col] = fmt_iters(iters)
-                row[params_col] = fmt_params(params)
+                row[policy_col] = fmt_policy(policy)
                 changed.append(f"{kind} {fmt(value)} matched in fewer iters, "
                                f"{fmt_iters(old_iters)} -> {fmt_iters(iters)}")
             else:
@@ -937,7 +950,7 @@ def cmd_record(args):
             row[value_col] = fmt(value)
             row[commit_col] = commit
             row[iters_col] = fmt_iters(iters)
-            row[params_col] = fmt_params(params)
+            row[policy_col] = fmt_policy(policy)
             changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
                            f"in {fmt_iters(iters)} iters")
         elif value is not None:
@@ -1044,10 +1057,11 @@ def main():
     record.add_argument("--iters", type=int,
                         help="iterations the run took (default: scraped from "
                              "--log; required to record a count without one)")
-    record.add_argument("--params",
-                        help="search-shape flags the run used, e.g. "
-                             "'--partition-num=7 --sample-points=5' (default: "
-                             "scraped from --log's PARAMS line)")
+    record.add_argument("--policy",
+                        help="policy the run used, e.g. '--policy=discrete' or "
+                             "'--policy=discrete --partition-num=7' for an "
+                             "overridden run (default: scraped from --log's "
+                             "PARAMS line)")
     record.add_argument("--commit", help="override the recorded hash "
                                          "(default: current HEAD; also "
                                          "suppresses the dirty-tree "
@@ -1061,7 +1075,7 @@ def main():
                              "cell becomes this run's, and a bound this run "
                              "did not report is cleared rather than kept. For "
                              "when the old numbers are no longer comparable "
-                             "-- a commit that changed the search, a shape "
+                             "-- a commit that changed the search, a policy "
                              "recorded wrong. Stronger than --force.")
     record.set_defaults(func=cmd_record)
 

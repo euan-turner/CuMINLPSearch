@@ -324,18 +324,6 @@ public:
     std::cout << "Pending size: " << pending.size() << '\n';
     std::cout << "Viable regions: " << viable << '\n';
     std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';
-
-    if (found_incumbent) {
-      std::cout << "Argmin (sampled witness for GUB):" << '\n';
-      for (std::size_t i = 0; i < best_point_.size(); ++i) {
-        std::cout << "x[" << i << "], ";
-      }
-      std::cout << '\n' << "[";
-      for (std::size_t i = 0; i < best_point_.size(); ++i) {
-        std::cout << best_point_[i] << ", ";
-      }
-      std::cout << "]" << '\n';
-    }
     std::cout.precision(prev_precision);
     return GUB_;
   }

@@ -32,7 +32,7 @@ bool feq(double a, double b)
 }
 }  // namespace
 
-// TEST_EXTENSION.md §1a: Problem is move-only, not copyable -- a copy would
+// TEST_EXTENSION.md: Problem is move-only, not copyable -- a copy would
 // leave every previously-issued Expr aliasing the original's graph. This is
 // a structural (compile-time) invariant, not a runtime one.
 static_assert(!std::is_copy_constructible_v<Problem<double>>);
@@ -157,7 +157,7 @@ TEST_CASE("live_set_estimate is always 0", "[dag]")
   CHECK(p.graph.nodes[e.id()].live_set_estimate == 0);
 }
 
-// §1b: a unary op applied directly to a Const constant-folds rather than
+// A unary op applied directly to a Const constant-folds rather than
 // emitting a degenerate op node over a Const.
 TEST_CASE("Unary ops applied directly to fixed() constant-fold", "[dag][1b]")
 {
@@ -213,7 +213,7 @@ TEST_CASE("A bare Const as a constraint root is rejected by validate()",
   REQUIRE_THROWS_AS(p.validate(), InvalidDAG);
 }
 
-// §2: Problem construction invariants, checked via validate().
+// Problem construction invariants, checked via validate().
 
 TEST_CASE("validate() accepts a well-formed Problem", "[dag][2]")
 {

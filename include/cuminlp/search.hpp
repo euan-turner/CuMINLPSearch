@@ -13,7 +13,7 @@
 // cuinterval.h (which pulls in operations.cuh's unconditional __device__
 // arithmetic overloads) it's compilable by a plain host compiler, which is
 // what keeps this header's search::CompositionInterval::materialise
-// host-testable without a CUDA toolchain (TEST_EXTENSION.md §4a).
+// host-testable without a CUDA toolchain (see TEST_EXTENSION.md).
 #include <cuinterval/interval.h>
 
 #include "cuminlp/composition_policy.hpp"
@@ -193,7 +193,7 @@ struct CompositionInterval
   // box deterministically recovers the same SlotAssignment (see
   // CompositionPolicy's class comment), which is then decoded via the same
   // cuminlp::decode::slot_bounds partition::get_slot_bounds calls on device
-  // (TEST_EXTENSION.md §4a) -- host/device agreement is structural, not
+  // (see TEST_EXTENSION.md) -- host/device agreement is structural, not
   // asserted by two hand-written implementations.
   //
   // `root_box` is the true root domain (Problem::box_bounds) for pidx == 0:

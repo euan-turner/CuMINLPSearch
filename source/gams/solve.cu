@@ -1,9 +1,8 @@
 // Solve a GAMS scalar-format model straight from its .gms file.
 //
-//   gams_solve [--dump-dag[=infix|nodes]] [--dump-only] \
-//              [--partition-num=N] [--enumerate-cap=N] [--sample-points=N] \
-//              [--max-cycle-size=N] \
-//              <model.gms> <iterations> [all-binary|discrete|mixed]
+//   gams_solve [--policy=<name>] [--list-policies]
+//              [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]
+//              <model.gms> <iterations>
 //
 // --dump-dag prints the lowered Problem before solving. Problem::validate()
 // proves the DAG is well-formed, not that it is the *right* DAG: outside the
@@ -19,36 +18,34 @@
 // MINLP_STATUS.md. Everything else on stdout is progress narration, with one
 // exception: a
 //
-//   PARAMS<TAB>shape=<name><TAB>partition_num=N<TAB>...
+//   PARAMS<TAB>policy=<name><TAB>source=auto|named|overridden<TAB>...
 //
 // line before the search, the machine-readable twin of the status line. It
-// carries the *resolved* search shape -- after defaults, after the shape
-// table, after auto-fitting -- because a bound is only reproducible from the
-// values the run actually used, and three of the four have defaults that
-// depend on the model or the device. minlp_status.py records it alongside the
-// bound so MINLP_STATUS.md says how each number was obtained.
+// carries the *resolved* search shape -- policy_catalogue.hpp's `resolve`,
+// after any experimental override -- because a bound is only reproducible
+// from the policy name that produced it (plus the commit hash), not from the
+// four numbers themselves: two of them are now fitted to this device's free
+// memory, and pasting them back onto a different GPU reproduces a shape but
+// not the decision. See design/POLICY_SELECTION.md.
 //
 // The point of the frontend: no hand-written builder, no recompilation per
 // instance. Compare source/morse_cluster_energy.cu, which builds the same
 // ex8_6_2 problem by hand -- running both on ex8_6_2.gms should agree.
 //
-// No search-shape parameter is a template argument at this level any more.
-// The positional shape argument now only picks *defaults*: --partition-num,
-// --enumerate-cap, --sample-points and --max-cycle-size each override one.
-//
-// Three of those four defaults are the value the shape was originally tuned
-// with. --max-cycle-size is not, and deliberately: it is the parameter that
-// decides whether a run fits in device memory, the cost is knowable before
-// anything is allocated, and the tabulated answer for a discrete model was
-// 221 GiB. It is fitted to the device instead (resolve_max_cycle_size), and
-// the status line marks it "(auto)" so a run's shape is still readable off
-// its own output.
+// With no --policy, the search shape comes entirely from the problem's
+// variable kinds/counts and this device's free memory (policy_catalogue.hpp's
+// select_policy + resolve) -- no table lookup, no positional shape argument
+// (that argument is gone; see --policy and --list-policies below). The four
+// underlying numbers (--partition-num, --enumerate-cap, --sample-points,
+// --max-cycle-size) still exist, but only as experimental overrides applied
+// on top of the resolved shape, for A/B-ing the resolver against a pinned
+// one -- see USAGE.md.
 //
 // The one value that still has to reach device codegen is the slot capacity
 // (partition::SlotContext's array bound). It is handled by compiling a small
 // ladder of capacities and dispatching to the narrowest rung that holds
-// --max-cycle-size, rather than by baking one into the binary -- see
-// capacity_ladder.hpp and design/RUNTIME_SHAPE.md §4.
+// max_cycle_size, rather than by baking one into the binary -- see
+// capacity_ladder.hpp and design/RUNTIME_SHAPE.md.
 
 #include <algorithm>
 #include <cmath>
@@ -67,6 +64,7 @@
 #include "cuminlp/dag_print.hpp"
 #include "cuminlp/gams.hpp"
 #include "cuminlp/graph_driver.cuh"
+#include "cuminlp/policy_catalogue.hpp"
 
 namespace
 {
@@ -79,30 +77,28 @@ struct Solution {
   double bound;  ///< the incumbent, == upper
   double lower;  ///< dual bound: nothing beats this
   double upper;  ///< primal bound: best feasible value actually attained
-  std::vector<double> point;
+  std::vector<double> point;  ///< the sample point that attained `upper`
 };
 
 /**
- * @brief Construct a GreedyCompositionPolicy and the GraphDriver it drives,
- * and run the solve.
+ * @brief Construct the policy PolicyKind names and the GraphDriver it
+ *        drives, and run the solve.
  *
- * The mismatch this function used to guard against no longer exists: the
- * driver reads its fan-out widths off the policy it is given
- * (CompositionPolicy::fan_out), so there is only one copy of them to get
- * wrong. Previously each carried its own EnumerateCap template argument with
- * nothing checking they agreed, and constructing both here from one set of
- * template parameters was the workaround.
+ * make_policy (policy_catalogue.hpp) is what turns a PolicyKind into a
+ * concrete CompositionPolicy subclass; today that is always
+ * GreedyCompositionPolicy, but nothing here would need to change if a second
+ * PolicyKind existed (design/POLICY_SELECTION.md).
  */
 template<std::size_t Capacity>
 auto solve_with(cuminlp::dag::Problem<double> const& problem,
                 int iters,
+                cuminlp::PolicyKind kind,
                 cuminlp::FanOutSpec fan_out,
                 std::size_t sample_points,
                 cuminlp::SearchCalibration calibration) -> Solution
 {
-  auto policy =
-      std::make_shared<cuminlp::GreedyCompositionPolicy<double, Capacity>>(
-          fan_out, calibration);
+  std::shared_ptr<const cuminlp::CompositionPolicy<double, Capacity>> policy =
+      cuminlp::make_policy<double, Capacity>(kind, fan_out, calibration);
   cuminlp::GraphDriver<double, Capacity> driver(
       policy, iters, 1e-6, sample_points);
   double const bound = driver.solve(problem);
@@ -117,7 +113,7 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
  * Frozen here and never re-read: CompositionPolicy::choose must be a pure
  * function of (box, var_kinds, calibration), because materialise() re-invokes
  * it to decode a node's box and a differing answer would decode sidx against
- * the wrong radix. See design/RUNTIME_SHAPE.md §5.
+ * the wrong radix. See design/RUNTIME_SHAPE.md.
  */
 auto free_device_bytes() -> std::size_t
 {
@@ -146,149 +142,16 @@ auto probe_calibration(std::size_t max_cycle_size) -> cuminlp::SearchCalibration
   return calibration;
 }
 
-enum class Shape { AllBinary, Discrete, Mixed };
-
-auto shape_name(Shape shape) -> char const*
-{
-  switch (shape) {
-    case Shape::AllBinary: return "all-binary";
-    case Shape::Discrete:  return "discrete";
-    case Shape::Mixed:     return "mixed";
-  }
-  return "?";
-}
-
-auto parse_shape(std::string const& s) -> std::optional<Shape>
-{
-  if (s == "all-binary") return Shape::AllBinary;
-  if (s == "discrete") return Shape::Discrete;
-  if (s == "mixed") return Shape::Mixed;
-  return std::nullopt;
-}
-
 /**
- * @brief Pick a pre-instantiated shape from the parsed model's variable kinds.
+ * @brief Warn when overriding --partition-num has quietly changed what
+ *        integer slots do.
  *
- * Each row below is tuned against a real hand-written driver, not invented:
- * all-binary matches source/autocorr_bern20_03.cu, discrete-no-continuous
- * matches source/nvs09.cu, and mixed/continuous matches this tool's own
- * original hardcoded shape (tuned for ex8_6_2). Growing this table needs a
- * measurement justifying the new row, not just a shape it doesn't yet cover.
- */
-auto choose_shape(std::vector<cuminlp::dag::VarKind> const& kinds) -> Shape
-{
-  bool any_continuous = false;
-  bool any_integer = false;
-  for (auto kind : kinds) {
-    if (kind == cuminlp::dag::VarKind::Continuous) any_continuous = true;
-    if (kind == cuminlp::dag::VarKind::Integer) any_integer = true;
-  }
-  if (any_continuous) return Shape::Mixed;
-  if (any_integer) return Shape::Discrete;
-  return Shape::AllBinary;
-}
-
-/// The partition_num each shape was originally tuned with, used when
-/// --partition-num is not given. Binary slots ignore it (their fan-out is
-/// always 2), so all-binary's 2 is nominal.
-auto default_partition_num(Shape shape) -> std::size_t
-{
-  switch (shape) {
-    case Shape::AllBinary: return 2;
-    case Shape::Discrete:  return 7;
-    case Shape::Mixed:     return 10;
-  }
-  return 10;
-}
-
-/// Likewise for --sample-points: the count each shape was tuned with.
-auto default_sample_points(Shape shape) -> std::size_t
-{
-  switch (shape) {
-    case Shape::AllBinary: return 1;
-    case Shape::Discrete:  return 5;
-    case Shape::Mixed:     return 10;
-  }
-  return 10;
-}
-
-/// And for --max-cycle-size: the slot count each shape was tuned with. Only
-/// a fallback now, for when the device budget cannot be read at all -- see
-/// resolve_max_cycle_size. These numbers were preserved verbatim from the
-/// hand-written drivers, and preserving them turned out to preserve a bug:
-/// Discrete's 10 came from source/nvs09.cu at a revision where CYCLE_SIZE was
-/// 10, a configuration that needs 221 GiB and has never run on a consumer
-/// GPU. The shape whose defaults were "modelled on nvs09" could not solve
-/// nvs09.
-///
-/// This is a *cap on the policy*, not the compiled capacity -- the ladder
-/// rounds it up to the nearest instantiated rung, which costs registers and
-/// nothing else (padding slots have fan-out 1).
-auto fallback_max_cycle_size(Shape shape) -> std::size_t
-{
-  switch (shape) {
-    case Shape::AllBinary: return 20;
-    case Shape::Discrete:  return 10;
-    case Shape::Mixed:     return 4;
-  }
-  return 4;
-}
-
-/// Fraction of free device memory auto-fitting will spend on the widest
-/// composition. The remainder is headroom for the narrower compositions the
-/// search also reaches: each is at least one slot's fan-out cheaper than the
-/// last, so their total is a geometric tail over the widest, and a fan-out of
-/// 2 -- the smallest a slot can have -- bounds that tail by the widest again.
-/// Two thirds is comfortably inside that for any real fan-out while still
-/// leaving the choice recognisably ambitious.
-constexpr double auto_budget_fraction = 0.67;
-
-/// Where --max-cycle-size comes from when it is not given.
-struct ChosenCap {
-  std::size_t value;
-  bool automatic;  ///< false when the shape fallback had to be used
-};
-
-/**
- * @brief Pick the widest slot cap whose graphs fit on this device.
- *
- * The default used to be a per-shape constant, which meant the very first
- * command a user typed could fail with an out-of-memory report and a
- * suggestion to type a second one. The sizing information needed to get it
- * right is available before anything is allocated, so this does the search
- * the user would otherwise do by hand.
- *
- * Falls back to the shape's tuned constant only when cudaMemGetInfo gave
- * nothing to size against; guessing is still better than refusing to run.
- */
-auto resolve_max_cycle_size(cuminlp::dag::Problem<double> const& problem,
-                            cuminlp::FanOutSpec const& fan_out,
-                            std::size_t sample_points,
-                            std::size_t free_bytes,
-                            Shape shape) -> ChosenCap
-{
-  if (free_bytes == 0) {
-    return {fallback_max_cycle_size(shape), false};
-  }
-  auto const budget =
-      static_cast<std::size_t>(static_cast<double>(free_bytes)
-                               * auto_budget_fraction);
-  std::size_t const fitted = cuminlp::dag::auto_max_cycle_size(
-      problem, fan_out, sample_points, budget, cuminlp::max_capacity());
-  // Zero means not even one slot fits. Run at 1 anyway: the build's own
-  // out-of-memory report explains the per-element cost far better than
-  // anything that could be said here, and it is the report the user needs.
-  return {fitted == 0 ? std::size_t {1} : fitted, true};
-}
-
-/**
- * @brief Warn when --partition-num has quietly changed what integer slots do.
- *
- * enumerate_cap defaults to partition_num, so `--partition-num=2` on a model
- * of [3, 9] integers drops enumerate_cap to 2 as well and every integer slot
- * flips from IntegerEnumerate to IntegerBisect. Nothing about the status line
- * says so: it reports the flag that was set and the value it implied, both
- * looking exactly as asked for.
+ * Only reachable on the experimental-override path now: resolve() decouples
+ * enumerate_cap from partition_num by construction, so the coupling this
+ * warns about only exists again when a caller
+ * overrides --partition-num without also overriding --enumerate-cap, which
+ * reapplies the old single-arg-FanOutSpec shorthand on top of the resolved
+ * shape.
  *
  * States the mechanism and stops there, rather than predicting that the
  * search will suffer. Bisecting is cheaper per slot, so the auto-fitted cap
@@ -333,22 +196,68 @@ void warn_on_implied_enumerate_cap(cuminlp::dag::Problem<double> const& problem,
 
 auto solve(cuminlp::dag::Problem<double> const& problem,
            int iters,
+           cuminlp::PolicyKind kind,
            cuminlp::FanOutSpec fan_out,
            std::size_t sample_points,
            std::size_t max_cycle_size) -> Solution
 {
   // One templated lambda, instantiated once per ladder rung; which rung runs
   // is a runtime decision. This is the only place the compile-time capacity
-  // is chosen, and it replaces the old three-row switch over hardcoded
-  // (CycleSize, PartitionNum, SamplePoints) triples.
+  // is chosen.
   auto const calibration = probe_calibration(max_cycle_size);
   return cuminlp::dispatch_on_capacity(
       max_cycle_size,
       [&]<std::size_t Capacity>() -> Solution
       {
         return solve_with<Capacity>(
-            problem, iters, fan_out, sample_points, calibration);
+            problem, iters, kind, fan_out, sample_points, calibration);
       });
+}
+
+/// One line per roster row: name, rules, evidence, provisional marker.
+/// Needs no GPU and no model -- it is pure data (policy_catalogue.hpp's
+/// policy_roster). Shared by --list-policies and an unknown --policy name's
+/// error path, which exits 2 with the roster listed.
+void print_roster(std::ostream& out)
+{
+  auto describe_partition = [](cuminlp::PartitionRule const& r) -> std::string
+  {
+    if (r.mode == cuminlp::PartitionRule::Mode::Pin) {
+      return "pin(" + std::to_string(r.pinned) + ")";
+    }
+    return "fit";
+  };
+  auto describe_enumerate = [](cuminlp::EnumerateRule const& r) -> std::string
+  {
+    switch (r.mode) {
+      case cuminlp::EnumerateRule::Mode::CoverDomains:
+        return "cover-domains(" + std::to_string(r.ceiling) + ")";
+      case cuminlp::EnumerateRule::Mode::FollowPartition:
+        return "follow-partition";
+      case cuminlp::EnumerateRule::Mode::Pin:
+        return "pin(" + std::to_string(r.pinned) + ")";
+    }
+    return "?";
+  };
+  auto describe_cycle = [](cuminlp::CycleRule const& r) -> std::string
+  {
+    if (r.mode == cuminlp::CycleRule::Mode::Pin) {
+      return "pin(" + std::to_string(r.pinned) + ")";
+    }
+    return "fit (fallback " + std::to_string(r.pinned) + ")";
+  };
+
+  for (cuminlp::PolicyProfile const& p : cuminlp::policy_roster) {
+    out << "  " << p.name << "\n"
+        << "      partition=" << describe_partition(p.partition)
+        << " enumerate=" << describe_enumerate(p.enumerate)
+        << " sample_points=" << p.sample_points
+        << " cycle=" << describe_cycle(p.cycle) << "\n"
+        << "      evidence: " << p.evidence
+        << (p.provisional ? " (provisional -- no measurement behind it yet)"
+                          : "")
+        << "\n";
+  }
 }
 
 }  // namespace
@@ -357,15 +266,12 @@ auto main(int argc, char* argv[]) -> int
 {
   auto usage = [&](std::ostream& out) {
     out << "usage: " << argv[0]
-        << " [--dump-dag[=infix|nodes]] [--dump-only]"
-        << " [--partition-num=N] [--enumerate-cap=N] [--sample-points=N]"
-        << " [--max-cycle-size=N]"
-        << " <model.gms> <iterations> [all-binary|discrete|mixed]\n";
+        << " [--policy=<name>] [--list-policies]"
+        << " [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
+        << " <model.gms> <iterations>\n";
   };
 
-  // Printed on request to stdout at exit 0, never as part of an error. The
-  // defaults are the questions this tool gets asked, so they are stated here
-  // rather than left to USAGE.md.
+  // Printed on request to stdout at exit 0, never as part of an error.
   auto help = [&] {
     usage(std::cout);
     // Adjacent literals rather than a raw string: nvcc's preprocessor does
@@ -378,38 +284,17 @@ auto main(int argc, char* argv[]) -> int
            "  <model.gms>     model to solve\n"
            "  <iterations>    branch-and-bound iteration limit (omit with "
            "--dump-only)\n"
-           "  [shape]         all-binary|discrete|mixed; pins which defaults "
-           "to use\n"
-           "                  instead of inferring them from the model's "
-           "variable kinds\n"
            "\n"
-           "Search shape:\n"
-           "  --partition-num=N   sub-intervals a continuous or "
-           "bisected-integer slot\n"
-           "                      splits into; >= 2. Default 2 (all-binary), "
-           "7\n"
-           "                      (discrete), 10 (mixed).\n"
-           "  --enumerate-cap=N   largest integer domain still enumerated "
-           "exactly rather\n"
-           "                      than bisected. Defaults to --partition-num, "
-           "which is\n"
-           "                      a trap worth knowing about: lowering "
-           "--partition-num\n"
-           "                      lowers this too, and an integer whose domain "
-           "no longer\n"
-           "                      fits starts bisecting instead. Set it "
-           "explicitly to\n"
-           "                      decouple them.\n"
-           "  --sample-points=N   points sampled per subdomain, for the "
-           "incumbent.\n"
-           "                      Default 1 (all-binary), 5 (discrete), 10 "
-           "(mixed).\n"
-           "  --max-cycle-size=N  variables one iteration acts on; <= 64. "
-           "Default: the\n"
-           "                      widest cap whose graphs fit in this device's "
-           "free\n"
-           "                      memory, shown on the status line as "
-           "\"(auto)\".\n"
+           "Policy:\n"
+           "  --policy=<name>   use this named composition policy instead of "
+           "selecting\n"
+           "                    one automatically from the model's variable "
+           "kinds and\n"
+           "                    this device's free memory. See "
+           "--list-policies.\n"
+           "  --list-policies   print the policy roster (name, rules, "
+           "evidence,\n"
+           "                    provisional status) and exit; needs no GPU.\n"
            "\n"
            "Inspection:\n"
            "  --dump-dag[=infix|nodes]  print the lowered Problem before "
@@ -417,23 +302,46 @@ auto main(int argc, char* argv[]) -> int
            "  --dump-only               print and stop; needs no GPU\n"
            "  -h, --help                this message\n"
            "\n"
-           "Exit codes: 0 solved or hit the iteration limit, 1 parse error, 2 "
-           "bad flag\n"
-           "value or rejected configuration, 3 out of device memory.\n";
+           "Experiments (research instrumentation, not configuration -- see "
+           "USAGE.md):\n"
+           "  --partition-num=N   overrides the resolved partition_num; >= "
+           "2.\n"
+           "  --enumerate-cap=N   overrides the resolved enumerate_cap; >= "
+           "1. Given\n"
+           "                      --partition-num without this, "
+           "enumerate_cap follows\n"
+           "                      it instead of staying at what the policy "
+           "resolved.\n"
+           "  --sample-points=N   overrides the resolved sample_points.\n"
+           "  --max-cycle-size=N  overrides the resolved max_cycle_size; <= "
+           "64.\n"
+           "  A run using any of these reports source=overridden instead of "
+           "auto/named.\n"
+           "\n"
+           "Exit codes: 0 solved or hit the iteration limit (and --help, "
+           "--list-policies),\n"
+           "1 parse error, 2 bad flag value or rejected configuration "
+           "(including an\n"
+           "unknown --policy name, or one that doesn't apply to this "
+           "model's variable\n"
+           "kinds), 3 out of device memory.\n";
   };
 
   bool dump = false;
   bool dump_only = false;
+  bool list_policies = false;
   auto style = cuminlp::dag::PrintStyle::Infix;
+  std::optional<std::string> policy_name;
   std::optional<std::size_t> partition_num;
   std::optional<std::size_t> enumerate_cap;
   std::optional<std::size_t> sample_points;
   std::optional<std::size_t> max_cycle_size;
   std::vector<std::string> positional;
 
-  // Shared by --partition-num/--enumerate-cap. Rejects anything std::stoull
-  // wouldn't consume in full, so `--partition-num=8x` is an error rather
-  // than a silent 8. Range checking beyond "is a number" is FanOutSpec's job.
+  // Shared by --partition-num/--enumerate-cap/--sample-points/
+  // --max-cycle-size. Rejects anything std::stoull wouldn't consume in full,
+  // so `--partition-num=8x` is an error rather than a silent 8. Range
+  // checking beyond "is a number" is FanOutSpec's/ladder_rung_for's job.
   auto parse_count = [&](std::string const& value,
                          char const* flag) -> std::optional<std::size_t>
   {
@@ -453,6 +361,14 @@ auto main(int argc, char* argv[]) -> int
 
   for (int i = 1; i < argc; ++i) {
     std::string const arg = argv[i];
+    if (arg.rfind("--policy=", 0) == 0) {
+      policy_name = arg.substr(9);
+      continue;
+    }
+    if (arg == "--list-policies") {
+      list_policies = true;
+      continue;
+    }
     if (arg.rfind("--partition-num=", 0) == 0) {
       partition_num = parse_count(arg.substr(16), "--partition-num");
       if (!partition_num) return 2;
@@ -508,6 +424,22 @@ auto main(int argc, char* argv[]) -> int
     positional.push_back(arg);
   }
 
+  if (list_policies) {
+    print_roster(std::cout);
+    return 0;
+  }
+
+  // The positional shape argument (all-binary|discrete|mixed) is gone; a
+  // third positional is a specific, common mistake worth naming rather than
+  // a bare usage dump (design/POLICY_SELECTION.md).
+  if (positional.size() > 2) {
+    std::cerr << "'" << positional[2]
+              << "' is a third positional argument, which is no longer a "
+                 "shape name; use --policy=<name> instead (see "
+                 "--list-policies)\n";
+    return 2;
+  }
+
   // --dump-only needs no iteration count; it never reaches the driver.
   if (positional.size() < (dump_only ? 1u : 2u)) {
     usage(std::cerr);
@@ -541,72 +473,110 @@ auto main(int argc, char* argv[]) -> int
       if (dump_only) return 0;
     }
 
-    Shape shape = choose_shape(parsed.problem.var_kinds);
-    if (positional.size() > 2) {
-      auto override_shape = parse_shape(positional[2]);
-      if (!override_shape) {
-        std::cerr << "unknown shape '" << positional[2]
-                  << "'; expected all-binary|discrete|mixed\n";
+    cuminlp::ProblemProfile problem_profile =
+        cuminlp::profile_problem(parsed.problem);
+    problem_profile.objvar_kept = parsed.objvar_kept;
+
+    // Only free_device_bytes matters to select_policy/resolve; the fuller
+    // probe (multiprocessor_count too) happens again once the shape is final
+    // and solve() actually needs a SearchCalibration for the policy object.
+    cuminlp::SearchCalibration selection_calibration;
+    selection_calibration.free_device_bytes = free_device_bytes();
+
+    cuminlp::PolicyProfile policy {};
+    std::string source;
+    if (policy_name) {
+      auto found = cuminlp::lookup_policy(*policy_name);
+      if (!found) {
+        std::cerr << "unknown policy '" << *policy_name << "'; available "
+                     "policies:\n";
+        print_roster(std::cerr);
         return 2;
       }
-      shape = *override_shape;
-    }
-
-    // Unset fan-out and sampling flags fall back to the width this shape was
-    // tuned with. enumerate_cap defaults to partition_num, as its
-    // template-parameter ancestor did.
-    std::size_t const chosen_partition_num =
-        partition_num.value_or(default_partition_num(shape));
-    cuminlp::FanOutSpec const fan_out {
-        chosen_partition_num, enumerate_cap.value_or(chosen_partition_num)};
-
-    std::size_t const chosen_sample_points =
-        sample_points.value_or(default_sample_points(shape));
-
-    // --max-cycle-size is the one default that is *measured* rather than
-    // tabulated, because it is the one that decides whether the run fits in
-    // memory at all, and the table's answer for a discrete model did not.
-    ChosenCap cap {0, false};
-    if (max_cycle_size) {
-      cap = {*max_cycle_size, false};
+      policy = *found;
+      if (!cuminlp::is_applicable(policy, problem_profile)) {
+        std::cerr << "policy '" << *policy_name
+                  << "' is not applicable to this model: "
+                  << problem_profile.num_binary << " binary, "
+                  << problem_profile.num_integer << " integer, "
+                  << problem_profile.num_continuous << " continuous "
+                  << "variable(s)"
+                  << (problem_profile.objvar_kept
+                          ? " (one continuous is the kept objective variable)"
+                          : "")
+                  << "; pick a policy whose rules match these kinds, or omit "
+                     "--policy to select one automatically. See "
+                     "--list-policies.\n";
+        return 2;
+      }
+      source = "named";
     } else {
-      cap = resolve_max_cycle_size(parsed.problem,
-                                   fan_out,
-                                   chosen_sample_points,
-                                   free_device_bytes(),
-                                   shape);
+      policy = cuminlp::select_policy(problem_profile, selection_calibration);
+      source = "auto";
     }
-    std::size_t const chosen_max_cycle_size = cap.value;
+
+    cuminlp::ResolvedShape const resolved =
+        cuminlp::resolve(policy, problem_profile, selection_calibration);
+
+    bool const any_override =
+        partition_num || enumerate_cap || sample_points || max_cycle_size;
+    if (any_override) {
+      source = "overridden";
+    }
+
+    std::size_t const chosen_partition_num =
+        partition_num.value_or(resolved.partition_num);
+    // Given --partition-num without --enumerate-cap, enumerate_cap follows
+    // it (the old single-arg-FanOutSpec shorthand) rather than staying at
+    // whatever the policy resolved -- see warn_on_implied_enumerate_cap.
+    std::size_t const chosen_enumerate_cap = enumerate_cap
+        ? *enumerate_cap
+        : (partition_num ? chosen_partition_num : resolved.enumerate_cap);
+    std::size_t const chosen_sample_points =
+        sample_points.value_or(resolved.sample_points);
+    std::size_t const chosen_max_cycle_size =
+        max_cycle_size.value_or(resolved.max_cycle_size);
+
+    cuminlp::FanOutSpec const fan_out {chosen_partition_num,
+                                       chosen_enumerate_cap};
 
     // Resolved before the status line rather than inside it: an
     // out-of-ladder cap throws, and doing that mid-`<<` would leave a
     // half-written line in front of the error message.
     std::size_t const rung = cuminlp::ladder_rung_for(chosen_max_cycle_size);
 
-    // The rung is reported alongside the cap because they differ whenever
-    // the cap isn't itself a rung: a cap of 20 rounds up to 32, which costs
-    // registers but changes no result (padding slots have fan-out 1).
-    std::cout << "shape: " << shape_name(shape)
-              << ", partition_num: " << fan_out.partition_num()
-              << ", enumerate_cap: " << fan_out.enumerate_cap()
+    std::cout << "policy: " << policy.name << " (" << source
+              << "), partition_num: " << chosen_partition_num
+              << ", enumerate_cap: " << chosen_enumerate_cap
               << ", sample_points: " << chosen_sample_points
-              << ", max_cycle_size: " << chosen_max_cycle_size
-              << (cap.automatic ? " (auto, rung " : " (rung ") << rung
-              << ")\n";
+              << ", max_cycle_size: " << chosen_max_cycle_size << " (rung "
+              << rung << ")\n";
 
-    // The same four numbers again, tab-separated, for tools/minlp_status.py.
-    // Deliberately not the line above reformatted from a shared helper: this
-    // one is a data format with a reader on the other end, and the values it
-    // names are exactly the ones the flags of the same names set, so a
-    // recorded run can be replayed by pasting them back. The rung is left
-    // out for that reason -- it follows from max_cycle_size and there is no
-    // flag that sets it -- and so is "(auto)", which says where the number
-    // came from and not what it was.
-    std::cout << "PARAMS\tshape=" << shape_name(shape)
-              << "\tpartition_num=" << fan_out.partition_num()
-              << "\tenumerate_cap=" << fan_out.enumerate_cap()
+    // The machine-readable twin, for tools/minlp_status.py. `overrides=`
+    // only appears on the overridden path, and lists only the flags actually
+    // given -- see design/POLICY_SELECTION.md.
+    std::cout << "PARAMS\tpolicy=" << policy.name << "\tsource=" << source
+              << "\tpartition_num=" << chosen_partition_num
+              << "\tenumerate_cap=" << chosen_enumerate_cap
               << "\tsample_points=" << chosen_sample_points
-              << "\tmax_cycle_size=" << chosen_max_cycle_size << '\n';
+              << "\tmax_cycle_size=" << chosen_max_cycle_size;
+    if (any_override) {
+      std::cout << "\toverrides=";
+      bool first = true;
+      auto emit_override = [&](char const* name,
+                               std::optional<std::size_t> const& value)
+      {
+        if (!value) return;
+        if (!first) std::cout << ",";
+        std::cout << name << "=" << *value;
+        first = false;
+      };
+      emit_override("partition_num", partition_num);
+      emit_override("enumerate_cap", enumerate_cap);
+      emit_override("sample_points", sample_points);
+      emit_override("max_cycle_size", max_cycle_size);
+    }
+    std::cout << '\n';
 
     if (partition_num && !enumerate_cap) {
       warn_on_implied_enumerate_cap(parsed.problem, fan_out);
@@ -614,6 +584,7 @@ auto main(int argc, char* argv[]) -> int
 
     Solution const solution = solve(parsed.problem,
                                     std::stoi(positional[1]),
+                                    policy.kind,
                                     fan_out,
                                     chosen_sample_points,
                                     chosen_max_cycle_size);

@@ -1,21 +1,18 @@
 # Using `gams_solve`
 
-Solves a GAMS scalar-format model straight from its `.gms` file — no
-hand-written problem builder, no recompilation per instance.
+Solves a GAMS scalar-format model straight from its `.gms` file.
 
 ```sh
-gams_solve [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]
-           [--partition-num=N] [--enumerate-cap=N]
-           [--sample-points=N] [--max-cycle-size=N]
-           <model.gms> <iterations> [all-binary|discrete|mixed]
+gams_solve [--policy=<name>] [--list-policies]
+           [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]
+           <model.gms> <iterations>
 ```
 
 For building, see [BUILDING.md](BUILDING.md); the binary lands at
 `build/<preset>/gams_solve`. Sample models live in `test/data/gams/`.
 
-**Start with no flags.** The defaults are chosen to run on the device you
-actually have, so a bare invocation is a real attempt at the model rather than
-a first guess to be corrected:
+**Start with no flags.** The search shape is selected automatically from the
+model's variable kinds and this device's free memory.
 
 ```sh
 ./build/dev/gams_solve /path/to/minlplib/gms/nvs09.gms 1248
@@ -23,8 +20,8 @@ a first guess to be corrected:
 
 ```
 nvs09.gms: 10 variables, 0 constraints, 123 DAG nodes
-shape: discrete, partition_num: 7, enumerate_cap: 7, sample_points: 5,
-       max_cycle_size: 7 (auto, rung 8)
+policy: discrete (auto), partition_num: 7, enumerate_cap: 7, sample_points: 5,
+        max_cycle_size: 7 (rung 8)
 ...
 ------------ Finished ------------
 -43.1343 <= min <= -43.1343
@@ -33,8 +30,8 @@ limit was reached, but every remaining region is already dominated).
 RESULT	sense=min	primal=-43.134336918035324	dual=-43.134336918035324
 ```
 
-`-h` / `--help` prints the flag list with its defaults, to stdout, without
-needing a GPU or a model.
+`-h` / `--help` prints the flag list, to stdout, without needing a GPU or a
+model.
 
 ---
 
@@ -44,93 +41,152 @@ needing a GPU or a model.
 |---|---|
 | `<model.gms>` | GAMS scalar-format model to solve. |
 | `<iterations>` | Branch-and-bound iteration limit. Required unless `--dump-only`. |
-| `[shape]` | Optional. Pins which row of defaults to use; otherwise inferred from the model's variable kinds. |
 
-The shape argument selects **defaults only** — every value it sets is
-individually overridable by a flag below. Pin it for a benchmark run that
-must not depend on the inference heuristic guessing right.
-
-| Shape | Inferred when | Modelled on |
-|---|---|---|
-| `all-binary` | no continuous, no integer variables | `source/autocorr_bern20_03.cu` |
-| `discrete` | integers but no continuous variables | `source/nvs09.cu` |
-| `mixed` | any continuous variable | tuned for `ex8_6_2` |
-
-Inference looks at the *lowered* model, not the `.gms` source. A file whose
-variables are all binary but whose objective variable survived as a search
-dimension lowers to a continuous variable and infers `mixed` — `--dump-dag`
-shows which. That is the case the positional argument exists for.
+There is no positional shape argument any more — see `--policy` below. A
+third positional produces a specific error naming `--policy` instead of a
+bare usage dump, since it is the one mistake worth naming explicitly.
 
 ---
 
-## Search-shape flags
+## Policy selection
 
-These four were C++ template parameters until recently, so the usable search
-shapes were fixed at build time. They are now runtime configuration: one
-binary, tuned per instance.
+Four numbers decide the search shape: `partition_num` (bisection width),
+`enumerate_cap` (largest integer domain still enumerated exactly),
+`sample_points` (points sampled per subdomain, for the incumbent) and
+`max_cycle_size` (how many variables one iteration acts on). Rather than ask
+for all four, `gams_solve` picks a **policy** — a named bundle of rules for
+choosing them — and a **resolver** turns that policy into concrete numbers
+for this problem and this device.
 
-| Flag | Effect | Default |
-|---|---|---|
-| `--partition-num=N` | Bisection width: how many sub-intervals a continuous or bisected-integer slot splits into. Must be ≥ 2. | 2 / 7 / 10 per shape |
-| `--enumerate-cap=N` | Largest integer domain still enumerated exactly rather than bisected. | follows `--partition-num` |
-| `--sample-points=N` | Points sampled per subdomain, for the incumbent (upper bound). | 1 / 5 / 10 per shape |
-| `--max-cycle-size=N` | How many variables one iteration acts on. Must be ≤ 64. | **fitted to the device** |
+| Flag | Effect |
+|---|---|
+| `--policy=<name>` | Use this named policy instead of selecting one automatically. |
+| `--list-policies` | Print the policy roster (name, rules, evidence, provisional status) and exit 0. Needs no GPU and no model. |
 
-Three of the four defaults are the value the shape was originally tuned with.
-`--max-cycle-size` is not, and the difference is the point of the next
-section.
-
-### `--max-cycle-size` is measured, not tabulated
-
-Left unset, it is the widest cap whose graphs fit in this device's free
-memory, and the status line marks it `(auto)`:
-
-```
-max_cycle_size: 7 (auto, rung 8)
+```sh
+./build/dev/gams_solve --list-policies
 ```
 
-It used to be a per-shape constant, and that was the tool's worst behaviour.
-The `discrete` row held 10, inherited verbatim from a revision of
-`source/nvs09.cu` whose `CYCLE_SIZE` was 10 — a configuration needing 221 GiB
-that has never run on a consumer GPU. So the shape documented as *"modelled
-on `nvs09.cu`"* could not solve `nvs09`: a bare `gams_solve nvs09.gms 1248`
-failed out of memory, and every recovery was the user re-deriving, by hand and
-by trial, a number the tool already had everything it needed to compute.
+```
+  all-binary
+      partition=pin(2) enumerate=pin(2) sample_points=1 cycle=fit (fallback 20)
+      evidence: autocorr_bern20_03.cu
+  discrete
+      partition=fit enumerate=cover-domains(16) sample_points=5 cycle=fit (fallback 7)
+      evidence: nvs09.cu, RUNTIME_SHAPE.md
+  mixed-binary
+      partition=fit enumerate=follow-partition sample_points=5 cycle=fit (fallback 4)
+      evidence: no size split has been measured (provisional -- ...)
+  mixed-all-small
+      partition=fit enumerate=cover-domains(16) sample_points=10 cycle=fit (fallback 4)
+      evidence: ex8_6_2 (continuous-only)
+  mixed-all-large
+      partition=fit enumerate=cover-domains(16) sample_points=3 cycle=fit (fallback 4)
+      evidence: sample_points=3 is a guess, not a measurement (provisional -- ...)
+```
 
-Auto-fitting spends about two thirds of free device memory on the widest
-composition, leaving the rest as headroom for the narrower ones the search
-also reaches. Passing `--max-cycle-size=N` explicitly overrides it and
-restores the old behaviour, including the old failure mode: an explicit cap
-that does not fit is an error, not a request to pick something smaller.
+With no `--policy`, automatic selection looks at the *lowered* model's
+variable kinds and counts (not the `.gms` source) and picks the row that
+matches:
+
+| Policy | Selected when |
+|---|---|
+| `all-binary` | no continuous, no integer variables |
+| `discrete` | some integer variable, no continuous |
+| `mixed-binary` | some continuous, some binary, no integer |
+| `mixed-all-small` | some continuous, and the model has ≤ 64 live variables |
+| `mixed-all-large` | some continuous, and more than 64 live variables |
+
+A continuous-only NLP matches none of the discrete rules and falls through to
+`mixed-all-{small,large}`, which is correct rather than merely a default: the
+rules that would otherwise apply (an enumerate ceiling, a binary fan-out) are
+no-ops on variable kinds the problem doesn't have.
+
+The objective variable is not counted if it survived lowering only because
+neither elimination pass could solve for it (`--dump-dag` shows whether it
+did): such a variable occupies a slot in the search but is not a genuine
+degree of freedom, so letting it push an otherwise all-binary or discrete
+model into a mixed row would classify on an artefact of the lowering rather
+than the model's actual character.
+
+`mixed-binary`, `mixed-all-small` and `mixed-all-large` are marked
+provisional in `--list-policies`: their split points and constants are
+judgement calls awaiting measurement, not tuned rows like `all-binary` and
+`discrete` are. See [design/POLICY_SELECTION.md](design/POLICY_SELECTION.md)
+for the full rationale.
+
+**A named `--policy` is checked against the model, not just looked up.**
+`--policy=discrete` on a model with a continuous variable, or
+`--policy=all-binary` on anything with an integer or continuous variable, is
+rejected (exit 2) rather than silently run with a fan-out tuned for a
+different variable kind. The mixed-all size split is not part of this check
+— `--policy=mixed-all-small` on a 200-variable model is accepted, since
+comparing the two rows on the same instance is exactly what pinning one is
+for; only a policy whose rules assume a kind the problem lacks is rejected.
+
+### `partition_num` and `max_cycle_size` are fitted, not tabulated
+
+Given a policy (named or auto-selected), the resolver derives the actual
+numbers from the problem and the device, rather than looking them up. The
+variable count sets a **coverage target** — the point past which one
+iteration could in principle act on every live variable — and `partition_num`
+is fitted in two phases: first the widest cap reachable at all (fan-out 2,
+the cheapest possible), then how far `partition_num` can widen from there
+*without giving that cap back*. `enumerate_cap` comes from the problem's
+integers alone (the largest domain, capped at a policy-specific ceiling),
+independent of `partition_num` unless the policy explicitly couples them.
+
+This is the same problem `--max-cycle-size` used to solve alone: a shape
+tabulated from one hand-tuned driver could ask for more memory than exists.
+`discrete`'s tabulated `partition_num`/`max_cycle_size` were both 10 once,
+inherited verbatim from a revision of `source/nvs09.cu` — a configuration
+needing 221 GiB that has never run on a consumer GPU. Fitting both from
+device arithmetic re-derives the value that revision was eventually corrected
+to (7), with no table.
 
 Two consequences worth stating plainly:
 
 - **A run's shape is not reproducible from its command line alone.** It
-  depends on how much memory was free. The status line records what was
-  actually used; a benchmark that must be reproducible should pass
-  `--max-cycle-size` explicitly, exactly as it pins `[shape]`.
-- **A busier GPU gets a narrower search**, silently but visibly — the `(auto)`
-  number moves.
+  depends on how much memory was free. What *is* reproducible is the
+  **policy name** (paired with the commit, since the roster lives in
+  `include/`) — that's what `tools/minlp_status.py` records, and what a
+  benchmark that must be reproducible should pin with `--policy=<name>`.
+- **A busier GPU gets a narrower search**, silently but visibly — the
+  resolved numbers on the status line move.
 
-### `--partition-num` vs `--enumerate-cap`
+### Experimental overrides
 
-They are independent on purpose. `--enumerate-cap` decides *when* an integer
-variable is small enough to enumerate outright; `--partition-num` decides how
-wide a bisection is when it isn't. Raising the enumerate threshold therefore
-does not force wider bisection everywhere else.
+`--partition-num`, `--enumerate-cap`, `--sample-points` and `--max-cycle-size`
+still exist, but only as **research instrumentation**, applied on top of the
+resolved shape rather than as the primary configuration surface:
 
-Left unset, `enumerate-cap` tracks `partition-num`, and **that is the sharpest
-edge on this tool**. Lowering `--partition-num` to shrink memory also lowers
-`enumerate-cap`, and any integer whose domain no longer fits under it stops
-being enumerated and starts being bisected. Bisected integers are never
-fathomed exactly, which changes what the search does, not merely how fast it
-does it. On `nvs09`'s ten `[3, 9]` integers, `--partition-num=2` drops the cap
-to 2 and flips all ten. The tool now says so, whenever `--partition-num` is
-given without `--enumerate-cap` and some integer no longer fits:
+| Flag | Effect |
+|---|---|
+| `--partition-num=N` | Overrides the resolved `partition_num`. Must be ≥ 2. |
+| `--enumerate-cap=N` | Overrides the resolved `enumerate_cap`. Must be ≥ 1. Given `--partition-num` without this, `enumerate_cap` follows it instead of staying at what the policy resolved — see the note below. |
+| `--sample-points=N` | Overrides the resolved `sample_points`. |
+| `--max-cycle-size=N` | Overrides the resolved `max_cycle_size`. Must be ≤ 64. |
+
+A run using any of these reports `source=overridden` (instead of `auto` or
+`named`) on the status line and in `PARAMS`. They exist so the roster's value
+can be A/B-tested against a pinned shape; without them the resolver's
+contribution couldn't be measured. They are not where to reach for day-to-day
+tuning — `--policy=<name>` is.
+
+### `--partition-num` vs `--enumerate-cap`, overridden
+
+They are independent by construction now: the resolver's `enumerate_cap`
+comes from the problem's integers, not from `partition_num`. That coupling
+only comes back if you override `--partition-num` without also overriding
+`--enumerate-cap` — the same single-flag shorthand the old template
+parameters had, reapplied on top of the resolved shape. On `nvs09`'s ten
+`[3, 9]` integers, `--partition-num=2` (alone) drops `enumerate_cap` to 2 and
+flips all ten from enumerating to bisecting. The tool says so whenever this
+happens:
 
 ```
-shape: discrete, partition_num: 2, enumerate_cap: 2, sample_points: 5,
-       max_cycle_size: 10 (auto, rung 16)
+policy: discrete (overridden), partition_num: 2, enumerate_cap: 2,
+        sample_points: 5, max_cycle_size: 10 (rung 16)
   note: --partition-num also set enumerate_cap to 2, so 10 integer
         variable(s) -- the widest of domain 7 -- bisect
         instead of enumerating, and are never fathomed exactly.
@@ -143,7 +199,7 @@ cheaper per slot, so the auto-fitted cap usually widens to compensate — on
 the cap to 6 and stops it converging. Which way to turn the knob is a
 judgement about the model, not something the tool can settle.
 
-### `--max-cycle-size` and the capacity ladder
+### `max_cycle_size` and the capacity ladder
 
 The per-thread slot context is register-resident, so its array bound has to
 be a compile-time constant. Rather than baking one in, a small ladder of
@@ -189,15 +245,15 @@ bound of exactly ±1e6 that never moves.
 
 | Code | Meaning |
 |---|---|
-| `0` | Solved, hit the iteration limit, or printed help. |
+| `0` | Solved, hit the iteration limit, printed help, or `--list-policies`. |
 | `1` | Parse error in the `.gms` file. |
-| `2` | Bad flag value, or a configuration the solver rejects (e.g. `--partition-num=1`, `--max-cycle-size` past the widest rung). |
-| `3` | Out of device memory. The run was well-formed; a larger GPU or smaller parameters may succeed. |
+| `2` | Bad flag value; an unknown `--policy` name (with the roster listed); a `--policy` that doesn't apply to this model's variable kinds (e.g. `--policy=discrete` on a model with a continuous variable); or a configuration the solver rejects (e.g. an overridden `--partition-num=1`, `--max-cycle-size` past the widest rung). |
+| `3` | Out of device memory. The run was well-formed; a larger GPU, or a smaller experimental override, may succeed. |
 
 `2` and `3` are deliberately distinct: `2` means you asked for something
-meaningless, `3` means you asked for something merely too big. With
-`--max-cycle-size` left to auto-fit, `3` should only appear when you overrode
-it.
+meaningless, `3` means you asked for something merely too big. With no
+overrides, `3` should only appear when even `all-binary`'s fallback shape
+can't fit, which needs a very small GPU indeed.
 
 ---
 
@@ -282,9 +338,9 @@ fit, and on this device it selects cap 7 — the same value
 
 ```
 test/data/gams/ex2_1_1.gms: 5 variables, 1 constraints, 55 DAG nodes
-shape: mixed, partition_num: 10, enumerate_cap: 10, sample_points: 10,
-       max_cycle_size: 5 (auto, rung 8)
-PARAMS	shape=mixed	partition_num=10	enumerate_cap=10	sample_points=10	max_cycle_size=5
+policy: mixed-all-small (auto), partition_num: 10, enumerate_cap: 10,
+        sample_points: 10, max_cycle_size: 5 (rung 8)
+PARAMS	policy=mixed-all-small	source=auto	partition_num=10	enumerate_cap=10	sample_points=10	max_cycle_size=5
 ...
 ------------ Finished ------------
 -29.45 <= min <= -15.9619
@@ -301,12 +357,13 @@ RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
   real sampled point; `GLB` is a sound bound over everything not yet
   discarded.
 - The tab-separated `PARAMS` line is the status line above it in machine form,
-  and the two always agree. It reports the **resolved** shape — after the
-  per-shape defaults, after auto-fitting `--max-cycle-size` — using the same
-  names as the flags that set each value, so pasting them back reproduces the
-  run on a machine whose free memory would have auto-fitted differently.
-  `tools/minlp_status.py` records it beside the bound for exactly that reason.
-  The rung is not on it: it follows from `max_cycle_size` and no flag sets it.
+  and the two always agree. `policy=` and `source=auto|named|overridden` say
+  *which* policy and how it was chosen; the four numbers are what the
+  resolver produced for this run specifically (after any experimental
+  override), not a reproduction key on their own — see
+  [Policy selection](#policy-selection). `tools/minlp_status.py` records the
+  policy cell (plus any overrides) beside the bound. The rung is not on the
+  `PARAMS` line: it follows from `max_cycle_size` and no flag sets it.
 - **`Proven optimal`** appears when no pending region can beat the incumbent,
   and the bracket then collapses to a point. This is reported on three
   distinct endings: the frontier emptied, the search dequeued a region already
@@ -352,8 +409,12 @@ The interval bounds pruned the space without random sampling ever landing on
 a feasible point. This is expected for **equality-constrained** models — a
 uniformly sampled point essentially never satisfies an equality exactly. The
 bounds printed are still sound; there is just no witness. Raising
-`--sample-points` does not generally fix this (and costs memory linearly, so
-it narrows the auto-fitted `--max-cycle-size`).
+`--sample-points` does not generally fix this. Note that overriding it alone
+does not also re-fit `--max-cycle-size` -- overrides apply *after* the
+resolver has already fitted the shape to the policy's own `sample_points`, so
+a wider `--sample-points` here risks exceeding the device budget the fitted
+`max_cycle_size` was sized against; override `--max-cycle-size` alongside it
+if you raise this.
 
 ---
 
@@ -366,7 +427,7 @@ parse it at all and the best bounds any run has ever found on it.
 | Column | Where it comes from |
 |---|---|
 | `Parses`, `Sense`, `Vars`, `Cons`, `Nodes`, `Notes` | re-measured from the corpus on every `refresh` |
-| `Best primal`, `Best dual`, `Primal @`, `Dual @`, `Primal iters`, `Dual iters`, `Primal params`, `Dual params` | accumulated from `gams_solve` runs, one `record` at a time |
+| `Best primal`, `Best dual`, `Primal @`, `Dual @`, `Primal iters`, `Dual iters`, `Primal policy`, `Dual policy` | accumulated from `gams_solve` runs, one `record` at a time |
 | `Ref primal`, `Ref dual` | downloaded from MINLPLib by `reference` |
 
 The split is the whole design. Parse status is cheap, deterministic and true
@@ -484,28 +545,32 @@ are the improvements — which is why the table carries a `Sense` column at all.
 If the log's sense disagrees with the row's, `record` refuses rather than
 attaching real numbers to the wrong instance.
 
-Each bound gets its own `@`, `iters` and `params` column, because the two
+Each bound gets its own `@`, `iters` and `policy` column, because the two
 rarely improve in the same run and each is a claim about *that* run. Together
-they are the whole recipe: the commit says what code ran, `params` says what
-shape it ran with, and `iters` doubles as the iteration limit to re-run under —
-a run that converged at iteration N still converges at N under a limit of N.
+they are the whole recipe: the commit says what code ran, `policy` says which
+policy it ran under, and `iters` doubles as the iteration limit to re-run
+under — a run that converged at iteration N still converges at N under a
+limit of N.
 
 ```sh
 # reproduce the recorded alkylation primal, exactly
-./build/dev/gams_solve <corpus>/alkylation.gms 40 \
-    --partition-num=10 --enumerate-cap=10 --sample-points=10 --max-cycle-size=5
+./build/dev/gams_solve <corpus>/alkylation.gms 40 --policy=mixed-all-small
 ```
 
-Pasting `params` back matters most for `--max-cycle-size`, which auto-fits to
-free device memory and so differs between machines, between GPUs, and between
-two runs on the same GPU with something else resident. Recording the resolved
-value is what makes the row reproducible without having to remember to pin the
-flag by hand beforehand.
+The policy name, not the four resolved numbers, is what makes the row
+reproducible. `partition_num` and `max_cycle_size` are fitted to whatever the
+GPU had free at the time, so pasting *them* back onto a different machine
+reproduces a shape but not the decision — the policy name paired with the
+commit column (the roster lives in `include/`, so a rule change is a
+differing hash) reproduces the decision exactly, which is the record worth
+keeping. An overridden run's cell carries the overrides too, e.g.
+`--policy=discrete --partition-num=7`, and pasting that back pins the
+override the same way.
 
 A `-dirty` suffix on the commit means a **build input** was uncommitted, so the
 number is **not** reproducible from that hash alone — treat it as provisional
-until re-measured on a clean tree. An empty `params` cell means the bound was
-recorded before the column existed, not that the run used no flags.
+until re-measured on a clean tree. An empty `policy` cell means the bound was
+recorded before the column existed, not that the run used no policy.
 
 The suffix answers to the build, not to `git status`. A bound recorded while a
 design note, a log or MINLP_STATUS.md itself was uncommitted *is* reproducible
@@ -548,7 +613,7 @@ skips it, since that names a revision this tree's dirt says nothing about.
 
 "Keeps whichever is better" is the right default and the wrong one when the
 old number has stopped meaning the same thing — a commit that changed what the
-search does, or a row recorded against a shape you have since found to be
+search does, or a row recorded against a policy you have since found to be
 wrong. Two flags overrule it:
 
 | Flag | Effect |
@@ -564,7 +629,7 @@ tools/minlp_status.py record nvs09 --log run.log --replace
 The difference only shows when a run reports one bound and not the other:
 `--force` leaves the missing one alone, `--replace` clears it, because a bound
 carried over from a superseded commit is precisely the one that would be
-trusted by mistake. Both also stamp the commit, count and params of the run
+trusted by mistake. Both also stamp the commit, count and policy of the run
 that overruled, so the row keeps describing one run rather than a merge of
 several. `--commit` overrides the recorded hash if you are re-recording a run
 made at some other revision.
@@ -585,9 +650,13 @@ they have not says the gap you are looking at may be theirs as much as yours.
 `Notes` carries the rejection reason on a `no` row. On a `yes` row it carries
 caveats that do not stop a solve but should temper trust in its bounds:
 `objvar-kept` (the objective variable survived as a search dimension tied by
-an equality), `default-bound` (some free variable got the artificial ±1e6 box),
-and `default-bound-integer` (the same, on an integer variable, where a 2e6-wide
-box is a search-quality cliff rather than merely a cost).
+an equality — expect a dual bound pinned at the objective variable's own lower
+bound, since the objective is then that bare variable), `objvar-ineq` (it was
+eliminated through an inequality, which is exact at the optimum rather than
+pointwise, and may have dropped a bound stated on it), `default-bound` (some
+free variable got the artificial ±1e6 box), and `default-bound-integer` (the
+same, on an integer variable, where a 2e6-wide box is a search-quality cliff
+rather than merely a cost).
 
 ---
 
@@ -600,5 +669,8 @@ box is a search-quality cliff rather than merely a cost).
 - [design/RUNTIME_SHAPE.md](design/RUNTIME_SHAPE.md) — why these parameters
   are runtime configuration, what constrains the capacity ladder, and the
   replay-soundness contract a custom composition policy must honour.
+- [design/POLICY_SELECTION.md](design/POLICY_SELECTION.md) — the policy
+  roster, the resolver that fits partition_num/max_cycle_size to the device,
+  and the classification rule behind automatic selection.
 - [design/GAMS_FRONTEND.md](design/GAMS_FRONTEND.md) — the subset of GAMS
   the parser accepts.

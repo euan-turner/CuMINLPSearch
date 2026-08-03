@@ -1,4 +1,4 @@
-// GPU tests for GraphReplay (graph_replay.cuh) -- TEST_EXTENSION.md §5.
+// GPU tests for GraphReplay (graph_replay.cuh) -- see TEST_EXTENSION.md.
 // Requires an actual CUDA device.
 #include <algorithm>
 #include <cmath>

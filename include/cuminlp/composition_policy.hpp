@@ -26,10 +26,10 @@ namespace cuminlp
 // to assign (every variable already resolved, or fewer live variables than
 // CycleSize): it always has fan-out 1 and counts as enumerable, so a box
 // whose live variables all enumerate can still be fathomed even when they
-// don't fill every slot (TEST_EXTENSION.md §4b).
+// don't fill every slot (TEST_EXTENSION.md).
 // Underlying type pinned to uint8_t: SlotKind is stored per-slot in the
 // device-side SlotContext register array, where the default int would cost
-// 4 bytes per slot for five enumerators (see design/RUNTIME_SHAPE.md §4.1).
+// 4 bytes per slot for five enumerators (see design/RUNTIME_SHAPE.md).
 enum class SlotKind : std::uint8_t
 {
   Continuous,
@@ -53,7 +53,7 @@ inline const char* slot_kind_name(SlotKind kind)
 
 // What each slot does this iteration, over a compile-time *capacity* with a
 // runtime *count*. `Capacity` is the fixed array bound the device-side
-// SlotContext is sized by (see design/RUNTIME_SHAPE.md §4); `count` is how
+// SlotContext is sized by (see design/RUNTIME_SHAPE.md); `count` is how
 // many of those slots a given node actually fills.
 //
 // Slots at or past `count` are always Padding, so `count` is derivable from
@@ -216,7 +216,7 @@ constexpr bool is_fully_enumerable(const Composition<Capacity>& composition)
 
 // A node may be fathomed without enqueueing children iff every live variable
 // fits in the slots this iteration actually filled and the resulting
-// Composition is fully enumerable (TEST_EXTENSION.md §4b). Pure function of a
+// Composition is fully enumerable (TEST_EXTENSION.md). Pure function of a
 // box's live-variable count and the Composition the policy chose for it, so
 // it's testable independent of the surrounding search loop (see
 // graph_driver.cuh).
@@ -246,7 +246,7 @@ constexpr bool can_fathom_without_children(
 // radix vector, and the search would compute silently wrong boxes: no crash,
 // no exception, a plausible-looking wrong optimum. Freezing at solve() entry
 // lets the policy adapt to the hardware while staying a pure function of
-// (box, var_kinds, calibration). See design/RUNTIME_SHAPE.md §5.
+// (box, var_kinds, calibration). See design/RUNTIME_SHAPE.md.
 struct SearchCalibration
 {
   // Upper bound on slots the policy may fill. Independent of, and never
@@ -336,7 +336,7 @@ public:
     assert(box.size() == var_kinds.size());
     if (var_kinds.empty()) {
       // Nothing to assign var_ids[s] = 0 to -- 0 isn't a valid variable
-      // index on a zero-variable problem (TEST_EXTENSION.md §3, the
+      // index on a zero-variable problem (TEST_EXTENSION.md, the
       // "every var_id < var_kinds.size()" invariant).
       throw ShapeMismatch(
           "CompositionPolicy::choose called with an empty var_kinds span; "
@@ -447,14 +447,14 @@ public:
 
   // Number of integers in [ceil(b.lb), floor(b.ub)]. b need not itself be
   // lattice-aligned -- reachable directly from an IntegerBisect child, whose
-  // boundaries reuse the continuous linear-width formula (TEST_EXTENSION.md
-  // §3b) -- so ceil/floor do the snapping here rather than assuming the
+  // boundaries reuse the continuous linear-width formula (TEST_EXTENSION.md)
+  // -- so ceil/floor do the snapping here rather than assuming the
   // caller already aligned them. Returns 0, rather than underflowing (UB, in
   // fact: casting a negative double to size_t) a huge size_t, when the
   // sub-box contains no integer at all (ceil(b.lb) > floor(b.ub)): this
   // can't be enumerated or bisected further and is deterministically empty.
   // Public (rather than an implementation-detail private helper) because
-  // it's the exact locus TEST_EXTENSION.md §3b calls out by name.
+  // it's the exact locus TEST_EXTENSION.md calls out by name.
   static std::size_t integer_domain_size(const cu::interval<T>& b)
   {
     T const lo = std::ceil(b.lb);

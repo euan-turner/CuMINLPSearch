@@ -174,7 +174,7 @@ public:
 
   // Unary ops applied directly to a Const operand constant-fold transparently
   // rather than emitting a degenerate op node over a Const (see
-  // TEST_EXTENSION.md §1b): callers don't need to special-case
+  // TEST_EXTENSION.md): callers don't need to special-case
   // sqrt(p.fixed(2.0)) etc, and validate() never has to reject them.
   friend Expr sqr(Expr a) { return a * a; }
 
@@ -278,7 +278,7 @@ struct Problem
 
   // Every Expr handed out by var()/fixed()/etc points at &this->graph. A
   // copy would leave those Exprs aliasing the original's graph while the
-  // copy holds an independent one (TEST_EXTENSION.md §1a), so Problem is
+  // copy holds an independent one (TEST_EXTENSION.md), so Problem is
   // move-only: copying is a caller mistake worth a compile error rather
   // than silent aliasing.
   Problem(const Problem&) = delete;
@@ -336,14 +336,14 @@ struct Problem
    * must be reachable without a CUDA device, so the DAG/Problem test targets
    * don't need a GPU and so callers get a typed error at construction rather
    * than an untyped throw from deep inside GraphBuilder. See
-   * TEST_EXTENSION.md §1-2 for the invariants this covers. Note: an unbounded
+   * TEST_EXTENSION.md for the invariants this covers. Note: an unbounded
    * (or one-sided-bounded) variable is deliberately not rejected here yet --
    * some real problems genuinely don't have both bounds, and the defined
    * partitioning behavior for that case is still an open decision.
    */
   void validate() const
   {
-    // §1: graph.nodes bookkeeping -- defense in depth, always true by
+    // graph.nodes bookkeeping -- defense in depth, always true by
     // construction via emit()/var(), but cheap to check and this is the one
     // place callers can rely on it having been checked.
     for (const DAGNode<T>& node : graph.nodes) {
@@ -378,7 +378,7 @@ struct Problem
           "nodes");
     }
 
-    // §1b: a Const can never be an objective/constraint root -- unlike a
+    // A Const can never be an objective/constraint root -- unlike a
     // unary op applied to a Const, this isn't foldable into a well-defined
     // value (there's no expression left to evaluate).
     if (objective_root < graph.nodes.size()
@@ -396,7 +396,7 @@ struct Problem
       }
     }
 
-    // §2: Problem-level checks, independent of graph well-formedness.
+    // Problem-level checks, independent of graph well-formedness.
     if (var_kinds.empty()) {
       throw InvalidProblem("Problem has zero variables");
     }

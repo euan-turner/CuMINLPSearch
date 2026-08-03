@@ -1278,8 +1278,8 @@ private:
 
         // Any other constant exponent: lower to exp(c * log(x)), exactly
         // GAMS's own definition of `**` (see the domain note above this
-        // function/§4.4.1 of design/GAMS_FRONTEND.md) rather than a widening
-        // -- it needs x > 0, same as a literal reading of `**` already does.
+        // function) rather than a widening -- it needs x > 0, same as a
+        // literal reading of `**` already does.
         std::size_t log_base = unary(dag::Op::Log);
         std::size_t scaled =
             emit_binary(dag::Op::Mul, log_base, emit_const(*exponent));
@@ -1341,6 +1341,7 @@ auto parse(std::string_view source, ParseOptions const& options) -> ParsedModel<
   }
 
   auto elimination = eliminate_objective(m, out.warnings);
+  out.objvar_kept = !elimination.expr.has_value();
   if (elimination.expr) {
     m.symbols[static_cast<std::size_t>(m.objvar)].eliminated = true;
   } else {

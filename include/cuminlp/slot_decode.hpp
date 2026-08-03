@@ -8,12 +8,12 @@
 #include "cuminlp/composition_policy.hpp"
 
 // __host__ __device__ only mean anything to nvcc; on a plain host compiler
-// (e.g. building the §1-4 host-only test targets without CUDA) they'd be
+// (e.g. building the host-only test targets without CUDA) they'd be
 // undefined identifiers, so they're no-ops outside __CUDACC__. This lets the
 // exact same function be called from partition.cuh's __device__ kernels and
 // from search.hpp's host-only CompositionInterval::materialise, which is
 // what makes host/device agreement structural rather than something to prove
-// by test (TEST_EXTENSION.md §4a).
+// by test (see TEST_EXTENSION.md).
 #if defined(__CUDACC__)
 #  define CUMINLP_HD __host__ __device__
 #else
@@ -32,7 +32,7 @@ namespace cuminlp::decode
 // ceil(parent.lb) before offsetting by `part`, rather than assuming
 // parent.lb is already integer-valued: the normal case after an
 // IntegerBisect is that it isn't, since IntegerBisect reuses the continuous
-// linear-width formula (TEST_EXTENSION.md §3b). A Binary variable's bounds
+// linear-width formula (see TEST_EXTENSION.md). A Binary variable's bounds
 // are always exactly integer already, so ceil is a no-op there. `value`
 // exceeding `parent.ub` (fan_out wider than the true remaining domain, or a
 // domain with no integer point at all) clamps to parent.ub -- sound

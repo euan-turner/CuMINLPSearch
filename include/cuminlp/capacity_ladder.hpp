@@ -14,7 +14,7 @@ namespace cuminlp
 //
 // Capacity is the one search-shape parameter that genuinely has to reach
 // device codegen: it is the array bound of partition::SlotContext, which is
-// per-thread and register-resident (see design/RUNTIME_SHAPE.md §4). So
+// per-thread and register-resident (see design/RUNTIME_SHAPE.md). So
 // instead of one value fixed at build time, a small ladder is compiled and
 // the nearest rung selected at runtime.
 //

@@ -98,7 +98,7 @@ __device__ void get_bounds(const CycleContext<CycleSize>& ctx,
  *
  * `Capacity` is a compile-time bound; `count` is how many slots are actually
  * live, so one instantiated capacity serves every narrower assignment (see
- * design/RUNTIME_SHAPE.md §4). Only `count` entries of each array are ever
+ * design/RUNTIME_SHAPE.md). Only `count` entries of each array are ever
  * read.
  *
  * Field widths are chosen for the register file, not for convenience: this
@@ -199,7 +199,7 @@ __device__ void get_slot_bounds(const SlotContext<Capacity>& ctx,
     // Delegates to the same decode CompositionInterval::materialise uses
     // host-side (search.hpp), so host/device agreement is structural rather
     // than two hand-written implementations that happen to match (see
-    // TEST_EXTENSION.md §4a and slot_decode.hpp).
+    // TEST_EXTENSION.md and slot_decode.hpp).
     cuminlp::decode::slot_bounds<T>(ctx.kind[j],
                                     interval[dim],
                                     static_cast<std::size_t>(ctx.part[j]),

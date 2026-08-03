@@ -77,6 +77,31 @@ target_compile_features(cuminlp_decode_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_decode_test)
 
+# Host-only: policy_catalogue.hpp (PolicyProfile/ProblemProfile/resolve/
+# select_policy) is plain templated C++ over Problem<T>/FanOutSpec, with no
+# CUDA type among them -- see that header's top comment and
+# design/POLICY_SELECTION.md §3. Links cuminlp::gams (not just cuminlp::lib)
+# to parse the autocorr_bern20-03.gms/ex8_6_2.gms fixtures its evidence tests
+# use, and includes source/ for nvs09_problem.hpp, the hand-built Problem
+# shared with source/nvs09.cu -- used instead of a .gms fixture so the nvs09
+# tests need no GPU and no .gms file either.
+add_executable(cuminlp_policy_catalogue_test source/policy_catalogue_test.cpp)
+target_link_libraries(
+    cuminlp_policy_catalogue_test
+    PRIVATE cuminlp::gams
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_policy_catalogue_test PRIVATE cxx_std_20)
+target_compile_definitions(
+    cuminlp_policy_catalogue_test
+    PRIVATE "CUMINLP_GAMS_TEST_DATA=\"${CMAKE_CURRENT_SOURCE_DIR}/data/gams\""
+)
+target_include_directories(
+    cuminlp_policy_catalogue_test PRIVATE "${PROJECT_SOURCE_DIR}/source"
+)
+
+catch_discover_tests(cuminlp_policy_catalogue_test)
+
 # Checks rosenbrock_kernel/interval_rosenbrock_kernel against independent CPU
 # reference implementations (see rosenbrock_test.cu). Requires an actual CUDA
 # device. -frounding-math is needed for the CpuRounding oracle helpers (see

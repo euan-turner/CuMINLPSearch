@@ -93,6 +93,15 @@ struct ParsedModel {
   /// gave no levels.
   std::vector<T> initial_point;
 
+  /// True iff the objective variable survived lowering as a real continuous
+  /// search dimension -- neither the `=E=` definition pass nor the
+  /// inequality-rewrite pass (frontend.cpp's eliminate_objective) could
+  /// solve for it. Such a variable occupies a composition slot but is not a
+  /// degree of freedom, which is why policy selection discounts it rather
+  /// than treating it as evidence the problem needs a continuous search
+  /// dimension.
+  bool objvar_kept = false;
+
   std::vector<Diagnostic> warnings;
 };
 

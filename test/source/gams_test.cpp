@@ -115,7 +115,7 @@ TEST_CASE("x**c lowers to exp(c*log(x)) for a non-0.5, non-integer c",
           "[gams][expr]")
 {
   // This is GAMS's own definition of `**`, not a widening or approximation
-  // (see design/GAMS_FRONTEND.md §4.4.1): it needs x > 0, exactly as a
+  // (see design/GAMS_FRONTEND.md): it needs x > 0, exactly as a
   // literal reading of `**` would. nvs09 (https://www.minlplib.org/nvs09.html)
   // is the MINLPLib instance that motivated this -- its objective has a
   // `product**0.2` term, hand-built in nvs09_problem.hpp as

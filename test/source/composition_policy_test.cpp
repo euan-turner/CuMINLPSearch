@@ -134,7 +134,7 @@ TEST_CASE(
   CHECK(assignment.var_ids[0] == 0);
   CHECK(assignment.var_ids[1] == 0);
   // Padding, not Continuous: a resolved box's Composition must stay fully
-  // enumerable so it can still be fathomed (TEST_EXTENSION.md §4b).
+  // enumerable so it can still be fathomed (TEST_EXTENSION.md).
   CHECK(assignment.composition[0] == SlotKind::Padding);
   CHECK(assignment.composition[1] == SlotKind::Padding);
   CHECK(cuminlp::slot_fan_out(SlotKind::Padding, FanOutSpec {4}) == 1);
@@ -168,7 +168,7 @@ TEST_CASE(
   // A zero-variable box has no valid var_id to pad slots with (0 isn't < 0);
   // Problem::validate() now rejects zero-variable Problems too, but the
   // policy's own contract should reject this directly rather than silently
-  // writing an out-of-range var_id (TEST_EXTENSION.md §3).
+  // writing an out-of-range var_id (TEST_EXTENSION.md).
   std::vector<cu::interval<double>> box;
   std::vector<VarKind> kinds;
 
@@ -210,7 +210,7 @@ TEST_CASE(
   CHECK(assignment.composition[0] == SlotKind::IntegerEnumerate);
 }
 
-// TEST_EXTENSION.md §4b: the fathoming predicate, tested directly and
+// TEST_EXTENSION.md: the fathoming predicate, tested directly and
 // independent of the surrounding search loop (see graph_driver.cuh).
 TEST_CASE("can_fathom_without_children at live_count == slot count",
           "[composition_policy][4b]")
@@ -266,7 +266,7 @@ TEST_CASE("can_fathom_without_children at live_count == 0 (fully resolved box)",
           "[composition_policy][4b]")
 {
   // A fully-resolved box must be fathomed, never partitioned -- otherwise it
-  // re-enqueues copies of itself indefinitely (TEST_EXTENSION.md §4b).
+  // re-enqueues copies of itself indefinitely (TEST_EXTENSION.md).
   std::vector<cu::interval<double>> box = {{3.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous};
 
@@ -294,7 +294,7 @@ TEST_CASE(
   // patterns get capped away by var-kind counts. With CycleSize == 1 the
   // one slot is either BinaryEnumerate, IntegerEnumerate, IntegerBisect,
   // real Continuous, or unused Padding -- 5 possibilities, not 4: Padding is
-  // distinct from a genuine Continuous slot (TEST_EXTENSION.md §4b), even
+  // distinct from a genuine Continuous slot (TEST_EXTENSION.md), even
   // though both were the same SlotKind::Continuous before that fix.
   std::vector<VarKind> kinds = {
       VarKind::Continuous, VarKind::Binary, VarKind::Integer};

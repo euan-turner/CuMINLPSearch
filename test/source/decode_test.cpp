@@ -2,7 +2,7 @@
 // search::CompositionInterval::materialise (search.hpp). Both are pure
 // functions of a box/composition/index, with no CUDA dependency despite
 // slot_bounds also being the exact function partition.cuh's __device__
-// get_slot_bounds calls -- see TEST_EXTENSION.md §4a: host/device agreement
+// get_slot_bounds calls -- see TEST_EXTENSION.md: host/device agreement
 // is structural (one shared function), not something proven by a separate
 // device-side test.
 #include <memory>
@@ -38,7 +38,7 @@ bool feq(double a, double b)
 }
 }  // namespace
 
-// §3a: the union of a node's children must contain the parent box -- no
+// The union of a node's children must contain the parent box -- no
 // gaps at the seams or the outer edges. Checked directionally (containment),
 // not exact tiling, since lb + width*fan_out != ub in general floating point.
 TEST_CASE(
@@ -94,7 +94,7 @@ TEST_CASE("fan_out == 1 reproduces the parent interval exactly", "[decode][3a]")
   CHECK(feq(child.ub, parent.ub));
 }
 
-// §3b: IntegerEnumerate/BinaryEnumerate snap to the integer lattice even
+// IntegerEnumerate/BinaryEnumerate snap to the integer lattice even
 // when the parent box isn't already aligned (the normal case after an
 // IntegerBisect).
 TEST_CASE(
@@ -161,7 +161,7 @@ TEST_CASE("Padding leaves the dimension unchanged", "[decode]")
   CHECK(feq(child.ub, parent.ub));
 }
 
-// §4a: materialise() at pidx == 0 uses the Problem's actual root box, not an
+// materialise() at pidx == 0 uses the Problem's actual root box, not an
 // unbounded-domain fallback disconnected from the real problem.
 TEST_CASE(
     "CompositionInterval::materialise at pidx == 0 returns the given root box",
