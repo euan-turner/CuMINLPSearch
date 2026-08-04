@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <string>
@@ -26,6 +27,17 @@ namespace cuminlp::search
 // dimension whenever a multi-dimensional box is required, store them as a
 // vector.
 
+// A history entry is only ever read back as the direct parent of a dequeued
+// node (CompositionInterval::materialise's `history.intervals[pidx]` lookup),
+// so an entry with no pending children is garbage the moment its last child
+// leaves the queue. Refcounting says exactly when that is: an entry's count is
+// the construction reference enqueue() hands back, plus one per pending node
+// naming it as pidx. See design/BOUNDED_FRONTIER.md §6.
+//
+// The counting is opt-in. A caller that never calls release() (
+// FixedRosenbrockDriver, source/fixed_rosenbrock_driver.cu) never drops a
+// count to zero, so nothing is ever freed and nothing is ever reused -- which
+// is today's behaviour exactly, indices included.
 template<typename T>
 struct IntervalHistory
 {
@@ -33,18 +45,102 @@ struct IntervalHistory
 
   explicit IntervalHistory(std::size_t initial_size = 0)
       : intervals(initial_size)
+      , refs_(initial_size, 0)
+      , live_bytes_(initial_size * entry_bytes(0))
   {
   }
 
-  // Appends an interval to the history, returning its index so it can be
-  // used as the pidx of CompressedInterval/CompositionInterval entries
-  // derived from it.
+  // Appends an interval to the history, returning the slot holding it with one
+  // reference -- the "construction reference" -- held by the caller. The slot
+  // index is what CompressedInterval/CompositionInterval entries derived from
+  // this box carry as their pidx.
+  //
+  // A slot freed by release() is reused here rather than growing the vector,
+  // so an index is only unique among *live* entries: pidx is no longer a
+  // monotone recency stamp, which costs operator<'s third tie-break (see
+  // there) and nothing else.
   std::size_t enqueue(std::vector<cu::interval<T>> new_interval)
   {
-    std::size_t idx = intervals.size();
+    std::size_t const bytes = entry_bytes(new_interval.size());
+    if (!free_slots_.empty()) {
+      std::size_t const idx = free_slots_.back();
+      free_slots_.pop_back();
+      intervals[idx] = std::move(new_interval);
+      refs_[idx] = 1;
+      live_bytes_ += bytes;
+      return idx;
+    }
+    std::size_t const idx = intervals.size();
     intervals.push_back(std::move(new_interval));
+    refs_.push_back(1);
+    live_bytes_ += bytes;
     return idx;
   }
+
+  // One more pending node names `idx` as its pidx.
+  void add_ref(std::size_t idx)
+  {
+    if (idx == kRootSlot) {
+      return;  // see release()
+    }
+    assert(idx < refs_.size() && "add_ref() on a slot that was never enqueued");
+    assert(refs_[idx] > 0 && "add_ref() on a freed slot");
+    ++refs_[idx];
+  }
+
+  // One fewer holder of `idx`. At zero references the box's memory is returned
+  // and the slot joins the free list.
+  //
+  // Slot 0 is the root sentinel -- materialise() answers pidx == 0 from
+  // root_box without ever looking the slot up -- so releasing it is a no-op and
+  // it never enters the free list. That keeps index 0 meaning "the root" for
+  // every node, which slot reuse would otherwise quietly break.
+  void release(std::size_t idx)
+  {
+    if (idx == kRootSlot) {
+      return;
+    }
+    assert(idx < refs_.size() && "release() on a slot that was never enqueued");
+    assert(refs_[idx] > 0 && "release() on an already-freed slot");
+    if (--refs_[idx] > 0) {
+      return;
+    }
+    live_bytes_ -= entry_bytes(intervals[idx].size());
+    // Not clear(): that keeps the capacity, and the whole point is to hand the
+    // memory back.
+    std::vector<cu::interval<T>>().swap(intervals[idx]);
+    free_slots_.push_back(idx);
+  }
+
+  // Host bytes the live entries hold, for the driver's memory budget
+  // (design/BOUNDED_FRONTIER.md §3.3). Maintained incrementally rather than
+  // summed on demand, since it is read once per iteration.
+  std::size_t live_bytes() const { return live_bytes_; }
+
+  // Entries currently holding a box. Bounded by the number of distinct parents
+  // among the pending nodes once the driver releases what it dequeues.
+  std::size_t live_count() const
+  {
+    return intervals.size() - free_slots_.size();
+  }
+
+  std::size_t ref_count(std::size_t idx) const { return refs_[idx]; }
+
+private:
+  static constexpr std::size_t kRootSlot = 0;
+
+  // The box itself plus a fixed charge for the std::vector header holding it:
+  // an entry costs more than its elements, and at 200 variables the header is
+  // noise while at 2 it is not.
+  static constexpr std::size_t entry_bytes(std::size_t n_vars)
+  {
+    return n_vars * sizeof(cu::interval<T>)
+        + sizeof(std::vector<cu::interval<T>>);
+  }
+
+  std::vector<std::size_t> refs_;  // parallel to intervals
+  std::vector<std::size_t> free_slots_;
+  std::size_t live_bytes_ = 0;
 };
 
 /**
@@ -170,9 +266,19 @@ struct CompositionInterval
     // Lower is higher priority to explore
     // 1. by least lower bound
     // 2. by deepest in the tree
-    // 3. by most recent parent
-    if (lb != other.lb) {
-      return lb < other.lb;
+    // 3. by most recent parent -- or, once IntervalHistory starts reusing the
+    //    slots it frees, merely by the larger slot index: deterministic, but
+    //    no longer a recency order. It only ever separates nodes with equal lb
+    //    *and* equal depth, and nothing below depends on which of those wins.
+    //
+    // The lb tie is spelled with two < rather than a != so that a host
+    // translation unit built with -Werror=float-equal can instantiate this
+    // (test/source/host_budget_test.cpp does). Same ordering either way.
+    if (lb < other.lb) {
+      return true;
+    }
+    if (other.lb < lb) {
+      return false;
     }
     if (depth != other.depth) {
       return depth > other.depth;
@@ -381,6 +487,71 @@ public:
   // Number of pending regions not yet proven suboptimal against gub, i.e.
   // regions that could still contain the global optimum.
   std::size_t count_viable(T gub) const { return count_viable_impl(0, gub); }
+
+  // Elements the backing vector has room for, and what that costs. Capacity
+  // rather than size(), because capacity is what is allocated and what grow()
+  // doubles -- the allocation that actually fails is the doubling one, so a
+  // budget checked against size() would be checked against a number the
+  // process is already past. See design/BOUNDED_FRONTIER.md §3.3.
+  std::size_t capacity() const { return elems.capacity(); }
+
+  std::size_t capacity_bytes() const { return elems.capacity() * sizeof(Node); }
+
+  // Keep the `n_keep` best elements under Node::operator<, hand each of the
+  // others to `on_evict`, restore the heap invariant over the survivors, and
+  // shrink the backing vector to hold 2 * n_keep. No-op when size() <= n_keep.
+  //
+  // The eviction policy is not designed here, and that is the point: the
+  // "worst" element under the comparator the search already trusts is the
+  // highest lb, then the shallowest, then the arbitrary tie-break -- loose
+  // regions with bad bounds, which is exactly what a bounded frontier wants to
+  // shed first. Discarding regions is only sound because the caller folds what
+  // it drops into a floor on the reported lower bound; that contract lives
+  // with the driver (design/BOUNDED_FRONTIER.md §4), not here.
+  //
+  // Batched rather than per-insertion: nth_element partitions in O(n) and the
+  // heap rebuild is O(n), so keeping the frontier in [n_keep, 2 * n_keep]
+  // amortises to a handful of comparisons per insertion -- cheaper than the
+  // heap insert it rides along with -- and every eviction decision is made
+  // with the freshest GUB the caller has.
+  //
+  // The capacity shrink is required rather than cosmetic: capacity_bytes()
+  // counts capacity, so a vector that never gave any back would sit above the
+  // budget line forever and re-trigger compaction on every later iteration.
+  template<typename OnEvict>
+  void compact(std::size_t n_keep, OnEvict&& on_evict)
+  {
+    assert(n_keep >= 1 && "compact() must keep at least one element");
+    if (num_elems <= n_keep) {
+      return;
+    }
+
+    // Partitions the best n_keep to the front; neither side ends up ordered,
+    // which is why the heap has to be rebuilt below rather than merely
+    // truncated.
+    std::nth_element(elems.begin(),
+                     elems.begin() + static_cast<std::ptrdiff_t>(n_keep),
+                     elems.begin() + static_cast<std::ptrdiff_t>(num_elems));
+
+    for (std::size_t i = n_keep; i < num_elems; ++i) {
+      on_evict(static_cast<const Node&>(elems[i]));
+    }
+    num_elems = n_keep;
+
+    // Floyd's heapify over the survivors: O(n), against O(n log n) to reinsert
+    // them one at a time.
+    for (std::size_t i = num_elems / 2; i-- > 0;) {
+      sift_down(i);
+    }
+
+    if (elems.size() > 2 * n_keep) {
+      std::vector<Node> shrunk(2 * n_keep);
+      std::copy(elems.begin(),
+                elems.begin() + static_cast<std::ptrdiff_t>(num_elems),
+                shrunk.begin());
+      elems.swap(shrunk);
+    }
+  }
 };
 
 }  // namespace cuminlp::search

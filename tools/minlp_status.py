@@ -41,10 +41,11 @@ an improvement from a regression.
 
 A run that never samples a feasible point reports no primal bound at all, and
 that is a result rather than the absence of one. Which result depends on how
-it ended: with an empty frontier, it is a proof that the instance has none,
-and with regions still pending at the iteration limit, it is a sampling
-failure. The primal column carries both, as `infeasible` and `no sample` --
-see the comment on INFEASIBLE.
+it ended: with a frontier it emptied by proving every region held nothing, it
+is a proof that the instance has none, and with places left to look -- regions
+still pending, or regions discarded to stay inside its memory budget -- it is a
+sampling failure. The primal column carries both, as `infeasible` and
+`no sample` -- see the comment on INFEASIBLE.
 """
 
 import argparse
@@ -124,11 +125,16 @@ EMPTY = "—"  # em dash: reads as "nothing here", unlike a blank cell
 # on -- then no region is ever discarded, the frontier keeps growing, and the
 # run ends at its iteration limit with regions still pending.
 #
+# A third way to empty a frontier arrived with the host memory budget: a run
+# may discard pending regions to stay inside it. Those regions are places
+# nobody looked, so a frontier emptied with any of them dropped proves nothing
+# and reads as NO_SAMPLE too.
+#
 # So the terminal state separates them, and the log states it outright: a
-# pending size of zero with no incumbent is INFEASIBLE, and a nonzero one is
-# NO_SAMPLE. Neither is a number and neither is ever compared as one: the first
-# is a claim about the instance rather than a value the objective attains, and
-# the second is a claim about the run.
+# pending size of zero, with no viable region dropped and no incumbent, is
+# INFEASIBLE, and anything else is NO_SAMPLE. Neither is a number and neither
+# is ever compared as one: the first is a claim about the instance rather than
+# a value the objective attains, and the second is a claim about the run.
 INFEASIBLE = "infeasible"
 NO_SAMPLE = "no sample"
 
@@ -549,17 +555,20 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append(f"| `{INFEASIBLE}` | the frontier emptied: every region was discarded by "
                "the interval feasibility test or fathomed by an exhaustive enumeration "
                "that found nothing, so no feasible point exists to be found |")
-    out.append(f"| `{NO_SAMPLE}` | the run stopped at its iteration limit with regions "
-               "still pending, having never sampled a feasible point; the instance may "
-               "well be feasible and the sampler simply missing, which is the ordinary "
-               "outcome for equality constraints |")
+    out.append(f"| `{NO_SAMPLE}` | the run stopped with places left to look and no "
+               "feasible point sampled -- regions still pending at the iteration limit, "
+               "or regions discarded to stay inside the host memory budget; the instance "
+               "may well be feasible and the sampler simply missing, which is the "
+               "ordinary outcome for equality constraints |")
     out.append("")
     out.append("The difference is the terminal state, not a judgement call. An")
     out.append("infeasible instance runs out of places a solution could hide, so given")
     out.append("iterations enough it *ends*; a sampler that keeps missing keeps")
     out.append("splitting regions instead, and can only ever end by running out of")
-    out.append("iterations. `record` reads the pending count off the log's summary and")
-    out.append("writes whichever applies.")
+    out.append("iterations or of memory. `record` reads the pending count and the count")
+    out.append("of regions dropped for memory off the log's summary and writes whichever")
+    out.append("applies -- a frontier emptied partly by discarding regions proves")
+    out.append("nothing, because a discarded region is a place nobody looked.")
     out.append("")
     out.append("Neither is compared as a number. Any feasible point displaces both,")
     out.append(f"whatever its objective value -- against `{INFEASIBLE}` that is a")
@@ -784,6 +793,18 @@ PARAMS_RE = re.compile(r"^PARAMS\t(?P<fields>\S.*)$", re.MULTILINE)
 # truncated to carry the summary.
 PENDING_RE = re.compile(r"^Pending size: (?P<n>\d+)$", re.MULTILINE)
 
+# How many still-viable regions the search threw away to stay inside its host
+# memory budget, from the same summary. It is what stops an emptied frontier
+# from being read as a proof: a region evicted while it could still have held
+# the optimum is an unexplored place, not an excluded one, so a run that
+# emptied its frontier partly by eviction has not shown anything about the
+# instance. See design/BOUNDED_FRONTIER.md §4.
+#
+# Absent from a log written before the driver could drop anything, and that
+# reads correctly as zero -- those runs never dropped a region because they
+# had no mechanism to.
+DROPPED_RE = re.compile(r"^Dropped viable regions: (?P<n>\d+)$", re.MULTILINE)
+
 # Two words, because the sentence after them has already been reworded once:
 # the old form went on "...with no feasible point sampled; either the problem
 # is infeasible or point sampling never satisfied the constraints", hedging
@@ -833,17 +854,24 @@ def scrape_policy(text):
     return cell
 
 
-def primal_outcome(primal, pending, said_exhausted):
+def primal_outcome(primal, pending, said_exhausted, dropped=None):
     """What a run with no primal bound found: INFEASIBLE, NO_SAMPLE, or None.
 
     None when the log does not say -- no summary line and no exhaustion notice,
     which is a log from a build before either existed. The two outcomes are far
     enough apart that guessing between them is worse than recording neither.
+
+    An empty frontier is only a proof when the search emptied it by *proving*
+    every region held nothing. A memory-bounded run can also empty it by
+    discarding regions, and those regions are places left to look, so a run
+    that dropped a viable one records as NO_SAMPLE however few regions it
+    finished with. `dropped` of None is an old log, from a driver that could
+    not drop anything, and keeps today's reading byte for byte.
     """
     if primal is not None:
         return None
     if pending is not None:
-        return INFEASIBLE if pending == 0 else NO_SAMPLE
+        return INFEASIBLE if pending == 0 and not dropped else NO_SAMPLE
     return INFEASIBLE if said_exhausted else None
 
 
@@ -874,8 +902,10 @@ def scrape_log(text):
     window = text[start:m.start()]
     iters = [int(i["n"]) for i in ITER_RE.finditer(window)]
     pendings = [int(p["n"]) for p in PENDING_RE.finditer(window)]
+    droppeds = [int(d["n"]) for d in DROPPED_RE.finditer(window)]
     primal = parse_number(m["primal"])
     pending = pendings[-1] if pendings else None
+    dropped = droppeds[-1] if droppeds else None
     said_exhausted = EXHAUSTED_RE.search(window) is not None
     # Both readings of the same run, and they cannot disagree unless the driver
     # has changed under this tool: the notice is printed on exactly the branch
@@ -888,7 +918,7 @@ def scrape_log(text):
               f"lines is now wrong", file=sys.stderr)
     return m["sense"], primal, parse_number(m["dual"]), \
         (max(iters) if iters else None), scrape_policy(window), \
-        primal_outcome(primal, pending, said_exhausted)
+        primal_outcome(primal, pending, said_exhausted, dropped)
 
 
 def better(kind, sense, new, old):
@@ -1014,9 +1044,11 @@ def cmd_record(args):
             # refuse it: a nonzero pending size is the run saying it stopped
             # with places left to look, which is not a proof of anything.
             if outcome == NO_SAMPLE:
-                die("the log reports regions still pending, so this run hit "
-                    "its iteration limit rather than exhausting the search "
-                    "space; it does not show the instance is infeasible")
+                die("the log reports regions still pending, or regions dropped "
+                    "to stay inside the host memory budget, so this run "
+                    "stopped with places left to look rather than exhausting "
+                    "the search space; it does not show the instance is "
+                    "infeasible")
             outcome = INFEASIBLE
         # An explicit --iters wins: the log's count is an inference from the
         # printed trace, and the caller may know better (a truncated log, or a

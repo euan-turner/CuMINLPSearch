@@ -217,6 +217,75 @@ never returns more than 64 for the same reason.
 
 ---
 
+## Host memory budget
+
+The search holds two things on the host that grow without a ceiling of their
+own: the pending frontier, and the interval history the frontier's nodes
+decode their boxes from. When bounds are loose and almost nothing prunes, the
+frontier grows by nearly the full fan-out every iteration, and the run ends
+when the OS kills it — throwing away a bracket that was valid at every
+iteration up to that point.
+
+| Flag | Effect |
+|---|---|
+| `--host-budget-bytes=N` | Bytes the frontier and the live history may hold between them. `0` (the default) measures half of `/proc/meminfo`'s `MemAvailable` at the start of the solve. The resolved figure is printed as `Host memory budget:` so a log records what the run actually ran under. |
+| `--bounded-frontier` | On reaching the budget, discard the worst-bounded pending regions and keep searching instead of stopping. **Off by default.** |
+
+**By default nothing is ever discarded.** Reaching the budget ends the run
+through the ordinary epilogue with `Stop reason: host-memory` and the frontier
+intact, so every bound reported is one the search had already earned — the
+only difference from an unbudgeted run is that this one ends with a result
+rather than at the hands of the OOM killer.
+
+`--bounded-frontier` trades that for a longer search. Reaching the budget then
+halves the frontier, discarding the regions the search already ranks worst —
+highest lower bound first, which is the ordering the queue itself uses, applied
+backwards — and the run continues. It stops only if the budget is still
+exceeded with the frontier already compacted. It is opt-in because it changes
+which regions get explored, which is a change to the search and not just to
+its memory use:
+
+```
+# same instance, same 1 MB cap, 40 iterations
+default:            -45 <= min <= -13.72   Stop reason: host-memory   (stopped at iteration 4)
+--bounded-frontier: -45 <= min <= -22.10   Stop reason: iteration-limit
+```
+
+Discarding a pending region can lose the optimum, so a `--bounded-frontier`
+run says what it discarded and the reported bounds account for it:
+
+- A region whose lower bound already exceeds the incumbent is **dominated**.
+  Discarding it costs nothing — the search would have discarded it on dequeue
+  anyway — and a run whose evictions were all dominated still reports
+  `Proven optimal`. Eviction takes the worst-bounded regions first, so these
+  go first.
+- A region that could still have held the optimum is **viable**. Discarding it
+  puts a floor under everything the run may claim afterwards: `GLB` can never
+  be reported above the least such bound (`Dropped lb floor`), optimality can
+  only be claimed if the gap to that floor is closed, and an emptied frontier
+  stops meaning "infeasible", because the frontier emptied partly because we
+  emptied it.
+
+So a `--bounded-frontier` run gives up bound *quality*, gracefully and visibly,
+and never soundness. `tools/minlp_status.py` reads `Dropped viable regions:`
+for the same reason: without it, an emptied frontier would be recorded as
+`infeasible` on a run that merely ran out of memory.
+
+```sh
+# cap the search at 2 GiB of host structures, and stop there
+./build/dev/gams_solve test/data/gams/ex8_6_2.gms 100000 \
+    --host-budget-bytes=2147483648
+
+# ... or keep searching inside that cap, shedding the worst regions
+./build/dev/gams_solve test/data/gams/ex8_6_2.gms 100000 \
+    --host-budget-bytes=2147483648 --bounded-frontier
+```
+
+This is separate from device memory, which is budgeted per built graph and
+reports its own out-of-memory advice (exit code `3`).
+
+---
+
 ## Inspection flags
 
 | Flag | Effect |
@@ -341,12 +410,17 @@ test/data/gams/ex2_1_1.gms: 5 variables, 1 constraints, 55 DAG nodes
 policy: mixed-all-small (auto), partition_num: 10, enumerate_cap: 10,
         sample_points: 10, max_cycle_size: 5 (rung 8)
 PARAMS	policy=mixed-all-small	source=auto	partition_num=10	enumerate_cap=10	sample_points=10	max_cycle_size=5
+Host memory budget: 26416576512 bytes (measured)
 ...
 ------------ Finished ------------
 -29.45 <= min <= -15.9619
+Stop reason: iteration-limit
 Pending size: 8175
 Viable regions: 2417
 Pruned as interval-infeasible: 2021384
+Dropped viable regions: 0
+Dropped dominated regions: 0
+Dropped lb floor: none
 objective (minimise): -15.9619
 RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
   x1 = 0.994049
@@ -385,6 +459,17 @@ RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
 - **Pending size** is the raw queue length and is *not* a measure of progress.
   It can be large while `Viable regions` is zero: dominated regions stay
   queued until they are dequeued and discarded.
+- **`Stop reason`** is why the loop ended, in one word:
+  `converged` (the bracket closed to tolerance), `exhausted` (the frontier
+  emptied), `iteration-limit`, `host-memory` (see
+  [Host memory budget](#host-memory-budget)), or `allocation-failure` /
+  `device-memory` for an allocation that threw. All six end in the same
+  epilogue, so the bracket below is valid whichever one is printed.
+- **`Dropped viable regions` / `Dropped dominated regions` /
+  `Dropped lb floor`** are what `--bounded-frontier` discarded, and are all
+  zero and `none` without it. A nonzero *viable* count is the one to read: it
+  means `GLB` is capped at the floor and the run can no longer claim
+  optimality or infeasibility on its own.
 - For a maximisation, the objective is negated on the way in and negated
   back on the way out; a `--dump-dag` shows what the solver actually
   minimises, and says so.

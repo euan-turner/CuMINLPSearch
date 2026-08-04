@@ -114,26 +114,101 @@ std::size_t composition_footprint_bytes(std::size_t n_regions,
 }
 
 /**
+ * @brief The most device memory any Composition of at most `cap` slots can
+ *        cost, over every box the search could ever reach.
+ *
+ * The quantity a cap has to be fitted against, and the reason this is not
+ * simply `composition_footprint_bytes` of one shape: with `cap` slots and a
+ * problem of these kind counts there are many reachable Compositions, they
+ * differ by orders of magnitude in region count, and the *root's* is not the
+ * widest.
+ *
+ * That last point is what this function exists to get right. Greedy fills
+ * binaries first, so on a problem with plenty of binaries the root
+ * composition is all-binary at fan-out 2 -- but binaries *resolve* as the
+ * search descends, and a descendant with only a few live binaries left fills
+ * the freed slots with continuous variables at `partition_num` each. On
+ * batch.gms (24 binary, 22 continuous) a cap of 14 costs 2^14 = 16k regions
+ * at the root and 2^10 x 64^4 = 17.2e9 regions ten levels down: the same cap,
+ * four orders of magnitude apart, and only the second one is the budget.
+ *
+ * So slots are charged in *descending width* order, not in the order the
+ * policy fills them. Two candidate shapes bound every reachable composition
+ * between them:
+ *
+ *  - the widest shape outright -- integers at max(partition_num,
+ *    enumerate_cap), then continuous at partition_num, then binaries at 2,
+ *    each up to how many variables of that kind the problem has. Widths are
+ *    ordered integer >= continuous >= binary always (partition_num >= 2 is a
+ *    FanOutSpec invariant), so filling greedily by width maximises the
+ *    product;
+ *  - the widest *enumerable* shape -- integers then binaries, no continuous
+ *    slot -- which pays for a third graph (the exact one GraphDriver caches
+ *    for a fully-enumerable Composition) that the first candidate may not.
+ *
+ * Every integer slot is charged max(partition_num, enumerate_cap), since a
+ * slot may enumerate or bisect depending on how far its domain has narrowed
+ * by the time it is chosen; that over-charges a mixed integer run, in the
+ * safe direction.
+ *
+ * Monotone in `cap` by construction (it is a running maximum over shapes of
+ * every width up to `cap`), which is what lets the scan below stop at the
+ * first cap that doesn't fit.
+ */
+template<typename T>
+std::size_t worst_composition_footprint(std::size_t cap,
+                                        std::size_t n_binary,
+                                        std::size_t n_integer,
+                                        std::size_t n_continuous,
+                                        std::size_t n_buffers,
+                                        const FanOutSpec& fan_out,
+                                        std::size_t sample_points)
+{
+  std::size_t const integer_width =
+      std::max(fan_out.partition_num(), fan_out.enumerate_cap());
+
+  std::size_t widest = 1;  // integers, then continuous, then binaries
+  std::size_t discrete = 1;  // integers, then binaries: the enumerable shapes
+  std::size_t worst = 0;
+
+  for (std::size_t s = 1; s <= cap; ++s) {
+    widest = detail::saturating_mul(
+        widest,
+        s <= n_integer                    ? integer_width
+            : s <= n_integer + n_continuous ? fan_out.partition_num()
+                                            : std::size_t {2});
+    // No continuous slot in the first `s` of that ordering means the shape is
+    // fully enumerable and pays for the exact graph too.
+    bool const enumerable = s <= n_integer || n_continuous == 0;
+    worst = std::max(worst,
+                     composition_footprint_bytes<T>(
+                         widest, sample_points, n_buffers, enumerable));
+
+    // The all-discrete shape is a separate maximum rather than a special case
+    // of the one above: it is narrower whenever continuous slots exist, but
+    // carries the exact graph, so neither dominates the other in general.
+    if (s <= n_integer + n_binary) {
+      discrete = detail::saturating_mul(
+          discrete, s <= n_integer ? integer_width : std::size_t {2});
+      worst = std::max(worst,
+                       composition_footprint_bytes<T>(
+                           discrete, sample_points, n_buffers, true));
+    }
+  }
+  return worst;
+}
+
+/**
  * @brief The widest --max-cycle-size whose graphs fit in `budget`, or 0 if
  *        not even a single slot does.
  *
- * What the CLI uses instead of a hardcoded per-shape constant. The region
- * count is a product over slots, so this is a scan: multiply in one slot's
- * worst-case fan-out at a time and stop at the first cap that doesn't fit.
+ * What the CLI uses instead of a hardcoded per-shape constant. A scan, since
+ * `worst_composition_footprint` is monotone in the cap: stop at the first cap
+ * whose worst reachable composition doesn't fit.
  *
- * "Worst case" over the whole search, not just the root, on three counts.
- * Slots are charged in the order GreedyCompositionPolicy fills them
- * (binaries, then integers, then continuous), because that order decides
- * which fan-outs a given cap actually buys. Every integer slot is charged
- * max(partition_num, enumerate_cap), since a slot may enumerate or bisect
- * depending on how far its domain has narrowed by the time it is chosen. And
- * the exact graph is charged for any all-binary/all-integer prefix, though a
- * bisecting integer slot would not in fact produce one -- that over-charges
- * by one graph in `sample_points + 2`, and over-charging is the safe
- * direction for a budget.
- *
- * A descendant box never has more live variables than the root, so a full
- * slate of slots at root widths bounds every composition the search reaches.
+ * The cap it returns holds for *every* box the search reaches, not just the
+ * root -- see worst_composition_footprint for why those differ and why the
+ * root is not the binding case.
  *
  * Takes the variable-kind counts and buffer count directly, rather than a
  * `Problem<T>`, so it can be driven from a `PolicyProfile`'s already-computed
@@ -152,21 +227,18 @@ std::size_t auto_max_cycle_size(std::size_t n_binary,
                                 std::size_t budget,
                                 std::size_t ceiling)
 {
-  std::size_t const integer_width =
-      std::max(fan_out.partition_num(), fan_out.enumerate_cap());
   std::size_t const slots =
       std::min(ceiling, n_binary + n_integer + n_continuous);
 
   std::size_t best = 0;
-  std::size_t regions = 1;
   for (std::size_t cap = 1; cap <= slots; ++cap) {
-    std::size_t const width = cap <= n_binary ? std::size_t {2}
-        : cap <= n_binary + n_integer         ? integer_width
-                                              : fan_out.partition_num();
-    regions = detail::saturating_mul(regions, width);
-    bool const enumerable = cap <= n_binary + n_integer;
-    if (composition_footprint_bytes<T>(
-            regions, sample_points, n_buffers, enumerable)
+    if (worst_composition_footprint<T>(cap,
+                                       n_binary,
+                                       n_integer,
+                                       n_continuous,
+                                       n_buffers,
+                                       fan_out,
+                                       sample_points)
         > budget)
     {
       break;

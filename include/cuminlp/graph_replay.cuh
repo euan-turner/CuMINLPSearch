@@ -1509,15 +1509,23 @@ public:
    * it, then does the arithmetic the caller would otherwise have to: the
    * widest slot cap that would actually fit.
    *
-   * That last part is the useful half. Because the fan-outs are ordered with
-   * live slots first, the prefix products are exactly the region counts a
-   * smaller max_cycle_size would give, so the answer is a scan.
+   * That last part is the useful half, and it is costed against the whole
+   * *problem*, not against prefixes of the composition that happened to fail.
+   * Truncating this composition is what made the suggestion unfollowable a
+   * second time over: on a problem with both binaries and continuous
+   * variables the failing composition's cheap prefix (binaries at fan-out 2)
+   * is not what a cap of that size buys further down the tree, where the
+   * resolved binaries have handed their slots to continuous variables at
+   * `partition_num` each. `dag::auto_max_cycle_size` charges the widest
+   * composition the search can still reach at each cap -- see
+   * search_sizing.hpp.
    *
-   * The scan charges composition_footprint_bytes -- every graph a solve holds
+   * It also charges composition_footprint_bytes -- every graph a solve holds
    * for a composition at once -- not this graph alone. Scanning this graph
-   * alone is what made the suggestion unfollowable: an exact graph overflowing
-   * at one element per region would recommend a cap at which the point graph,
-   * at `solve_sample_points` elements per region, overflowed in turn.
+   * alone is what made the suggestion unfollowable the *first* time: an exact
+   * graph overflowing at one element per region would recommend a cap at
+   * which the point graph, at `solve_sample_points` elements per region,
+   * overflowed in turn.
    *
    * Hence the two sample counts. `sample_points` is what *this* graph draws,
    * and describes the size that failed; `solve_sample_points` is the
@@ -1525,6 +1533,7 @@ public:
    * against. They differ exactly when this is not the point graph.
    */
   static std::string out_of_memory_report(
+      const Problem<T>& problem,
       const Composition<CycleSize>& composition,
       const FanOutSpec& fan_out,
       std::size_t sample_points,
@@ -1571,42 +1580,47 @@ public:
         + " B of per-element bookkeeping)"
         + "\n  = " + detail::format_bytes(needed) + '\n';
 
-    // The region count is a product over slots, so dropping one slot divides
-    // it by that slot's fan-out. Report the widest cap that fits -- costed
-    // against every graph the solve would then hold, so that following the
-    // suggestion cannot fail a second time.
-    std::size_t prefix = 1;
-    std::size_t best_slots = 0;
-    std::size_t best_bytes = 0;
-    Composition<CycleSize> truncated {};
-    truncated.kinds.fill(SlotKind::Padding);
-    for (std::size_t j = 0; j < composition.count; ++j) {
-      prefix = detail::saturating_mul(
-          prefix, slot_fan_out(composition[j], fan_out));
-      truncated[j] = composition[j];
-      truncated.count = j + 1;
-      std::size_t const bytes =
-          composition_footprint_bytes<T>(prefix,
-                                         solve_sample_points,
-                                         n_buffers,
-                                         is_fully_enumerable(truncated));
-      if (bytes <= budget) {
-        best_slots = j + 1;
-        best_bytes = bytes;
+    // Report the widest cap that fits -- costed against every graph the solve
+    // would then hold, for the widest composition it could still reach at
+    // that cap, so that following the suggestion cannot fail a second time.
+    std::size_t n_binary = 0;
+    std::size_t n_integer = 0;
+    std::size_t n_continuous = 0;
+    for (VarKind kind : problem.var_kinds) {
+      if (kind == VarKind::Binary) {
+        ++n_binary;
+      } else if (kind == VarKind::Integer) {
+        ++n_integer;
       } else {
-        break;
+        ++n_continuous;
       }
     }
 
+    std::size_t const best_slots = auto_max_cycle_size<T>(n_binary,
+                                                          n_integer,
+                                                          n_continuous,
+                                                          n_buffers,
+                                                          fan_out,
+                                                          solve_sample_points,
+                                                          budget,
+                                                          CycleSize);
+
     if (best_slots > 0) {
+      std::size_t const best_bytes =
+          worst_composition_footprint<T>(best_slots,
+                                         n_binary,
+                                         n_integer,
+                                         n_continuous,
+                                         n_buffers,
+                                         fan_out,
+                                         solve_sample_points);
       msg += "\n  Acting on " + std::to_string(best_slots)
           + " variable(s) at a time instead of "
-          + std::to_string(composition.count) + " leaves every graph the "
-            "solve holds for one composition -- point, interval"
-          + (is_fully_enumerable(composition) ? ", exact" : "")
-          + " -- at " + detail::format_bytes(best_bytes)
-          + " together: try --max-cycle-size=" + std::to_string(best_slots)
-          + '\n';
+          + std::to_string(composition.count)
+          + " keeps every composition the search can reach -- point, interval"
+            " and exact graphs together -- within "
+          + detail::format_bytes(best_bytes)
+          + ": try --max-cycle-size=" + std::to_string(best_slots) + '\n';
     } else {
       msg +=
           "\n  Even a single slot does not fit, so the per-element cost is "
@@ -1667,8 +1681,8 @@ public:
     }
     if (needed > budget_bytes) {
       throw cuminlp::ResourceExhausted(out_of_memory_report(
-          composition, fan_out, replay.sample_points_, n_buffers, needed,
-          budget_bytes, sample_points));
+          problem, composition, fan_out, replay.sample_points_, n_buffers,
+          needed, budget_bytes, sample_points));
     }
 
     replay.domain_buffer_ =

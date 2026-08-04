@@ -502,6 +502,64 @@ TEST_CASE("auto_max_cycle_size picks a cap whose whole graph set fits",
   }
 }
 
+TEST_CASE("auto_max_cycle_size charges the widest composition the search can "
+          "reach, not the root's",
+          "[graph_replay][5][config]")
+{
+  // batch.gms in miniature: binaries fill the root's slots at fan-out 2, so a
+  // scan charging slots in the order GreedyCompositionPolicy fills them sees
+  // 2^cap and certifies a huge cap. But binaries *resolve* as the search
+  // descends, and a descendant fills those same slots with continuous
+  // variables at partition_num each -- on batch.gms itself, 2^14 regions at
+  // the root against 2^10 * 64^4 = 17.2e9 ten levels down, which is where the
+  // certified cap turned into 338.9 TiB of point graph.
+  Problem<double> p;
+  Expr<double> sum = p.bin_var();
+  for (int i = 1; i < 24; ++i) {
+    sum = sum + p.bin_var();
+  }
+  for (int i = 0; i < 22; ++i) {
+    sum = sum + p.var(0.0, 10.0);
+  }
+  p.set_objective(sum);
+
+  FanOutSpec const fan_out {64};
+  std::size_t const sample_points = 5;
+  std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
+  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
+
+  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
+      p, fan_out, sample_points, budget, cuminlp::max_capacity());
+  REQUIRE(cap >= 1);
+
+  // The all-continuous composition of `cap` slots is reachable -- every
+  // binary resolves eventually -- so it, not the all-binary one, is what the
+  // cap has to admit.
+  auto continuous_regions = [&](std::size_t slots)
+  {
+    std::size_t r = 1;
+    for (std::size_t i = 0; i < slots; ++i) {
+      r *= 64;
+    }
+    return r;
+  };
+  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+            continuous_regions(cap), sample_points, n_buffers, false)
+        <= budget);
+  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+            continuous_regions(cap + 1), sample_points, n_buffers, false)
+        > budget);
+
+  // And the all-binary composition, which is what the old scan charged, is
+  // orders of magnitude cheaper at that same cap -- i.e. the two really do
+  // disagree here, so the check above is not vacuous.
+  std::size_t binary_regions = 1;
+  for (std::size_t i = 0; i < cap; ++i) {
+    binary_regions *= 2;
+  }
+  CHECK(binary_regions < continuous_regions(cap));
+}
+
 TEST_CASE("auto_max_cycle_size never exceeds the ladder's widest rung",
           "[graph_replay][5][config]")
 {

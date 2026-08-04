@@ -12,6 +12,22 @@ include(Catch)
 
 # ---- Tests ----
 
+# tools/minlp_status.py's log scraper: what stands between a driver summary
+# line and a permanent row in MINLP_STATUS.md. Its own language, so its own
+# runner -- registered with CTest so it runs with everything else rather than
+# only when someone remembers it. Skipped, not failed, where there is no
+# interpreter: nothing else here needs one.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(
+      NAME minlp_status_test
+      COMMAND Python3::Interpreter
+              "${CMAKE_CURRENT_SOURCE_DIR}/tools/minlp_status_test.py"
+  )
+else()
+  message(STATUS "No Python 3 interpreter: skipping minlp_status_test")
+endif()
+
 # GAMS frontend tests: expression parsing, objective-variable elimination, and
 # agreement with the hand-built ex4_1_2/ex8_6_2 DAGs. No CUDA, no GPU needed.
 add_executable(cuminlp_gams_test source/gams_test.cpp)
@@ -76,6 +92,22 @@ target_link_libraries(
 target_compile_features(cuminlp_decode_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_decode_test)
+
+# Host-only: the bounded frontier (design/BOUNDED_FRONTIER.md). search.hpp's
+# IntervalPQueue/IntervalHistory have no CUDA dependency, and host_budget.hpp
+# is deliberately device-free for exactly this reason -- the budget
+# arithmetic, the eviction order, the refcounted history GC and the
+# dropped-floor gating of the epilogue's claims are all decidable without a
+# GPU. Only their wiring into graph_driver.cuh is not.
+add_executable(cuminlp_host_budget_test source/host_budget_test.cpp)
+target_link_libraries(
+    cuminlp_host_budget_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_host_budget_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_host_budget_test)
 
 # Host-only: policy_catalogue.hpp (PolicyProfile/ProblemProfile/resolve/
 # select_policy) is plain templated C++ over Problem<T>/FanOutSpec, with no

@@ -26,8 +26,15 @@ ctest --preset=dev
 > rounding oracle (`CpuRounding`) uses `<xmmintrin.h>`, so those two targets
 > are x86-only.
 >
-> `cuminlp_gams_test` is the exception: the GAMS frontend is pure host C++, so
-> its tests run anywhere, GPU or not.
+> `cuminlp_gams_test`, `cuminlp_dag_test`, `cuminlp_decode_test`,
+> `cuminlp_composition_policy_test`, `cuminlp_policy_catalogue_test` and
+> `cuminlp_host_budget_test` are the exceptions: the frontend, the DAG, the
+> policy, the sidx decode and the bounded frontier are all pure host C++, so
+> their tests run anywhere, GPU or not.
+>
+> `minlp_status_test` is a third kind: `tools/minlp_status.py`'s log scraper,
+> run through CTest by whatever Python 3 CMake finds. Configuring without one
+> skips it (with a message) rather than failing.
 
 ## GAMS frontend
 

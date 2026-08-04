@@ -1,6 +1,7 @@
 // Solve a GAMS scalar-format model straight from its .gms file.
 //
-//   gams_solve [--policy=<name>] [--list-policies]
+//   gams_solve [--policy=<name>] [--list-policies] [--host-budget-bytes=<n>]
+//              [--bounded-frontier]
 //              [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]
 //              <model.gms> <iterations>
 //
@@ -95,12 +96,15 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
                 cuminlp::PolicyKind kind,
                 cuminlp::FanOutSpec fan_out,
                 std::size_t sample_points,
+                std::size_t host_budget_bytes,
+                cuminlp::FrontierPolicy frontier_policy,
                 cuminlp::SearchCalibration calibration) -> Solution
 {
   std::shared_ptr<const cuminlp::CompositionPolicy<double, Capacity>> policy =
       cuminlp::make_policy<double, Capacity>(kind, fan_out, calibration);
   cuminlp::GraphDriver<double, Capacity> driver(
-      policy, iters, 1e-6, sample_points);
+      policy, iters, 1e-6, sample_points, /*budget_bytes=*/0,
+      host_budget_bytes, frontier_policy);
   double const bound = driver.solve(problem);
   auto const best = driver.best_point();
   return Solution{bound, driver.lower_bound(), driver.upper_bound(),
@@ -199,7 +203,9 @@ auto solve(cuminlp::dag::Problem<double> const& problem,
            cuminlp::PolicyKind kind,
            cuminlp::FanOutSpec fan_out,
            std::size_t sample_points,
-           std::size_t max_cycle_size) -> Solution
+           std::size_t max_cycle_size,
+           std::size_t host_budget_bytes,
+           cuminlp::FrontierPolicy frontier_policy) -> Solution
 {
   // One templated lambda, instantiated once per ladder rung; which rung runs
   // is a runtime decision. This is the only place the compile-time capacity
@@ -209,8 +215,14 @@ auto solve(cuminlp::dag::Problem<double> const& problem,
       max_cycle_size,
       [&]<std::size_t Capacity>() -> Solution
       {
-        return solve_with<Capacity>(
-            problem, iters, kind, fan_out, sample_points, calibration);
+        return solve_with<Capacity>(problem,
+                                    iters,
+                                    kind,
+                                    fan_out,
+                                    sample_points,
+                                    host_budget_bytes,
+                                    frontier_policy,
+                                    calibration);
       });
 }
 
@@ -267,6 +279,7 @@ auto main(int argc, char* argv[]) -> int
   auto usage = [&](std::ostream& out) {
     out << "usage: " << argv[0]
         << " [--policy=<name>] [--list-policies]"
+        << " [--host-budget-bytes=<n>] [--bounded-frontier]"
         << " [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
         << " <model.gms> <iterations>\n";
   };
@@ -295,6 +308,27 @@ auto main(int argc, char* argv[]) -> int
            "  --list-policies   print the policy roster (name, rules, "
            "evidence,\n"
            "                    provisional status) and exit; needs no GPU.\n"
+           "\n"
+           "Memory:\n"
+           "  --host-budget-bytes=N  cap the host memory the search's pending\n"
+           "                      frontier and interval history hold together."
+           "\n"
+           "                      Reaching it ends the run with the bracket\n"
+           "                      intact rather than in the OOM killer; "
+           "nothing\n"
+           "                      is discarded, so the bounds are the ones the"
+           "\n"
+           "                      search had already earned. 0 (the default)\n"
+           "                      measures half of MemAvailable.\n"
+           "  --bounded-frontier  on reaching the budget, discard the "
+           "worst-bounded\n"
+           "                      pending regions and keep searching instead "
+           "of\n"
+           "                      stopping. Off by default: it changes which\n"
+           "                      regions the search explores. The reported "
+           "bounds\n"
+           "                      stay sound and say what was discarded (see\n"
+           "                      `Dropped ...` in the summary).\n"
            "\n"
            "Inspection:\n"
            "  --dump-dag[=infix|nodes]  print the lowered Problem before "
@@ -336,6 +370,8 @@ auto main(int argc, char* argv[]) -> int
   std::optional<std::size_t> enumerate_cap;
   std::optional<std::size_t> sample_points;
   std::optional<std::size_t> max_cycle_size;
+  std::size_t host_budget_bytes = 0;
+  bool bounded_frontier = false;
   std::vector<std::string> positional;
 
   // Shared by --partition-num/--enumerate-cap/--sample-points/
@@ -387,6 +423,17 @@ auto main(int argc, char* argv[]) -> int
     if (arg.rfind("--max-cycle-size=", 0) == 0) {
       max_cycle_size = parse_count(arg.substr(17), "--max-cycle-size");
       if (!max_cycle_size) return 2;
+      continue;
+    }
+    if (arg.rfind("--host-budget-bytes=", 0) == 0) {
+      auto const parsed_budget =
+          parse_count(arg.substr(20), "--host-budget-bytes");
+      if (!parsed_budget) return 2;
+      host_budget_bytes = *parsed_budget;
+      continue;
+    }
+    if (arg == "--bounded-frontier") {
+      bounded_frontier = true;
       continue;
     }
     if (arg == "--dump-dag" || arg.rfind("--dump-dag=", 0) == 0) {
@@ -587,7 +634,11 @@ auto main(int argc, char* argv[]) -> int
                                     policy.kind,
                                     fan_out,
                                     chosen_sample_points,
-                                    chosen_max_cycle_size);
+                                    chosen_max_cycle_size,
+                                    host_budget_bytes,
+                                    bounded_frontier
+                                        ? cuminlp::FrontierPolicy::Compact
+                                        : cuminlp::FrontierPolicy::StopAtBudget);
 
     // The solver only minimises; a maximisation was negated on the way in.
     bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;
