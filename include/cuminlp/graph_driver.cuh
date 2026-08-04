@@ -298,9 +298,25 @@ public:
     } else if (pending.empty()) {
       // Frontier emptied by feasibility pruning without ever sampling a
       // feasible point -- not convergence, so don't collapse GLB_ onto GUB_.
-      std::cout << "Search space exhausted with no feasible point sampled; either the "
-                   "problem is infeasible or point sampling never satisfied the "
-                   "constraints (likely for equalities).\n";
+      //
+      // This is the infeasible case, and it is worth saying so outright: it
+      // cannot be reached by a sampler that merely kept missing. A region is
+      // discarded only when interval analysis proves no point in it satisfies
+      // some constraint, or when every one of its points was enumerated and
+      // none was feasible, so a feasible instance always leaves something
+      // pending. Sampling that never lands on a feasible point -- the ordinary
+      // fate of an equality, whose feasible set has measure zero -- instead
+      // keeps partitioning until the iteration limit stops it, and ends in the
+      // branch below with a nonzero pending size.
+      //
+      // "as far as interval analysis can tell" is the whole of the hedge: the
+      // pruning is conservative, but it is arithmetic on rounded bounds and
+      // not a certificate.
+      std::cout << "Search space exhausted: every region was proven to hold no "
+                   "feasible point, so the problem is infeasible as far as "
+                   "interval analysis can tell. Sampling that merely never "
+                   "landed on a feasible point would have left regions pending "
+                   "here instead.\n";
     } else {
       // Clamped, never merely assigned. A region is enqueued only when its
       // interval lb is <= the GUB_ *at the time*, so a later improvement to
@@ -321,6 +337,9 @@ public:
                         : "")
                 << ".\n";
     }
+    // An interface, not just a trace line: tools/minlp_status.py reads this to
+    // tell an infeasible instance (zero, with no incumbent) from a run that
+    // stopped with places left to look, and records the two differently.
     std::cout << "Pending size: " << pending.size() << '\n';
     std::cout << "Viable regions: " << viable << '\n';
     std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';

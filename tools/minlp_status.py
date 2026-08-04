@@ -38,6 +38,13 @@ bound is an upper bound on the optimum and the dual bound a lower one, and for
 a `max` model it is the other way round. "Better" follows from that, and it is
 why `refresh` records the sense at all -- without it, `record` could not tell
 an improvement from a regression.
+
+A run that never samples a feasible point reports no primal bound at all, and
+that is a result rather than the absence of one. Which result depends on how
+it ended: with an empty frontier, it is a proof that the instance has none,
+and with regions still pending at the iteration limit, it is a sampling
+failure. The primal column carries both, as `infeasible` and `no sample` --
+see the comment on INFEASIBLE.
 """
 
 import argparse
@@ -103,6 +110,33 @@ REFERENCE = ["Ref primal", "Ref dual"]
 CARRIED = RECORDED + REFERENCE
 
 EMPTY = "—"  # em dash: reads as "nothing here", unlike a blank cell
+
+# The two things a run can report in place of a primal bound, and they are not
+# the same thing at all -- which is the whole reason both exist.
+#
+# A search that never samples a feasible point ends one of two ways. If the
+# instance really has no feasible point, every region is eventually discarded
+# by the interval feasibility test (or fathomed by an exhaustive enumeration
+# that finds nothing) and the frontier *empties*: the search ran out of places
+# a solution could hide, which is a proof. If instead the instance is feasible
+# and only the point sampling keeps missing -- the usual fate of equality
+# constraints, whose feasible set the sampler has measure-zero odds of landing
+# on -- then no region is ever discarded, the frontier keeps growing, and the
+# run ends at its iteration limit with regions still pending.
+#
+# So the terminal state separates them, and the log states it outright: a
+# pending size of zero with no incumbent is INFEASIBLE, and a nonzero one is
+# NO_SAMPLE. Neither is a number and neither is ever compared as one: the first
+# is a claim about the instance rather than a value the objective attains, and
+# the second is a claim about the run.
+INFEASIBLE = "infeasible"
+NO_SAMPLE = "no sample"
+
+# Ranked, because they share the primal column with each other and with real
+# bounds, and something has to say which of two runs the row keeps. A feasible
+# point outranks a proof there is none (they contradict, and the point is the
+# thing you can hold); a proof outranks a run that merely didn't find one.
+PRIMAL_RANK = {NO_SAMPLE: 1, INFEASIBLE: 2}
 
 
 def die(message):
@@ -460,7 +494,14 @@ def build_row(measured, carried):
 
 def render(rows, corpus, measured_at, reference_at=None, stale=()):
     parsed = [r for r in rows if r["Parses"] == "yes"]
-    solved = [r for r in parsed if r["Best primal"] != EMPTY]
+    # An outcome is not a bound, so it is not counted as one: a row that found
+    # nothing to attain has not been solved, and folding it into the solved
+    # count would make the search look better the more instances it failed to
+    # find a point in.
+    solved = [r for r in parsed
+              if r["Best primal"] not in (EMPTY, INFEASIBLE, NO_SAMPLE)]
+    infeasible = [r for r in parsed if r["Best primal"] == INFEASIBLE]
+    unsampled = [r for r in parsed if r["Best primal"] == NO_SAMPLE]
     bounded = [r for r in parsed if r["Best dual"] != EMPTY]
     referenced = [r for r in rows if r["Ref primal"] != EMPTY or r["Ref dual"] != EMPTY]
 
@@ -480,7 +521,10 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
                f"**{len(parsed)}** parse ({100.0 * len(parsed) / max(len(rows), 1):.1f}%), "
                f"**{len(rows) - len(parsed)}** rejected")
     out.append(f"- Bounds recorded: **{len(solved)}** with a primal bound, "
-               f"**{len(bounded)}** with a dual bound")
+               f"**{len(bounded)}** with a dual bound"
+               + (f", **{len(infeasible)}** shown infeasible" if infeasible else "")
+               + (f", **{len(unsampled)}** with no feasible point sampled"
+                  if unsampled else ""))
     out.append("")
     out.append("## Reading the table")
     out.append("")
@@ -495,6 +539,38 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("proved. Equal bounds mean the instance was solved to tolerance. Each has")
     out.append("its own `@` column, the commit it was found at, because the two rarely")
     out.append("improve in the same run.")
+    out.append("")
+    out.append("**Best primal** holds two things that are not bounds, for the two ways")
+    out.append("a run can find no feasible point at all. They are not the same result")
+    out.append("and the run says which:")
+    out.append("")
+    out.append("| Cell | Meaning |")
+    out.append("| --- | --- |")
+    out.append(f"| `{INFEASIBLE}` | the frontier emptied: every region was discarded by "
+               "the interval feasibility test or fathomed by an exhaustive enumeration "
+               "that found nothing, so no feasible point exists to be found |")
+    out.append(f"| `{NO_SAMPLE}` | the run stopped at its iteration limit with regions "
+               "still pending, having never sampled a feasible point; the instance may "
+               "well be feasible and the sampler simply missing, which is the ordinary "
+               "outcome for equality constraints |")
+    out.append("")
+    out.append("The difference is the terminal state, not a judgement call. An")
+    out.append("infeasible instance runs out of places a solution could hide, so given")
+    out.append("iterations enough it *ends*; a sampler that keeps missing keeps")
+    out.append("splitting regions instead, and can only ever end by running out of")
+    out.append("iterations. `record` reads the pending count off the log's summary and")
+    out.append("writes whichever applies.")
+    out.append("")
+    out.append("Neither is compared as a number. Any feasible point displaces both,")
+    out.append(f"whatever its objective value -- against `{INFEASIBLE}` that is a")
+    out.append("contradiction rather than an improvement, and `record` says so, keeping")
+    out.append("the point because a point is the half of the pair that can be checked.")
+    out.append(f"`{INFEASIBLE}` displaces `{NO_SAMPLE}`, being the stronger claim, and")
+    out.append("never the reverse. The `@`, `iters` and `policy` columns beside them")
+    out.append("describe the run that got there, and matter more here than for a bound:")
+    out.append(f"`{NO_SAMPLE}` is a statement about a policy and a length of search, so")
+    out.append("it is displaced by the same outcome from a *longer* run, which says")
+    out.append("strictly more -- the one cell in this table where a longer run wins.")
     out.append("")
     out.append("**Ref primal / Ref dual** are MINLPLib's own published bounds for the")
     out.append("instance, the best any solver has reported to them, in the same sense as")
@@ -512,6 +588,13 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("or `Best dual` past `Ref primal`, is a claim that contradicts the")
     out.append("literature: a bug here, or a bound recorded against the wrong row.")
     out.append("`record` says so when it writes one.")
+    out.append("")
+    out.append(f"They settle an `{INFEASIBLE}` the same way, and it is the one entry")
+    out.append("here they can settle outright. A published `Ref primal` *is* a feasible")
+    out.append("point, so it says the search lost one; an infinite `Ref dual` says")
+    out.append(f"MINLPLib found the instance infeasible too. (`{NO_SAMPLE}` claims")
+    out.append("nothing about the instance, so there is nothing for them to settle.)")
+    out.append("Both are reported when the row is written.")
     out.append("")
     out.append("These are downloaded, not measured -- a `refresh` neither re-fetches nor")
     out.append("clears them -- and they are only as current as the date in the header.")
@@ -572,7 +655,11 @@ def render(rows, corpus, measured_at, reference_at=None, stale=()):
     out.append("configuration cannot lose ground. The count is scraped from the log's")
     out.append("`iter` lines and the policy from its `PARAMS` line; `--iters` and")
     out.append("`--policy` set them by hand, which is the only way to record either")
-    out.append("alongside a manual `--primal`/`--dual`. A `-dirty` suffix on a hash")
+    out.append("alongside a manual `--primal`/`--dual`. A run that found no feasible")
+    out.append("point is classified from the same log, by the pending count in its")
+    out.append(f"summary; `--infeasible` records an `{INFEASIBLE}` by hand, and a log")
+    out.append("that reports regions still pending refuses it.")
+    out.append("A `-dirty` suffix on a hash")
     out.append("means a **build input** was uncommitted, so the number is not")
     out.append("reproducible from that hash alone -- the shape is pinned but the code")
     out.append("that ran is not. Both commands stop and list those files before")
@@ -685,6 +772,25 @@ ITER_RE = re.compile(r"^iter (?P<n>\d+):", re.MULTILINE)
 # other two fields don't already say.
 PARAMS_RE = re.compile(r"^PARAMS\t(?P<fields>\S.*)$", re.MULTILINE)
 
+# How many regions the search still had when it stopped, from the summary the
+# driver prints just above the RESULT line. Paired with `primal=none` this is
+# the whole discriminator between the two ways of finding no feasible point:
+# zero means the frontier emptied, nonzero means the run stopped with places
+# left to look.
+#
+# Preferred to the driver's "Search space exhausted" notice, which is printed
+# on exactly this branch and says the same thing, but is a sentence rather than
+# an interface. The notice is kept as a fallback only, for a log too old or too
+# truncated to carry the summary.
+PENDING_RE = re.compile(r"^Pending size: (?P<n>\d+)$", re.MULTILINE)
+
+# Two words, because the sentence after them has already been reworded once:
+# the old form went on "...with no feasible point sampled; either the problem
+# is infeasible or point sampling never satisfied the constraints", hedging
+# between the two outcomes this tool now separates. Logs of both vintages are
+# on disk and both mean the frontier emptied, which is all this is asked.
+EXHAUSTED_RE = re.compile(r"^Search space exhausted", re.MULTILINE)
+
 # The experimental-override keys gams_solve's `overrides=` field can list, and
 # the flag that sets each -- deliberately the same word, so the mapping is
 # just spelling. Only ever appended to a scraped policy cell; an ordinary
@@ -727,8 +833,23 @@ def scrape_policy(text):
     return cell
 
 
+def primal_outcome(primal, pending, said_exhausted):
+    """What a run with no primal bound found: INFEASIBLE, NO_SAMPLE, or None.
+
+    None when the log does not say -- no summary line and no exhaustion notice,
+    which is a log from a build before either existed. The two outcomes are far
+    enough apart that guessing between them is worse than recording neither.
+    """
+    if primal is not None:
+        return None
+    if pending is not None:
+        return INFEASIBLE if pending == 0 else NO_SAMPLE
+    return INFEASIBLE if said_exhausted else None
+
+
 def scrape_log(text):
-    """Pull the last RESULT line, and the iteration count that produced it.
+    """Pull the last RESULT line, the iteration count that produced it, and
+    how the search ended if it ended with no feasible point.
 
     The last, not the first: a log may hold several runs appended, and the
     most recent one is the one being recorded. The iteration count is taken
@@ -740,9 +861,9 @@ def scrape_log(text):
     fitting in the root launch) yields None, which records as "no count" and
     not as zero.
 
-    The policy is windowed the same way, and for the same reason: gams_solve
-    prints it before its own search, so the PARAMS line inside the window is
-    the one belonging to this run and not to the run before it.
+    The policy and the terminal summary are windowed the same way, and for the
+    same reason: gams_solve prints both around its own search, so the lines
+    inside the window belong to this run and not to the run before it.
     """
     matches = list(RESULT_RE.finditer(text))
     if not matches:
@@ -752,8 +873,22 @@ def scrape_log(text):
     start = matches[-2].end() if len(matches) > 1 else 0
     window = text[start:m.start()]
     iters = [int(i["n"]) for i in ITER_RE.finditer(window)]
-    return m["sense"], parse_number(m["primal"]), parse_number(m["dual"]), \
-        (max(iters) if iters else None), scrape_policy(window)
+    pendings = [int(p["n"]) for p in PENDING_RE.finditer(window)]
+    primal = parse_number(m["primal"])
+    pending = pendings[-1] if pendings else None
+    said_exhausted = EXHAUSTED_RE.search(window) is not None
+    # Both readings of the same run, and they cannot disagree unless the driver
+    # has changed under this tool: the notice is printed on exactly the branch
+    # the summary reports as empty. Said rather than resolved -- whichever one
+    # is now wrong, the other is not automatically right.
+    if said_exhausted and pending:
+        print(f"warning: the log says the search space was exhausted but also "
+              f"reports {pending} pending region(s); the summary is believed "
+              f"and this is recorded as a sampling failure, but one of the two "
+              f"lines is now wrong", file=sys.stderr)
+    return m["sense"], primal, parse_number(m["dual"]), \
+        (max(iters) if iters else None), scrape_policy(window), \
+        primal_outcome(primal, pending, said_exhausted)
 
 
 def better(kind, sense, new, old):
@@ -774,6 +909,13 @@ def cheaper(new_iters, old_iters):
     return new_iters is not None and (old_iters is None or new_iters < old_iters)
 
 
+def longer(new_iters, old_iters):
+    """The reverse, for `no sample`: there the iteration count is not the cost
+    of a result but the extent of the search that failed to produce one, so the
+    longer run is the stronger statement and the one worth keeping."""
+    return new_iters is not None and (old_iters is None or new_iters > old_iters)
+
+
 REF_TOL = 1e-6
 
 
@@ -785,6 +927,10 @@ def contradictions(sense, row):
     `Ref primal`. Either would mean a bound this solver cannot actually
     justify -- an infeasible point counted as a solution, a relaxation that cut
     off the optimum, or a log recorded against the wrong instance.
+
+    An `infeasible?` primal is checked the same way, against the same fact: a
+    published primal bound is a feasible point, and a feasible point is exactly
+    what that cell claims does not exist.
 
     Compared with a relative slack, because both sides are rounded: MINLPLib
     publishes about ten significant figures and this table stores twelve, and a
@@ -801,6 +947,15 @@ def contradictions(sense, row):
         return 0.0 if math.isinf(value) else REF_TOL * max(1.0, abs(value))
 
     out = []
+    if row["Best primal"] == INFEASIBLE and ref_primal is not None \
+            and math.isfinite(ref_primal):
+        # They hold a feasible point with that value, so the space this search
+        # emptied was not empty: the exhaustion is a lost point (sampling that
+        # never satisfied an equality, or a pruning bug), not a property of the
+        # instance.
+        out.append(f"is recorded as `{INFEASIBLE}`, but MINLPLib publishes a "
+                   f"primal bound {fmt(ref_primal)}, so a feasible point "
+                   f"exists")
     if primal is not None and ref_dual is not None:
         if sign * primal < sign * ref_dual - slack(ref_dual):
             out.append(f"primal {fmt(primal)} is past MINLPLib's dual bound "
@@ -853,7 +1008,16 @@ def cmd_record(args):
 
     if args.log is not None:
         text = sys.stdin.read() if str(args.log) == "-" else Path(args.log).read_text()
-        log_sense, primal, dual, iters, policy = scrape_log(text)
+        log_sense, primal, dual, iters, policy, outcome = scrape_log(text)
+        if args.infeasible:
+            # An assertion about a run the log describes, so the log gets to
+            # refuse it: a nonzero pending size is the run saying it stopped
+            # with places left to look, which is not a proof of anything.
+            if outcome == NO_SAMPLE:
+                die("the log reports regions still pending, so this run hit "
+                    "its iteration limit rather than exhausting the search "
+                    "space; it does not show the instance is infeasible")
+            outcome = INFEASIBLE
         # An explicit --iters wins: the log's count is an inference from the
         # printed trace, and the caller may know better (a truncated log, or a
         # run whose trace was not captured).
@@ -875,8 +1039,16 @@ def cmd_record(args):
                 f"{row['Sense']}; is this log from a different instance?")
     else:
         primal, dual, iters, policy = args.primal, args.dual, args.iters, args.policy
-    if primal is None and dual is None:
-        die("nothing to record: pass --log, or --primal and/or --dual")
+        outcome = INFEASIBLE if args.infeasible else None
+    # A run that found no feasible point still found something out, so it is
+    # something to record even though both bounds may be absent.
+    if primal is not None and outcome is not None:
+        die("a run cannot both attain a primal bound and have found no "
+            "feasible point; drop --infeasible, or record the log that "
+            "actually says so")
+    if primal is None and dual is None and outcome is None:
+        die("nothing to record: pass --log, or --primal and/or --dual, or "
+            "--infeasible")
 
     sense = row["Sense"] if row["Sense"] != EMPTY else "min"
     commit = args.commit or current_commit()
@@ -891,81 +1063,159 @@ def cmd_record(args):
         confirm_dirty("this bound", args.yes)
 
     changed = []
-    for kind, value, value_col, commit_col, iters_col, policy_col in (
-        ("primal", primal, "Best primal", "Primal @", "Primal iters",
-         "Primal policy"),
-        ("dual", dual, "Best dual", "Dual @", "Dual iters", "Dual policy"),
+    conflicts = []
+    for kind, value, kind_outcome, value_col, commit_col, iters_col, \
+            policy_col in (
+        # Only the primal side carries an outcome: both outcomes are statements
+        # about whether a feasible point exists to attain a value, and the dual
+        # bound the same run printed is an ordinary bound either way -- on a
+        # search space that turned out to be empty, or on one it never finished
+        # searching.
+        ("primal", primal, outcome, "Best primal", "Primal @",
+         "Primal iters", "Primal policy"),
+        ("dual", dual, None, "Best dual", "Dual @", "Dual iters",
+         "Dual policy"),
     ):
-        old = parse_number(row[value_col])
+        old_cell = row[value_col]
+        old = parse_number(old_cell)
         old_iters = parse_iters(row[iters_col])
-        # Compared through fmt, not as floats: the stored cell has been
-        # rounded to the table's precision, so the run that produced it does
-        # not reproduce it bit for bit.
+        # What this run has to say about this bound, already in the table's own
+        # spelling, or None when it says nothing. Comparing cells rather than
+        # floats is what lets an outcome travel the same paths as a number
+        # without ever being arithmetic: it is equal to itself and to nothing
+        # else, and `better` never sees it because `value` is None.
+        new_cell = fmt(value) if value is not None else kind_outcome
         # A tie is decided at the table's precision, and before `better`,
         # because the stored cell was rounded on the way in: re-recording the
         # very same run can come back a rounding step tighter, which `better`
         # reads as an improvement. Left in that order, a longer run would
         # overwrite a shorter one's iteration count on a bound that did not
         # actually move.
-        tied = value is not None and old is not None and fmt(value) == fmt(old)
+        tied = new_cell is not None and new_cell == old_cell
+        # A feasible point displaces a proof there is none, and contradicts it:
+        # one of the two runs is wrong, and the point is the half of the pair
+        # that can be checked, so it is what the row keeps. `better` already
+        # takes it -- an outcome parses as no bound -- so this only has to be
+        # noticed, not enforced.
+        disproves = value is not None and old_cell == INFEASIBLE
         # The policy travels with the commit and the count, always: the three
         # together describe one run, and leaving a stale policy beside a new
         # bound would describe a run that never happened.
+        def take(note):
+            row[value_col] = new_cell
+            row[commit_col] = commit
+            row[iters_col] = fmt_iters(iters)
+            row[policy_col] = fmt_policy(policy)
+            changed.append(note)
+
         if args.replace:
             # Not a comparison at all: the recorded half of the row becomes
             # this run outright. A bound this run does not have clears rather
             # than survives -- the point of asking for a replace is that the
             # old numbers are no longer to be trusted, and a leftover bound
             # from a superseded commit is exactly what would be trusted.
-            row[value_col] = fmt(value)
-            keep = value is not None
-            row[commit_col] = commit if keep else EMPTY
-            row[iters_col] = fmt_iters(iters) if keep else EMPTY
-            row[policy_col] = fmt_policy(policy) if keep else EMPTY
-            if keep:
-                changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
-                               f"in {fmt_iters(iters)} iters (replaced)")
+            if new_cell is not None:
+                take(f"{kind} {old_cell} -> {new_cell} "
+                     f"in {fmt_iters(iters)} iters (replaced)")
             else:
-                changed.append(f"{kind} {fmt(old)} -> cleared, this run "
+                row[value_col] = EMPTY
+                row[commit_col] = EMPTY
+                row[iters_col] = EMPTY
+                row[policy_col] = EMPTY
+                changed.append(f"{kind} {old_cell} -> cleared, this run "
                                f"reported none (replaced)")
-        elif args.force and value is not None:
-            row[value_col] = fmt(value)
-            row[commit_col] = commit
-            row[iters_col] = fmt_iters(iters)
-            row[policy_col] = fmt_policy(policy)
-            changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
-                           f"in {fmt_iters(iters)} iters (forced)")
+        elif args.force and new_cell is not None:
+            take(f"{kind} {old_cell} -> {new_cell} "
+                 f"in {fmt_iters(iters)} iters (forced)")
+        elif tied and new_cell == NO_SAMPLE:
+            # The one cell where a longer run is the better record. `no sample`
+            # is bounded by the search that produced it -- it says the sampler
+            # failed for that many iterations -- so a run that failed for more
+            # of them says strictly more, and one that gave up sooner says
+            # less. Every other cell reads the opposite way, which is why this
+            # is not `cheaper`.
+            if longer(iters, old_iters):
+                take(f"{kind} {new_cell} again, and for longer, "
+                     f"{fmt_iters(old_iters)} -> {fmt_iters(iters)} iters")
+            else:
+                changed.append(f"{kind} {new_cell} again in "
+                               f"{fmt_iters(iters)} iters, no longer than "
+                               f"{fmt_iters(old_iters)}, kept")
         elif tied:
             if cheaper(iters, old_iters):
-                row[commit_col] = commit
-                row[iters_col] = fmt_iters(iters)
-                row[policy_col] = fmt_policy(policy)
-                changed.append(f"{kind} {fmt(value)} matched in fewer iters, "
-                               f"{fmt_iters(old_iters)} -> {fmt_iters(iters)}")
+                # Reaching the same cell sooner is progress for an exhausted
+                # search too: the space was emptied in fewer iterations.
+                take(f"{kind} {new_cell} matched in fewer iters, "
+                     f"{fmt_iters(old_iters)} -> {fmt_iters(iters)}")
             else:
-                changed.append(f"{kind} {fmt(value)} matched in "
+                changed.append(f"{kind} {new_cell} matched in "
                                f"{fmt_iters(iters)} iters, not fewer than "
                                f"{fmt_iters(old_iters)}, kept")
         elif better(kind, sense, value, old):
-            row[value_col] = fmt(value)
-            row[commit_col] = commit
-            row[iters_col] = fmt_iters(iters)
-            row[policy_col] = fmt_policy(policy)
-            changed.append(f"{kind} {fmt(old)} -> {fmt(value)} "
-                           f"in {fmt_iters(iters)} iters")
-        elif value is not None:
-            changed.append(f"{kind} {fmt(value)} not better than {fmt(old)}, kept")
+            take(f"{kind} {old_cell} -> {new_cell} in {fmt_iters(iters)} iters"
+                 + (f" (a feasible point, so the row's `{INFEASIBLE}` was wrong)"
+                    if disproves else ""))
+            if disproves:
+                conflicts.append(
+                    f"a run recorded `{INFEASIBLE}` here, so one of the two is "
+                    f"wrong: either that search dropped a region holding this "
+                    f"point, or this point is not feasible")
+        elif new_cell in PRIMAL_RANK:
+            # Neither cell is a number, so `better` has nothing to compare and
+            # the rank decides: a proof of infeasibility displaces a run that
+            # merely failed to sample, and nothing displaces a real bound.
+            if PRIMAL_RANK[new_cell] > PRIMAL_RANK.get(old_cell, 0) and old is None:
+                take(f"{kind} {old_cell} -> {new_cell} in "
+                     f"{fmt_iters(iters)} iters")
+            elif old is not None and new_cell == INFEASIBLE:
+                # The mirror of `disproves`, decided the other way round for
+                # the same reason: the point already recorded is the half that
+                # can be checked, so it stays and the proof is reported.
+                changed.append(f"{kind} search space exhausted with no "
+                               f"feasible point, but {old_cell} was recorded "
+                               f"before, kept")
+                conflicts.append(
+                    f"this run exhausted the search space, which says no "
+                    f"feasible point exists, but {old_cell} is recorded as one; "
+                    f"either this search dropped a region or that bound is not "
+                    f"a feasible point")
+            else:
+                changed.append(f"{kind} {new_cell} says less than "
+                               f"{old_cell}, kept")
+        elif new_cell is not None:
+            changed.append(f"{kind} {new_cell} not better than {old_cell}, kept")
 
     ordered = sorted(rows.values(), key=lambda r: r["Instance"])
     args.status.write_text(
         render(ordered, args.corpus, measured_at, read_reference_at(args.status)))
     print(f"{name} ({sense}): " + "; ".join(changed))
 
+    # Two runs of this solver disagreeing about whether a feasible point
+    # exists, which the row cannot show because it keeps only one of them.
+    for message in conflicts:
+        print(f"warning: {name}: {message}", file=sys.stderr)
+
     # Checked against the row as written, not against this run's numbers, so a
     # bound that was kept rather than taken is still measured against the
     # literature. Reported after the write: the row is what it is, and burying
     # a contradiction by refusing to record it only hides the thing worth
     # seeing.
+    if row["Best primal"] == INFEASIBLE:
+        # The one claim in this table that a reference bound can *support*
+        # rather than merely fail to contradict, and the row cannot show it:
+        # MINLPLib records an infeasible instance as an infinite dual bound,
+        # which reads as a very weak bound unless you know the convention.
+        ref_dual = parse_number(row["Ref dual"])
+        sign = -1.0 if sense == "max" else 1.0
+        if ref_dual is not None and sign * ref_dual == math.inf:
+            print(f"note: {name} MINLPLib's dual bound is infinite too, which "
+                  f"is how it records an instance known to be infeasible",
+                  file=sys.stderr)
+        elif ref_dual is None and row["Ref primal"] == EMPTY:
+            print(f"note: {name} MINLPLib publishes no bound of either kind, "
+                  f"so there is nothing to check `{INFEASIBLE}` against",
+                  file=sys.stderr)
+
     for message in improvements(sense, row):
         print(f"note: {name} {message} -- worth checking before believing",
               file=sys.stderr)
@@ -1062,6 +1312,13 @@ def main():
                              "'--policy=discrete --partition-num=7' for an "
                              "overridden run (default: scraped from --log's "
                              "PARAMS line)")
+    record.add_argument("--infeasible", action="store_true",
+                        help=f"record that the search emptied its frontier "
+                             f"with no feasible point, which the primal column "
+                             f"shows as `{INFEASIBLE}` (default: classified "
+                             f"from --log's pending count, which also tells it "
+                             f"apart from `{NO_SAMPLE}`; needed only to record "
+                             f"one without a log)")
     record.add_argument("--commit", help="override the recorded hash "
                                          "(default: current HEAD; also "
                                          "suppresses the dirty-tree "
