@@ -518,6 +518,12 @@ public:
   // The capacity shrink is required rather than cosmetic: capacity_bytes()
   // counts capacity, so a vector that never gave any back would sit above the
   // budget line forever and re-trigger compaction on every later iteration.
+  //
+  // It shrinks to 2 * n_keep rather than to n_keep so the survivors can absorb
+  // n_keep more insertions before the vector doubles -- which is the whole of
+  // the amortisation, and which puts a constraint on n_keep that only the
+  // caller can honour: the budget has to hold this capacity *and* the doubling
+  // to 4 * n_keep that ends the interval. See compact_keep_count.
   template<typename OnEvict>
   void compact(std::size_t n_keep, OnEvict&& on_evict)
   {

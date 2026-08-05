@@ -121,12 +121,47 @@ inline std::size_t resolve_host_budget(std::size_t requested)
 }
 
 /**
+ * @brief Whether the host structures have reached `budget_bytes`.
+ *
+ * `>=`, not `>`, and that is load-bearing rather than a rounding preference:
+ * compact_keep_count sizes the frontier so a compacted vector's capacity lands
+ * exactly on the room the budget leaves after one doubling, so a strict `>`
+ * would wave that doubling through and only notice after the *next* one -- at
+ * twice the budget.
+ *
+ * A budget of 0 means unbudgeted (resolve_host_budget), and nothing is ever
+ * over it.
+ */
+inline bool over_host_budget(std::size_t live_bytes, std::size_t budget_bytes)
+{
+  return budget_bytes != 0 && live_bytes >= budget_bytes;
+}
+
+/**
  * @brief How many frontier nodes to keep when compacting under `budget`.
  *
- * Half the nodes the budget can hold once the live history has taken its
- * share, so the frontier oscillates in [n_keep, 2 * n_keep] and compaction
- * runs about once per n_keep insertions -- the amortisation the batching
- * argument rests on.
+ * A *quarter* of the nodes the budget can hold once the live history has taken
+ * its share -- not the half this returned until measurement showed what half
+ * costs. `frontier_bytes` charges the backing vector's capacity (§3.3) and
+ * `compact` leaves a capacity of `2 * n_keep` behind, so keeping half the room
+ * handed back a frontier whose capacity *alone* was the whole room: the next
+ * iteration's history entry put the total back over the budget, and compaction
+ * ran again. Every iteration, evicting one fan-out each time, for an
+ * O(frontier) nth_element and a full backing-vector copy apiece. Measured on
+ * sporttournament10 at a 256 MiB cap: 0.6 s per post-budget iteration against
+ * 0.009 s for the search itself, and 475 compactions over 600 iterations where
+ * the interval below predicts one per ~50 (measured after the fix: 10).
+ *
+ * A quarter restores the amortisation the batching argument rests on:
+ *
+ *     after a compaction    capacity 2 * n_keep = room / 2   strictly under
+ *     n_keep insertions on  capacity 4 * n_keep = room       at the budget
+ *
+ * so node count oscillates in [n_keep, 2 * n_keep], capacity in
+ * [room / 2, room], and compaction runs once per n_keep insertions with the
+ * peak allocation still exactly the budget and no more. The `>=` in
+ * over_host_budget is the other half of this: the trip has to fire on a
+ * capacity that lands *on* the room, because the next doubling is past it.
  *
  * Floored at 1: a history that has eaten the whole budget leaves no room to
  * divide, and the caller's job then is to stop, not to empty the queue. It
@@ -138,7 +173,7 @@ inline std::size_t compact_keep_count(std::size_t budget_bytes,
                                       std::size_t node_bytes)
 {
   std::size_t const room = budget_bytes - std::min(budget_bytes, history_bytes);
-  return std::max<std::size_t>(1, room / (2 * node_bytes));
+  return std::max<std::size_t>(1, room / (4 * node_bytes));
 }
 
 /**

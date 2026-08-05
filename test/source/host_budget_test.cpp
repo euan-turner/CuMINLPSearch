@@ -25,6 +25,7 @@ using cuminlp::compact_keep_count;
 using cuminlp::DropAccounting;
 using cuminlp::FinalBounds;
 using cuminlp::finalise_bounds;
+using cuminlp::over_host_budget;
 using cuminlp::StopReason;
 using cuminlp::search::CompositionInterval;
 using cuminlp::search::IntervalHistory;
@@ -441,12 +442,54 @@ TEST_CASE("an emptied frontier with viable drops is not infeasible",
 
 // ---------------------------------------------------------------- §8.5
 
-TEST_CASE("n_keep is half the nodes the budget can hold", "[budget][8.5]")
+TEST_CASE("n_keep is a quarter of the nodes the budget can hold",
+          "[budget][8.5]")
 {
-  // 1000 bytes of room for 10-byte nodes is 100 nodes, so the frontier is
-  // halved to 50 and then has room to double back into the budget.
-  CHECK(compact_keep_count(2000, 1000, 10) == 50);
-  CHECK(compact_keep_count(2000, 0, 10) == 100);
+  // 1000 bytes of room for 10-byte nodes is 100 nodes: keep 25, leaving a
+  // capacity of 50, which doubles to 100 -- exactly the room -- 25 insertions
+  // later. A quarter, not a half, because what is charged is the capacity
+  // compact() leaves behind and the doubling that follows it.
+  CHECK(compact_keep_count(2000, 1000, 10) == 25);
+  CHECK(compact_keep_count(2000, 0, 10) == 50);
+}
+
+TEST_CASE("a compaction leaves room to grow back into", "[budget][8.5]")
+{
+  // The re-trigger this sizing exists to avoid: with n_keep at half the room,
+  // compact() left a capacity equal to the whole room, so the next iteration's
+  // history entry put the total back over the budget and compaction ran again
+  // immediately -- and on every iteration after that.
+  constexpr std::size_t budget = 2000;
+  constexpr std::size_t node_bytes = 10;
+  constexpr std::size_t history = 400;
+  constexpr std::size_t room = budget - history;  // 160 nodes
+
+  std::size_t const n_keep = compact_keep_count(budget, history, node_bytes);
+  CHECK(n_keep == 40);
+
+  // Immediately after a compaction, and still after the history has grown:
+  // strictly under, so the check does not re-trip on the next iteration.
+  CHECK_FALSE(over_host_budget(2 * n_keep * node_bytes + history, budget));
+  CHECK_FALSE(over_host_budget(2 * n_keep * node_bytes + history + 64, budget));
+
+  // The trip comes when the vector doubles, n_keep insertions later, and the
+  // peak allocation is the budget rather than anything past it.
+  CHECK(over_host_budget(4 * n_keep * node_bytes + history, budget));
+  CHECK(4 * n_keep * node_bytes <= room);
+}
+
+TEST_CASE("the budget is reached at exactly the budget", "[budget][8.5]")
+{
+  // `>=`: compact_keep_count aims the post-doubling capacity *at* the room, so
+  // a strict `>` would let that doubling through and notice only at the next
+  // one, with twice the budget allocated.
+  CHECK(over_host_budget(1000, 1000));
+  CHECK(over_host_budget(1001, 1000));
+  CHECK_FALSE(over_host_budget(999, 1000));
+
+  // 0 is unbudgeted, and nothing is ever over it.
+  CHECK_FALSE(over_host_budget(0, 0));
+  CHECK_FALSE(over_host_budget(1u << 30, 0));
 }
 
 TEST_CASE("n_keep floors at one when the history crowds out the frontier",
@@ -498,6 +541,35 @@ TEST_CASE("a compaction gives the capacity back", "[budget][8.5]")
 
   CHECK(q.capacity_bytes() < before);
   CHECK(q.capacity_bytes() <= 20 * sizeof(Node));
+}
+
+TEST_CASE("a compacted frontier absorbs n_keep insertions before it grows",
+          "[budget][8.5]")
+{
+  // The other end of the same property, on the queue rather than in the
+  // arithmetic: the capacity compact() leaves has to be enough for a whole
+  // compaction interval's worth of children, or the driver is back to paying
+  // an O(frontier) compaction every iteration.
+  constexpr std::size_t n_keep = 40;
+  Queue q(1);
+  for (std::size_t i = 0; i < 500; ++i) {
+    q.enqueue(node(static_cast<double>(i)));
+  }
+  q.compact(n_keep, [](const Node&) {});
+  REQUIRE(q.size() == n_keep);
+
+  std::size_t const cap_after = q.capacity();
+  REQUIRE(cap_after >= 2 * n_keep);
+
+  for (std::size_t i = 0; i < n_keep; ++i) {
+    q.enqueue(node(-1.0 - static_cast<double>(i)));
+  }
+  CHECK(q.size() == 2 * n_keep);
+  CHECK(q.capacity() == cap_after);  // the point: no doubling in between
+
+  // ... and the one after that is what trips the budget again.
+  q.enqueue(node(-1000.0));
+  CHECK(q.capacity() > cap_after);
 }
 
 // ---------------------------------------------------------------- reporting

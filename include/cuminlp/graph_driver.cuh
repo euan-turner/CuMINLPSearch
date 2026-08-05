@@ -443,8 +443,8 @@ public:
         // Once per iteration, after the children are in: a per-enqueue check
         // would put a branch in the hot loop to catch an overshoot that is
         // bounded by one fan-out of 40-byte nodes anyway.
-        if (host_budget != 0
-            && pending.capacity_bytes() + history.live_bytes() > host_budget)
+        if (over_host_budget(pending.capacity_bytes() + history.live_bytes(),
+                             host_budget))
         {
           if (!compacting) {
             // The default. Nothing is discarded, so the bracket below is the
@@ -477,7 +477,7 @@ public:
                     << before << " to " << pending.size() << " regions ("
                     << live << " of " << host_budget << " bytes live)\n";
 
-          if (live > host_budget) {
+          if (over_host_budget(live, host_budget)) {
             // Live history alone crowds out the frontier, or one box is simply
             // too big to hold. Either way there is nothing left to give back, so
             // stop -- with the bracket, the frontier and the dropped floor all
