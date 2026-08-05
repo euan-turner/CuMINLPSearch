@@ -4,19 +4,26 @@
 #include <cstddef>
 #include <vector>
 
+#include "cuminlp/backend/cost_model.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/saturating_arith.hpp"
 
-// Split out of graph_replay.cuh: these four functions are plain templated
-// C++ over Problem<T>/FanOutSpec, with no CUDA type or kernel among them, but
+// Split out of graph_replay.cuh: these functions are plain templated C++ over
+// Problem<T>/FanOutSpec, with no CUDA type or kernel among them, but
 // graph_replay.cuh also holds real __global__/__device__ kernels and
 // <cub/cub.cuh>, so it cannot be #included by a host-only .cpp translation
 // unit (a plain host compiler doesn't know what __global__ means). Moving
-// them here -- pure code motion, no behaviour change -- lets
-// policy_catalogue.hpp's resolver reuse the exact scan graph_replay.cuh's own
-// auto-fitting used, from a test target that needs no GPU. graph_replay.cuh
-// includes this header for its own use of these functions.
+// them here lets policy_catalogue.hpp's resolver reuse the exact scan
+// graph_replay.cuh's own auto-fitting used, from a test target that needs no
+// GPU.
+//
+// The shape enumeration below is now generic over a
+// backend::RegionCostModel rather than over a value type and a buffer count
+// (design/MODULE_REFACTOR.md §5.5): what a region costs is the backend's
+// answer, and asking for it as four coefficients is what lets this scan run
+// against hand-written numbers in a host-only test. The graph backend's own
+// coefficients live in backend/graph/cost.hpp.
 namespace cuminlp::dag
 {
 
@@ -68,57 +75,12 @@ std::size_t buffer_node_count(const Problem<T>& problem)
   return count;
 }
 
-/// Bytes one element of a V-valued graph costs: one V per buffer-bearing
-/// node, plus feasible[] (1 byte) and obj_lb/obj_ub/masked_ub (T each). The
-/// interval graph is the expensive one, at sizeof(cu::interval<T>) per node
-/// against the point and exact graphs' sizeof(T).
-template<typename T, typename V>
-std::size_t element_bytes(std::size_t n_buffers)
-{
-  return detail::saturating_mul(n_buffers, sizeof(V)) + 1 + 3 * sizeof(T);
-}
-
-/**
- * @brief Device bytes a solve holds at once for one Composition producing
- *        `n_regions` regions.
- *
- * The sum of the graphs GraphDriver caches for that Composition: the point
- * graph at `sample_points` elements per region, the interval graph at one,
- * and the exact graph at one when `enumerable`. All three genuinely coexist
- * -- a Composition takes the exact path only when the box's live variables
- * fit in the slots it filled, so the same Composition is reached both ways
- * on any problem with more variables than slots.
- *
- * Saturating throughout, for the reason composition_fan_out is: with
- * partition_num a runtime value `n_regions` can arrive already at SIZE_MAX,
- * and a wrapped total would read as comfortably in budget.
- */
-template<typename T>
-std::size_t composition_footprint_bytes(std::size_t n_regions,
-                                        std::size_t sample_points,
-                                        std::size_t n_buffers,
-                                        bool enumerable)
-{
-  std::size_t const per_point = element_bytes<T, T>(n_buffers);
-  std::size_t total = detail::saturating_mul(
-      detail::saturating_mul(n_regions, sample_points), per_point);
-  total = detail::saturating_add(
-      total,
-      detail::saturating_mul(n_regions,
-                             element_bytes<T, cu::interval<T>>(n_buffers)));
-  if (enumerable) {
-    total = detail::saturating_add(
-        total, detail::saturating_mul(n_regions, per_point));
-  }
-  return total;
-}
-
 /**
  * @brief The most device memory any Composition of at most `cap` slots can
  *        cost, over every box the search could ever reach.
  *
  * The quantity a cap has to be fitted against, and the reason this is not
- * simply `composition_footprint_bytes` of one shape: with `cap` slots and a
+ * simply `cost.bundle_bytes` of one shape: with `cap` slots and a
  * problem of these kind counts there are many reachable Compositions, they
  * differ by orders of magnitude in region count, and the *root's* is not the
  * widest.
@@ -155,14 +117,14 @@ std::size_t composition_footprint_bytes(std::size_t n_regions,
  * every width up to `cap`), which is what lets the scan below stop at the
  * first cap that doesn't fit.
  */
-template<typename T>
-std::size_t worst_composition_footprint(std::size_t cap,
-                                        std::size_t n_binary,
-                                        std::size_t n_integer,
-                                        std::size_t n_continuous,
-                                        std::size_t n_buffers,
-                                        const FanOutSpec& fan_out,
-                                        std::size_t sample_points)
+inline std::size_t worst_composition_footprint(
+    std::size_t cap,
+    std::size_t n_binary,
+    std::size_t n_integer,
+    std::size_t n_continuous,
+    const backend::RegionCostModel& cost,
+    const FanOutSpec& fan_out,
+    std::size_t sample_points)
 {
   std::size_t const integer_width =
       std::max(fan_out.partition_num(), fan_out.enumerate_cap());
@@ -180,9 +142,8 @@ std::size_t worst_composition_footprint(std::size_t cap,
     // No continuous slot in the first `s` of that ordering means the shape is
     // fully enumerable and pays for the exact graph too.
     bool const enumerable = s <= n_integer || n_continuous == 0;
-    worst = std::max(worst,
-                     composition_footprint_bytes<T>(
-                         widest, sample_points, n_buffers, enumerable));
+    worst = std::max(
+        worst, cost.bundle_bytes(widest, sample_points, enumerable));
 
     // The all-discrete shape is a separate maximum rather than a special case
     // of the one above: it is narrower whenever continuous slots exist, but
@@ -191,8 +152,7 @@ std::size_t worst_composition_footprint(std::size_t cap,
       discrete = detail::saturating_mul(
           discrete, s <= n_integer ? integer_width : std::size_t {2});
       worst = std::max(worst,
-                       composition_footprint_bytes<T>(
-                           discrete, sample_points, n_buffers, true));
+                       cost.bundle_bytes(discrete, sample_points, true));
     }
   }
   return worst;
@@ -210,35 +170,33 @@ std::size_t worst_composition_footprint(std::size_t cap,
  * root -- see worst_composition_footprint for why those differ and why the
  * root is not the binding case.
  *
- * Takes the variable-kind counts and buffer count directly, rather than a
- * `Problem<T>`, so it can be driven from a `PolicyProfile`'s already-computed
- * `ProblemProfile` counts with no `Problem` in hand at all -- that's what
- * makes the resolver a pure function of counts plus calibration. The
- * `Problem<T>` overload below is the convenience wrapper every existing
- * caller keeps using.
+ * Takes the variable-kind counts and a cost model directly, rather than a
+ * `Problem<T>`, so it can be driven from a `ProblemProfile`'s already-computed
+ * counts with no `Problem` and no backend instance in hand at all -- that's
+ * what makes the resolver a pure function of counts, calibration and the
+ * backend's four coefficients.
  */
-template<typename T>
-std::size_t auto_max_cycle_size(std::size_t n_binary,
-                                std::size_t n_integer,
-                                std::size_t n_continuous,
-                                std::size_t n_buffers,
-                                const FanOutSpec& fan_out,
-                                std::size_t sample_points,
-                                std::size_t budget,
-                                std::size_t ceiling)
+inline std::size_t auto_max_cycle_size(std::size_t n_binary,
+                                       std::size_t n_integer,
+                                       std::size_t n_continuous,
+                                       const backend::RegionCostModel& cost,
+                                       const FanOutSpec& fan_out,
+                                       std::size_t sample_points,
+                                       std::size_t budget,
+                                       std::size_t ceiling)
 {
   std::size_t const slots =
       std::min(ceiling, n_binary + n_integer + n_continuous);
 
   std::size_t best = 0;
   for (std::size_t cap = 1; cap <= slots; ++cap) {
-    if (worst_composition_footprint<T>(cap,
-                                       n_binary,
-                                       n_integer,
-                                       n_continuous,
-                                       n_buffers,
-                                       fan_out,
-                                       sample_points)
+    if (worst_composition_footprint(cap,
+                                    n_binary,
+                                    n_integer,
+                                    n_continuous,
+                                    cost,
+                                    fan_out,
+                                    sample_points)
         > budget)
     {
       break;
@@ -246,36 +204,6 @@ std::size_t auto_max_cycle_size(std::size_t n_binary,
     best = cap;
   }
   return best;
-}
-
-/// @copydoc auto_max_cycle_size(std::size_t,std::size_t,std::size_t,std::size_t,const FanOutSpec&,std::size_t,std::size_t,std::size_t)
-template<typename T>
-std::size_t auto_max_cycle_size(const Problem<T>& problem,
-                                const FanOutSpec& fan_out,
-                                std::size_t sample_points,
-                                std::size_t budget,
-                                std::size_t ceiling)
-{
-  std::size_t n_binary = 0;
-  std::size_t n_integer = 0;
-  std::size_t n_continuous = 0;
-  for (VarKind kind : problem.var_kinds) {
-    if (kind == VarKind::Binary) {
-      ++n_binary;
-    } else if (kind == VarKind::Integer) {
-      ++n_integer;
-    } else {
-      ++n_continuous;
-    }
-  }
-  return auto_max_cycle_size<T>(n_binary,
-                                n_integer,
-                                n_continuous,
-                                buffer_node_count(problem),
-                                fan_out,
-                                sample_points,
-                                budget,
-                                ceiling);
 }
 
 }  // namespace cuminlp::dag

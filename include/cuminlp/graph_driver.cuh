@@ -21,6 +21,7 @@
 #include "cuminlp/errors.hpp"
 #include "cuminlp/graph_replay.cuh"
 #include "cuminlp/host_budget.hpp"
+#include "cuminlp/policy_catalogue.hpp"
 #include "cuminlp/search.hpp"
 
 namespace cuminlp
@@ -324,22 +325,22 @@ public:
             ? find_exact_graphs(assignment.composition)
             : nullptr;
 
+        backend::Region<T> const region {box, assignment};
+
         if (eg != nullptr) {
           // Every live dimension is enumerated, so this launch's ArgMin is the
           // true best value over the remaining subtree, not just a bound --
           // fold into GUB_ and fathom, no children to enqueue.
-          eg->exact.set_domain(box, assignment.var_ids);
-          eg->exact.launch(/*stream=*/0);
-          if (eg->exact.has_candidate()) {
-            double const val = static_cast<double>(eg->exact.candidate());
+          auto const exact = eg->exact.enumerate(region);
+          if (exact.found) {
+            double const val = static_cast<double>(exact.value);
             if (val < GUB_) {
               GUB_ = val;
-              auto witness = eg->exact.candidate_point();
-              best_point_.assign(witness.begin(), witness.end());
+              best_point_.assign(exact.point.begin(), exact.point.end());
             }
           }
           std::cout << "iter " << iter_idx_ << ": fully enumerated and fathomed ("
-                    << eg->exact.n_regions() << " points), GUB = " << GUB_
+                    << eg->exact.n_points() << " points), GUB = " << GUB_
                     << '\n';
           continue;
         }
@@ -349,21 +350,18 @@ public:
 
         // Best sampled feasible value from this domain; iter_idx_ salts the
         // sampler so revisited/sibling boxes draw fresh points.
-        g.point.set_domain(box, assignment.var_ids, iter_idx_);
-        g.point.launch(/*stream=*/0);
-        double cand = static_cast<double>(g.point.candidate());
+        auto const drawn = g.point.sample(region, iter_idx_);
+        double cand = static_cast<double>(drawn.value);
         if (cand < GUB_) {
           GUB_ = cand;
-          auto witness = g.point.candidate_point();
-          best_point_.assign(witness.begin(), witness.end());
+          best_point_.assign(drawn.point.begin(), drawn.point.end());
         }
 
         // Interval analysis of sub-domains, then feasibility and GUB pruning
-        g.interval.set_domain(box, assignment.var_ids);
-        g.interval.launch(/*stream=*/0);
-        auto obj_lb = g.interval.obj_lb();
-        auto feasible = g.interval.feasible();
-        for (std::size_t tid = 0; tid < g.interval.n_regions(); ++tid) {
+        auto const bounds = g.interval.bound(region);
+        auto obj_lb = bounds.obj_lb;
+        auto feasible = bounds.feasible;
+        for (std::size_t tid = 0; tid < bounds.n_regions; ++tid) {
           // feasible[tid] == 0: some constraint provably excludes its rhs over
           // this child. Sound to discard regardless of GUB_.
           if (!feasible[tid]) {
@@ -445,10 +443,16 @@ public:
           }
         }
       }
+    } catch (const backend::OverBudgetError& e) {
+      // A Composition first reached mid-run needs graphs that do not fit. The
+      // backend threw the facts; the costed advice is the resolver's to write
+      // (design/MODULE_REFACTOR.md §5.6), and is printed rather than swallowed.
+      std::cout << "Out of device memory mid-search: "
+                << explain_over_budget(e.facts(), profile_problem(problem))
+                << '\n';
+      stop_reason = StopReason::DeviceMemory;
+      stopped_early = true;
     } catch (const cuminlp::ResourceExhausted& e) {
-      // Costed advice from GraphReplay::build (a Composition first reached
-      // mid-run needs graphs that do not fit), so it is printed rather than
-      // swallowed.
       std::cout << "Out of device memory mid-search: " << e.what() << '\n';
       stop_reason = StopReason::DeviceMemory;
       stopped_early = true;

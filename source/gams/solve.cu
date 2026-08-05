@@ -35,6 +35,7 @@
 #include <string>
 #include <vector>
 
+#include "cuminlp/backend/graph/cost.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/dag_print.hpp"
@@ -446,6 +447,10 @@ auto main(int argc, char* argv[]) -> int
     return 2;
   }
 
+  // Hoisted out of the try only so the over-budget handler below can cost its
+  // advice against this model; empty if the failure predates profiling.
+  std::optional<cuminlp::ProblemProfile> profile_for_report;
+
   try {
     auto parsed = cuminlp::gams::parse_file<double>(positional[0]);
 
@@ -476,6 +481,7 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::ProblemProfile problem_profile =
         cuminlp::profile_problem(parsed.problem);
     problem_profile.objvar_kept = parsed.objvar_kept;
+    profile_for_report = problem_profile;
 
     cuminlp::SearchCalibration selection_calibration;
     selection_calibration.free_device_bytes = free_device_bytes();
@@ -512,8 +518,13 @@ auto main(int argc, char* argv[]) -> int
       source = "auto";
     }
 
-    cuminlp::ResolvedShape const resolved =
-        cuminlp::resolve(policy, problem_profile, selection_calibration);
+    // The backend's four cost coefficients, so the fit can be run before any
+    // graph exists (design/MODULE_REFACTOR.md §5.5).
+    cuminlp::ResolvedShape const resolved = cuminlp::resolve(
+        policy,
+        problem_profile,
+        selection_calibration,
+        cuminlp::backend::graph::cost_model_for<double>(parsed.problem));
 
     bool const any_override =
         partition_num || enumerate_cap || sample_points || max_cycle_size;
@@ -625,9 +636,19 @@ auto main(int argc, char* argv[]) -> int
   } catch (cuminlp::InvalidConfiguration const& e) {
     std::cerr << "configuration error: " << e.what() << '\n';
     return 2;
-  } catch (cuminlp::ResourceExhausted const& e) {
+  } catch (cuminlp::backend::OverBudgetError const& e) {
     // Its own exit code: unlike a bad flag value, the run was well-formed and
-    // the same command may succeed on a larger GPU.
+    // the same command may succeed on a larger GPU. The backend threw the
+    // facts; the report is written here, where the problem profile the advice
+    // is costed against is in hand (design/MODULE_REFACTOR.md §5.6).
+    std::cerr << "out of device memory: "
+              << (profile_for_report
+                      ? cuminlp::explain_over_budget(e.facts(),
+                                                     *profile_for_report)
+                      : std::string(e.what()))
+              << '\n';
+    return 3;
+  } catch (cuminlp::ResourceExhausted const& e) {
     std::cerr << "out of device memory: " << e.what() << '\n';
     return 3;
   }

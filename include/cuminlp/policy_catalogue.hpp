@@ -8,9 +8,11 @@
 #include <optional>
 #include <string_view>
 
+#include "cuminlp/backend/backend.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
+#include "cuminlp/format.hpp"
 #include "cuminlp/search_sizing.hpp"
  
 
@@ -83,15 +85,20 @@ struct PolicyProfile
 };
 
 /// The problem-side facts the resolver and classifier need, and nothing
-/// else: a pure function of this struct plus a SearchCalibration must
-/// reproduce a resolved shape.
+/// else: a pure function of this struct, a SearchCalibration and a
+/// backend::RegionCostModel must reproduce a resolved shape.
+///
+/// It holds nothing backend-shaped. `buffer_nodes` used to live here and was
+/// the one field that described an evaluator rather than a model; the
+/// resolver now gets that through the cost model instead
+/// (design/MODULE_REFACTOR.md §5.5), which is what lets profile_problem()
+/// depend on nothing but the Problem.
 struct ProblemProfile
 {
   std::size_t num_binary = 0;
   std::size_t num_integer = 0;
   std::size_t num_continuous = 0;
   std::size_t largest_integer_domain = 0;  ///< over the root box, 0 if none
-  std::size_t buffer_nodes = 0;  ///< dag::buffer_node_count(problem)
 
   /// True iff the objective variable survived lowering as a real continuous
   /// variable (neither the `=E=` nor the inequality elimination pass could
@@ -133,7 +140,6 @@ ProblemProfile profile_problem(const dag::Problem<T>& problem)
         break;
     }
   }
-  out.buffer_nodes = dag::buffer_node_count(problem);
   return out;
 }
 
@@ -172,6 +178,7 @@ namespace detail
 /// when set, enumerate_cap tracks whatever partition_num candidate is being
 /// tried during the scan itself, not a value fixed before the loop starts.
 inline std::size_t fit_at(const ProblemProfile& problem,
+                          const backend::RegionCostModel& cost,
                           std::size_t partition_num,
                           std::size_t enumerate_cap,
                           bool ec_follows_partition,
@@ -182,18 +189,16 @@ inline std::size_t fit_at(const ProblemProfile& problem,
   FanOutSpec const fan_out {partition_num,
                             ec_follows_partition ? partition_num
                                                  : enumerate_cap};
-  // The resolver is a pure function of counts and calibration, not of
-  // any live Problem<T> -- and gams_solve's own pipeline only ever solves in
-  // double, so double is what the footprint arithmetic is sized against
-  // here, the same as everywhere else in that pipeline.
-  return dag::auto_max_cycle_size<double>(problem.num_binary,
-                                          problem.num_integer,
-                                          problem.num_continuous,
-                                          problem.buffer_nodes,
-                                          fan_out,
-                                          sample_points,
-                                          budget,
-                                          ceiling);
+  // The resolver is a pure function of counts, calibration and the backend's
+  // cost coefficients -- not of any live Problem<T> or backend instance.
+  return dag::auto_max_cycle_size(problem.num_binary,
+                                  problem.num_integer,
+                                  problem.num_continuous,
+                                  cost,
+                                  fan_out,
+                                  sample_points,
+                                  budget,
+                                  ceiling);
 }
 
 }  // namespace detail
@@ -218,7 +223,8 @@ inline std::size_t fit_at(const ProblemProfile& problem,
  */
 inline ResolvedShape resolve(const PolicyProfile& profile,
                              const ProblemProfile& problem,
-                             const SearchCalibration& calibration)
+                             const SearchCalibration& calibration,
+                             const backend::RegionCostModel& cost)
 {
   std::size_t const target =
       std::min(problem.num_binary + problem.num_integer + problem.num_continuous,
@@ -258,7 +264,7 @@ inline ResolvedShape resolve(const PolicyProfile& profile,
       enumerate_cap = partition_num;
     }
     max_cycle_size = have_budget
-        ? detail::fit_at(problem, partition_num, enumerate_cap, false,
+        ? detail::fit_at(problem, cost, partition_num, enumerate_cap, false,
                          profile.sample_points, budget, target)
         : profile.cycle.pinned;
   } else if (!have_budget) {
@@ -280,12 +286,12 @@ inline ResolvedShape resolve(const PolicyProfile& profile,
     // -- it is the coverage phase 1 already bought, and phase 2 only asks
     // how wide partition_num can go while giving none of it back.
     std::size_t const achieved = detail::fit_at(
-        problem, 2, enumerate_cap, ec_follows_partition, profile.sample_points,
-        budget, target);
+        problem, cost, 2, enumerate_cap, ec_follows_partition,
+        profile.sample_points, budget, target);
     partition_num = 2;
     for (std::size_t q = 3; q <= partition_ceiling; ++q) {
       std::size_t const fitted = detail::fit_at(
-          problem, q, enumerate_cap, ec_follows_partition,
+          problem, cost, q, enumerate_cap, ec_follows_partition,
           profile.sample_points, budget, target);
       if (fitted < achieved) {
         break;
@@ -313,6 +319,105 @@ inline ResolvedShape resolve(const PolicyProfile& profile,
   // floors, the same way a hand-typed --partition-num/--enumerate-cap would.
   FanOutSpec {shape.partition_num, shape.enumerate_cap};
   return shape;
+}
+
+/**
+ * @brief Explain a build that did not fit: where the size came from, and
+ *        which knob to turn.
+ *
+ * The advice half of what the backend used to compose itself
+ * (design/MODULE_REFACTOR.md §5.6). The region count is a *product* over
+ * slots, so an out-of-budget request is usually out by orders of magnitude
+ * and the raw byte figure alone tells a caller nothing actionable. This shows
+ * the multiplication that produced it, then does the arithmetic the caller
+ * would otherwise have to: the widest slot cap that would actually fit.
+ *
+ * That last part is the useful half, and it is why this lives here rather
+ * than in the backend. It is costed against the whole *problem*, not against
+ * prefixes of the composition that happened to fail: on a problem with both
+ * binaries and continuous variables the failing composition's cheap prefix
+ * (binaries at fan-out 2) is not what a cap of that size buys further down
+ * the tree, where the resolved binaries have handed their slots to continuous
+ * variables at `partition_num` each. And it charges every role the solve
+ * holds for a composition at once, not the one that overflowed: an exact
+ * graph overflowing at one element per region must not recommend a cap at
+ * which the sampler, at `sample_points` elements per region, overflows in
+ * turn. Those are the two ways this advice was wrong before it was a
+ * resolver's job (RUNTIME_SHAPE.md §6.3, §6.4).
+ *
+ * `solve_samples_per_region` is the solve-wide setting rather than what the
+ * failing role itself drew: the size that failed is one fact, and what the
+ * recommendation must be costed against is another.
+ */
+inline std::string explain_over_budget(const backend::OverBudget& over,
+                                       const ProblemProfile& problem)
+{
+  std::string msg = over.role + " needs "
+      + detail::format_bytes(over.needed_bytes) + " of device memory, but only "
+      + detail::format_bytes(over.budget_bytes) + " is available.\n";
+
+  // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)".
+  msg += "  composition: " + std::to_string(over.composition.size())
+      + " live slot(s)";
+  for (int k = 0; k < 4; ++k) {
+    auto const kind = static_cast<SlotKind>(k);
+    std::size_t slots = 0;
+    for (SlotKind s : over.composition) {
+      if (s == kind) {
+        ++slots;
+      }
+    }
+    if (slots > 0) {
+      msg += "\n    " + std::to_string(slots) + " x " + slot_kind_name(kind)
+          + " (fan-out " + std::to_string(slot_fan_out(kind, over.fan_out))
+          + " each)";
+    }
+  }
+
+  msg += "\n  -> " + detail::format_count(over.n_regions) + " regions";
+  if (over.elements_per_region > 1) {
+    msg += " x " + std::to_string(over.elements_per_region) + " sample points";
+  }
+  msg += "\n  x " + detail::format_bytes(over.bytes_per_element)
+      + " per element (" + over.element_breakdown + ")"
+      + "\n  = " + detail::format_bytes(over.needed_bytes) + '\n';
+
+  std::size_t const best_slots =
+      dag::auto_max_cycle_size(problem.num_binary,
+                               problem.num_integer,
+                               problem.num_continuous,
+                               over.cost,
+                               over.fan_out,
+                               over.solve_samples_per_region,
+                               over.budget_bytes,
+                               kMaxSlots);
+
+  if (best_slots > 0) {
+    std::size_t const best_bytes =
+        dag::worst_composition_footprint(best_slots,
+                                         problem.num_binary,
+                                         problem.num_integer,
+                                         problem.num_continuous,
+                                         over.cost,
+                                         over.fan_out,
+                                         over.solve_samples_per_region);
+    msg += "\n  Acting on " + std::to_string(best_slots)
+        + " variable(s) at a time instead of "
+        + std::to_string(over.composition.size())
+        + " keeps every composition the search can reach -- point, interval"
+          " and exact graphs together -- within "
+        + detail::format_bytes(best_bytes)
+        + ": try --max-cycle-size=" + std::to_string(best_slots) + '\n';
+  } else {
+    msg += "\n  Even a single slot does not fit, so the per-element cost is "
+           "the problem rather than the slot count: this Problem needs "
+        + detail::format_bytes(over.bytes_per_element) + " per region for its "
+        + over.element_inventory + "\n";
+  }
+  msg +=
+      "  Lowering --partition-num / --enumerate-cap shrinks each slot's "
+      "fan-out, which reduces the product too.";
+  return msg;
 }
 
 /// The roster: concrete, inspectable instances of the rule automatic

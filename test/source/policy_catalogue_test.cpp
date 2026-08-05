@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
+#include "cuminlp/backend/graph/cost.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
@@ -26,7 +27,22 @@ using cuminlp::PolicyProfile;
 using cuminlp::ProblemProfile;
 using cuminlp::ResolvedShape;
 using cuminlp::SearchCalibration;
+using cuminlp::backend::RegionCostModel;
 using cuminlp::dag::VarKind;
+
+namespace
+{
+
+// The CUDA-graph backend's cost coefficients, which is what the resolver used
+// to reach for through ProblemProfile::buffer_nodes
+// (design/MODULE_REFACTOR.md §5.5). Every fit below is priced against these.
+template<typename T>
+RegionCostModel graph_cost(const cuminlp::dag::Problem<T>& problem)
+{
+  return cuminlp::backend::graph::cost_model_for<T>(problem);
+}
+
+}  // namespace
 
 namespace
 {
@@ -99,7 +115,6 @@ TEST_CASE("profile_problem reads nvs09's ten [3, 9] integers",
   CHECK(profile.num_integer == 10);
   CHECK(profile.num_continuous == 0);
   CHECK(profile.largest_integer_domain == 7);  // [3, 9] has 7 integer points
-  CHECK(profile.buffer_nodes == cuminlp::dag::buffer_node_count(problem));
   CHECK_FALSE(profile.objvar_kept);  // profile_problem never sets this
 }
 
@@ -114,7 +129,8 @@ TEST_CASE("CoverDomains clamps enumerate_cap to the problem's largest domain",
 
   SearchCalibration calibration;
   calibration.free_device_bytes = 64ull * 1024 * 1024 * 1024;  // 64 GiB
-  ResolvedShape const shape = cuminlp::resolve(discrete, profile, calibration);
+  ResolvedShape const shape =
+      cuminlp::resolve(discrete, profile, calibration, graph_cost(problem));
   CHECK(shape.enumerate_cap == 7);
 }
 
@@ -132,7 +148,7 @@ TEST_CASE(
   // only rises once q > 7. Picking the budget as exactly the footprint at cap
   // 7 (rather than a guessed round number) pins the boundary precisely,
   // regardless of nvs09's actual buffer-node count.
-  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(problem);
+  RegionCostModel const cost = graph_cost(problem);
   auto const regions = [](std::size_t slots)
   {
     std::size_t r = 1;
@@ -141,10 +157,10 @@ TEST_CASE(
     }
     return r;
   };
-  std::size_t const footprint_at_7 = cuminlp::dag::composition_footprint_bytes<double>(
-      regions(7), discrete.sample_points, n_buffers, /*enumerable=*/true);
-  std::size_t const footprint_at_8 = cuminlp::dag::composition_footprint_bytes<double>(
-      regions(8), discrete.sample_points, n_buffers, /*enumerable=*/true);
+  std::size_t const footprint_at_7 = cost.bundle_bytes(
+      regions(7), discrete.sample_points, /*enumerable=*/true);
+  std::size_t const footprint_at_8 = cost.bundle_bytes(
+      regions(8), discrete.sample_points, /*enumerable=*/true);
   REQUIRE(footprint_at_8 > footprint_at_7);  // sanity: charge does rise past 7
 
   SearchCalibration calibration;
@@ -154,7 +170,8 @@ TEST_CASE(
       static_cast<double>(footprint_at_7) / cuminlp::auto_budget_fraction
       + 1024.0);
 
-  ResolvedShape const shape = cuminlp::resolve(discrete, profile, calibration);
+  ResolvedShape const shape =
+      cuminlp::resolve(discrete, profile, calibration, cost);
 
   CHECK(shape.max_cycle_size == 7);  // coverage sacrificed: 7 of 10
   CHECK(shape.partition_num == 7);  // phase 2 widened 2 -> 7 for free
@@ -172,7 +189,11 @@ TEST_CASE("resolve falls back to the profile's pinned cycle size with no "
   problem.largest_integer_domain = 7;
 
   PolicyProfile const discrete = *cuminlp::lookup_policy("discrete");
-  ResolvedShape const shape = cuminlp::resolve(discrete, problem, no_budget);
+  // No budget to fit against, so the cost model never gets consulted; an
+  // all-zero one makes that explicit rather than incidental.
+  RegionCostModel const unused_cost;
+  ResolvedShape const shape =
+      cuminlp::resolve(discrete, problem, no_budget, unused_cost);
   CHECK(shape.partition_num == 2);  // the floor phase 1 itself starts from
   CHECK(shape.enumerate_cap == 7);  // CoverDomains doesn't need a budget
   CHECK(shape.max_cycle_size == 7);  // discrete's pinned fallback
@@ -181,7 +202,7 @@ TEST_CASE("resolve falls back to the profile's pinned cycle size with no "
   all_binary_problem.num_binary = 20;
   PolicyProfile const all_binary = *cuminlp::lookup_policy("all-binary");
   ResolvedShape const pinned_shape =
-      cuminlp::resolve(all_binary, all_binary_problem, no_budget);
+      cuminlp::resolve(all_binary, all_binary_problem, no_budget, unused_cost);
   CHECK(pinned_shape.partition_num == 2);
   CHECK(pinned_shape.enumerate_cap == 2);
   CHECK(pinned_shape.max_cycle_size == 20);  // all-binary's pinned fallback
@@ -200,7 +221,8 @@ TEST_CASE("a resolved shape's fields compose independently under override",
 
   SearchCalibration calibration;
   calibration.free_device_bytes = 64ull * 1024 * 1024 * 1024;
-  ResolvedShape shape = cuminlp::resolve(discrete, profile, calibration);
+  ResolvedShape shape =
+      cuminlp::resolve(discrete, profile, calibration, graph_cost(problem));
   std::size_t const original_enumerate_cap = shape.enumerate_cap;
 
   shape.partition_num += 1;

@@ -16,8 +16,15 @@ namespace cuminlp::examples
  * time, so an over-budget shape is a real possibility for anyone editing one
  * (see nvs09_problem.hpp, whose CYCLE_SIZE had to come down from 10 to 7).
  * Letting that escape main() gets the message printed by std::terminate,
- * buried under a core dump; ResourceExhausted's report is several lines of
- * arithmetic naming the parameter to lower, and is worth reading intact.
+ * buried under a core dump.
+ *
+ * What arrives here is the one-line summary a backend::OverBudgetError
+ * carries, not the costed report: writing that needs a ProblemProfile, which
+ * this wrapper has no way to hold (design/MODULE_REFACTOR.md §5.6). In
+ * practice nothing reaches it -- GraphDriver::solve catches an over-budget
+ * build inside its own loop and prints the full explanation there -- so this
+ * is the backstop for an allocation failure outside a solve, where the
+ * summary is all there is to say anyway.
  *
  * Exit codes match source/gams/solve.cu: 2 for a bad configuration, 3 for
  * out of device memory, 1 for anything else.

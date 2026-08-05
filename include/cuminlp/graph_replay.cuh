@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -19,6 +20,8 @@
 #include <cub/cub.cuh>
 #include <cuda/std/limits>
 
+#include "backend/backend.hpp"
+#include "backend/graph/cost.hpp"
 #include "composition_policy.hpp"
 #include "cuda_utils.cuh"
 #include "dag.hpp"
@@ -1525,11 +1528,25 @@ private:
 // advice in the first.
 // ---------------------------------------------------------------------------
 
-// buffer_node_count/element_bytes/composition_footprint_bytes/
-// auto_max_cycle_size used to be defined here. They moved to
-// search_sizing.hpp (included above) so a host-only translation unit can
-// reuse them without this file's __global__ kernels and <cub/cub.cuh> --
-// see that header's top comment.
+// buffer_node_count/auto_max_cycle_size used to be defined here; they moved
+// to search_sizing.hpp, and element_bytes to backend/graph/cost.hpp (both
+// included above), so a host-only translation unit can reuse them without
+// this file's __global__ kernels and <cub/cub.cuh> -- see those headers' top
+// comments.
+
+// Which of backend's three roles a (V, Exact) pair plays. The value type
+// already decided this -- an interval-valued graph bounds, a point-valued one
+// samples, and the deterministic point-valued one enumerates -- so naming the
+// role costs one alias and no branching: each instantiation inherits exactly
+// the interface it implements, and the compiler rejects any instantiation
+// that leaves a pure virtual unimplemented.
+template<typename T, typename V, bool Exact>
+using replay_role = std::conditional_t<
+    !std::is_same_v<V, T>,
+    backend::RegionBounder<T>,
+    std::conditional_t<Exact,
+                       backend::RegionEnumerator<T>,
+                       backend::RegionSampler<T>>>;
 
 // Owns the entire graph replay for a problem and value-type V (either T or
 // cu::interval<T>) This includes:
@@ -1544,7 +1561,7 @@ private:
 // instead of the sampling point graph's random-draw pair -- see
 // ExactGraphReplay/GraphBuilder.
 template<typename T, typename V, bool Exact = false>
-class GraphReplay
+class GraphReplay : public replay_role<T, V, Exact>
 {
   static constexpr bool is_point = std::is_same_v<V, T>;
 
@@ -1577,11 +1594,10 @@ public:
     return bytes_for(n_regions, sample_points, count_buffer_nodes(problem));
   }
 
-  // Bytes per element: one V per buffer-bearing node, plus feasible[] (1
-  // byte) and obj_lb/obj_ub/masked_ub (T each).
+  /// @copydoc cuminlp::backend::graph::element_bytes
   static std::size_t bytes_per_element(std::size_t n_buffers)
   {
-    return detail::saturating_mul(n_buffers, sizeof(V)) + 1 + 3 * sizeof(T);
+    return backend::graph::element_bytes<T, V>(n_buffers);
   }
 
   static std::size_t bytes_for(std::size_t n_regions,
@@ -1607,40 +1623,21 @@ public:
   }
 
   /**
-   * @brief Explain an over-budget build: where the size came from, and which
-   *        knob to turn.
+   * @brief The facts about a build that would not fit in its budget.
    *
-   * The region count is a *product* over slots, so an out-of-budget request
-   * is usually out by orders of magnitude and the raw byte figure alone tells
-   * a caller nothing actionable. This shows the multiplication that produced
-   * it, then does the arithmetic the caller would otherwise have to: the
-   * widest slot cap that would actually fit.
+   * Facts only: which role overflowed, how big it was, and what a byte of one
+   * element buys here. `config::explain_over_budget` turns these into the
+   * human report, including the "try --max-cycle-size=N" half that used to be
+   * computed from inside this class by calling the resolver's own scan -- the
+   * wrong direction of dependency, and the reason that advice was wrong twice
+   * (design/MODULE_REFACTOR.md §5.6, §2.6).
    *
-   * That last part is the useful half, and it is costed against the whole
-   * *problem*, not against prefixes of the composition that happened to fail.
-   * Truncating this composition is what made the suggestion unfollowable a
-   * second time over: on a problem with both binaries and continuous
-   * variables the failing composition's cheap prefix (binaries at fan-out 2)
-   * is not what a cap of that size buys further down the tree, where the
-   * resolved binaries have handed their slots to continuous variables at
-   * `partition_num` each. `dag::auto_max_cycle_size` charges the widest
-   * composition the search can still reach at each cap -- see
-   * search_sizing.hpp.
-   *
-   * It also charges composition_footprint_bytes -- every graph a solve holds
-   * for a composition at once -- not this graph alone. Scanning this graph
-   * alone is what made the suggestion unfollowable the *first* time: an exact
-   * graph overflowing at one element per region would recommend a cap at
-   * which the point graph, at `solve_sample_points` elements per region,
-   * overflowed in turn.
-   *
-   * Hence the two sample counts. `sample_points` is what *this* graph draws,
-   * and describes the size that failed; `solve_sample_points` is the
-   * solve-wide setting, and is what the recommendation has to be costed
-   * against. They differ exactly when this is not the point graph.
+   * `sample_points` is what *this* graph draws and describes the size that
+   * failed; `solve_sample_points` is the solve-wide setting, which is what
+   * the recommendation has to be costed against. They differ exactly when
+   * this is not the point graph.
    */
-  static std::string out_of_memory_report(
-      const Problem<T>& problem,
+  static backend::OverBudget over_budget_facts(
       const Composition& composition,
       const FanOutSpec& fan_out,
       std::size_t sample_points,
@@ -1649,92 +1646,24 @@ public:
       std::size_t budget,
       std::size_t solve_sample_points)
   {
-    std::size_t const n_regions = composition_fan_out(composition, fan_out);
-
-    std::string msg = std::string(graph_kind()) + " graph needs "
-        + detail::format_bytes(needed) + " of device memory, but only "
-        + detail::format_bytes(budget) + " is available.\n";
-
-    // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)".
-    msg += "  composition: " + std::to_string(composition.size()) + " live slot(s)";
-    for (int k = 0; k < 4; ++k) {
-      auto const kind = static_cast<SlotKind>(k);
-      std::size_t slots = 0;
-      for (SlotKind s : composition) {
-        if (s == kind) {
-          ++slots;
-        }
-      }
-      if (slots > 0) {
-        msg += "\n    " + std::to_string(slots) + " x " + slot_kind_name(kind)
-            + " (fan-out " + std::to_string(slot_fan_out(kind, fan_out))
-            + " each)";
-      }
-    }
-
-    msg += "\n  -> " + detail::format_count(n_regions) + " regions";
-    if (is_point && sample_points > 1) {
-      msg += " x " + std::to_string(sample_points) + " sample points";
-    }
-    msg += "\n  x " + detail::format_bytes(bytes_per_element(n_buffers))
-        + " per element (" + std::to_string(n_buffers)
-        + " DAG-node buffers of " + std::to_string(sizeof(V))
-        + " B, plus " + std::to_string(1 + 3 * sizeof(T))
-        + " B of per-element bookkeeping)"
-        + "\n  = " + detail::format_bytes(needed) + '\n';
-
-    // Report the widest cap that fits -- costed against every graph the solve
-    // would then hold, for the widest composition it could still reach at
-    // that cap, so that following the suggestion cannot fail a second time.
-    std::size_t n_binary = 0;
-    std::size_t n_integer = 0;
-    std::size_t n_continuous = 0;
-    for (VarKind kind : problem.var_kinds) {
-      if (kind == VarKind::Binary) {
-        ++n_binary;
-      } else if (kind == VarKind::Integer) {
-        ++n_integer;
-      } else {
-        ++n_continuous;
-      }
-    }
-
-    std::size_t const best_slots = auto_max_cycle_size<T>(n_binary,
-                                                          n_integer,
-                                                          n_continuous,
-                                                          n_buffers,
-                                                          fan_out,
-                                                          solve_sample_points,
-                                                          budget,
-                                                          kMaxSlots);
-
-    if (best_slots > 0) {
-      std::size_t const best_bytes =
-          worst_composition_footprint<T>(best_slots,
-                                         n_binary,
-                                         n_integer,
-                                         n_continuous,
-                                         n_buffers,
-                                         fan_out,
-                                         solve_sample_points);
-      msg += "\n  Acting on " + std::to_string(best_slots)
-          + " variable(s) at a time instead of "
-          + std::to_string(composition.size())
-          + " keeps every composition the search can reach -- point, interval"
-            " and exact graphs together -- within "
-          + detail::format_bytes(best_bytes)
-          + ": try --max-cycle-size=" + std::to_string(best_slots) + '\n';
-    } else {
-      msg +=
-          "\n  Even a single slot does not fit, so the per-element cost is "
-          "the problem rather than the slot count: this Problem needs "
-          + detail::format_bytes(bytes_per_element(n_buffers))
-          + " per region for its " + std::to_string(n_buffers) + " DAG nodes\n";
-    }
-    msg +=
-        "  Lowering --partition-num / --enumerate-cap shrinks each slot's "
-        "fan-out, which reduces the product too.";
-    return msg;
+    return backend::OverBudget {
+        .role = std::string(graph_kind()) + " graph",
+        .needed_bytes = needed,
+        .budget_bytes = budget,
+        .n_regions = composition_fan_out(composition, fan_out),
+        .elements_per_region = is_point ? sample_points : 1,
+        .bytes_per_element = bytes_per_element(n_buffers),
+        .element_breakdown = std::to_string(n_buffers)
+            + " DAG-node buffers of " + std::to_string(sizeof(V)) + " B, plus "
+            + std::to_string(1 + 3 * sizeof(T))
+            + " B of per-element bookkeeping",
+        .element_inventory = std::to_string(n_buffers) + " DAG nodes",
+        .cost = backend::graph::cost_model_for<T>(n_buffers),
+        .composition = composition,
+        .fan_out = fan_out,
+        .solve_samples_per_region = solve_sample_points,
+        .sampler_bytes = 0,
+    };
   }
 
   // `composition` fixes this replay's fan-out/shape for its whole lifetime;
@@ -1779,9 +1708,9 @@ public:
       budget_bytes = free_bytes;
     }
     if (needed > budget_bytes) {
-      throw cuminlp::ResourceExhausted(out_of_memory_report(
-          problem, composition, fan_out, replay.sample_points_, n_buffers,
-          needed, budget_bytes, sample_points));
+      throw backend::OverBudgetError(
+          over_budget_facts(composition, fan_out, replay.sample_points_,
+                            n_buffers, needed, budget_bytes, sample_points));
     }
 
     std::size_t const slot_count = replay.slot_count_;
@@ -2261,6 +2190,46 @@ public:
                   "cudaMemcpy");
   }
 
+  // ---- backend role interface (design/MODULE_REFACTOR.md §5.1) ----
+  //
+  // One call each, replacing set_domain + launch + six accessors: the split
+  // only ever existed so the driver could read several outputs off one
+  // launch, and a result struct of spans says that directly. Exactly one of
+  // the three is virtual in any instantiation -- `replay_role` picks which --
+  // so the other two are ordinary members that no vtable and no caller of
+  // that instantiation ever sees.
+  //
+  // Every span returned points into this instance's own host-side staging
+  // buffers and is valid until the next call on this instance.
+
+  backend::BoundResult<T> bound(const backend::Region<T>& region)
+  {
+    set_domain(region.box, region.assignment.var_ids);
+    launch(/*stream=*/0);
+    return backend::BoundResult<T> {feasible_host_, obj_lb_host_, n_regions_};
+  }
+
+  backend::CandidateResult<T> sample(const backend::Region<T>& region,
+                                     std::uint64_t salt)
+  {
+    set_domain(region.box, region.assignment.var_ids, salt);
+    launch(/*stream=*/0);
+    return candidate_result();
+  }
+
+  backend::CandidateResult<T> enumerate(const backend::Region<T>& region)
+  {
+    set_domain(region.box, region.assignment.var_ids);
+    launch(/*stream=*/0);
+    return candidate_result();
+  }
+
+  std::size_t n_samples() const { return n_elems_; }
+
+  /// Points one enumerate() evaluates. Equal to n_regions() by construction:
+  /// an exact graph holds one grid point per region.
+  std::size_t n_points() const { return n_elems_; }
+
   std::span<const unsigned char> feasible() const { return feasible_host_; }
 
   std::span<const T> obj_lb() const { return obj_lb_host_; }
@@ -2292,6 +2261,19 @@ public:
 
 private:
   GraphReplay() = default;
+
+  // The last launch's reduction, as backend::CandidateResult. `value` is the
+  // raw CUB output even when nothing feasible was found (numeric_limits<T>::
+  // max()), and `point` is the witness buffer regardless -- all-NaN in that
+  // case. Callers check `found` first; the driver's `cand < GUB_` guard is
+  // the same test by another name.
+  backend::CandidateResult<T> candidate_result() const
+  {
+    return backend::CandidateResult<T> {has_candidate(),
+                                        candidate_host_,
+                                        std::span<const T>(candidate_point_host_),
+                                        candidate_index_host_};
+  }
 
   void free_resources()
   {
@@ -2419,5 +2401,66 @@ using PointGraphReplay = GraphReplay<T, T>;
 // has a slot (see GraphDriver::solve()).
 template<typename T>
 using ExactGraphReplay = GraphReplay<T, T, /*Exact=*/true>;
+
+/**
+ * @brief The CUDA-graph backend, as a backend::RegionBackendFactory.
+ *
+ * The one place the three replay instantiations are named together, so that
+ * everything above it can ask for roles instead of for graph kinds
+ * (design/MODULE_REFACTOR.md §5.3).
+ *
+ * One build entry point rather than §5.3's two, because the sampler here is
+ * still composition-coupled: today's point graph subdivides exactly as the
+ * bounder does and then draws `samples_per_region` values inside each
+ * subregion. §5.2 makes the sampler a function of the problem alone, built
+ * once per solve; at that point it leaves the bundle for a `build_sampler`
+ * of its own and stops being charged per composition.
+ */
+template<typename T>
+class GraphBackendFactory : public backend::RegionBackendFactory<T>
+{
+public:
+  backend::BackendCapabilities capabilities() const override
+  {
+    // The exact graph is always available, and every sampler draw is a pure
+    // function of (box, var_ids, salt) -- see sample_hash, which holds no
+    // device-side RNG state between launches.
+    return backend::BackendCapabilities {/*exact_enumeration=*/true,
+                                         /*deterministic_sampling=*/true};
+  }
+
+  backend::RegionCostModel cost_model(const Problem<T>& problem) const override
+  {
+    return backend::graph::cost_model_for<T>(problem);
+  }
+
+  backend::SubdivisionBundle<T> build_subdivision(
+      const Problem<T>& problem,
+      const Composition& composition,
+      const FanOutSpec& fan_out,
+      const backend::BuildBudget& budget) const override
+  {
+    backend::SubdivisionBundle<T> bundle;
+    bundle.sampler =
+        std::make_unique<PointGraphReplay<T>>(PointGraphReplay<T>::build(
+            problem, composition, fan_out, budget.bytes,
+            budget.samples_per_region));
+    // samples_per_region reaches the bounder and enumerator only so their
+    // over-budget facts can cost a suggested cap against the sampler too;
+    // build() clamps their own allocation to one element per region
+    // regardless (GraphReplay::build, `is_point && !Exact`).
+    bundle.bounder =
+        std::make_unique<IntervalGraphReplay<T>>(IntervalGraphReplay<T>::build(
+            problem, composition, fan_out, budget.bytes,
+            budget.samples_per_region));
+    if (is_fully_enumerable(composition)) {
+      bundle.enumerator =
+          std::make_unique<ExactGraphReplay<T>>(ExactGraphReplay<T>::build(
+              problem, composition, fan_out, budget.bytes,
+              budget.samples_per_region));
+    }
+    return bundle;
+  }
+};
 
 }  // namespace cuminlp::dag

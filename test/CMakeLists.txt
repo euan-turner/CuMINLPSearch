@@ -169,3 +169,23 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 catch_discover_tests(cuminlp_graph_replay_test)
+
+# The backend role contract (design/MODULE_REFACTOR.md §12 stage 3): what any
+# RegionBackendFactory must satisfy, stated in source/backend_contract.hpp
+# against cuminlp::backend's abstract types alone, and run here against the
+# CUDA-graph backend. A second backend adds a target, not a test. Requires an
+# actual CUDA device.
+add_executable(cuminlp_backend_contract_test source/backend_contract_test.cu)
+target_link_libraries(
+    cuminlp_backend_contract_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_backend_contract_test PRIVATE cxx_std_20)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_backend_contract_test PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
+catch_discover_tests(cuminlp_backend_contract_test)

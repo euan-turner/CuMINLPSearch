@@ -14,6 +14,7 @@
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/graph_replay.cuh"
+#include "cuminlp/policy_catalogue.hpp"
 
 using cuminlp::Composition;
 using cuminlp::composition_fan_out;
@@ -375,12 +376,17 @@ TEST_CASE("An over-budget build reports the cause and a cap that would fit",
 
   FanOutSpec const fan_out {50};  // 50^4 = 6.25M regions
 
+  // The backend throws the facts and the resolver writes the report
+  // (design/MODULE_REFACTOR.md §5.6), so the assertions below are on
+  // explain_over_budget's output -- the same text, by its new author.
   std::string what;
+  std::string summary;
   try {
     IntervalGraphReplay<double>::build(p, comp, fan_out, /*budget=*/100000);
-    FAIL("expected ResourceExhausted");
-  } catch (const cuminlp::ResourceExhausted& e) {
-    what = e.what();
+    FAIL("expected OverBudgetError");
+  } catch (const cuminlp::backend::OverBudgetError& e) {
+    what = cuminlp::explain_over_budget(e.facts(), cuminlp::profile_problem(p));
+    summary = e.what();
   }
 
   INFO(what);
@@ -390,6 +396,12 @@ TEST_CASE("An over-budget build reports the cause and a cap that would fit",
   CHECK(what.find("6,250,000 regions") != std::string::npos);  // the product
   CHECK(what.find("--max-cycle-size=") != std::string::npos);  // the knob
   CHECK(what.find("--partition-num") != std::string::npos);  // the other knob
+
+  // what() alone stays factual: it names the role and the two byte figures,
+  // and nothing that needed a resolver to compute.
+  CHECK(summary.find("interval graph needs") != std::string::npos);
+  CHECK(summary.find("--max-cycle-size=") == std::string::npos);
+  CHECK(what.rfind(summary.substr(0, summary.size() - 1), 0) == 0);
 }
 
 TEST_CASE("The suggested cap is one the budget actually admits",
@@ -414,9 +426,9 @@ TEST_CASE("The suggested cap is one the budget actually admits",
   try {
     IntervalGraphReplay<double>::build(
         p, comp, fan_out, budget, solve_sample_points);
-    FAIL("expected ResourceExhausted");
-  } catch (const cuminlp::ResourceExhausted& e) {
-    what = e.what();
+    FAIL("expected OverBudgetError");
+  } catch (const cuminlp::backend::OverBudgetError& e) {
+    what = cuminlp::explain_over_budget(e.facts(), cuminlp::profile_problem(p));
   }
 
   auto const pos = what.find("--max-cycle-size=");
@@ -439,11 +451,9 @@ TEST_CASE("The suggested cap is one the budget actually admits",
 
   // And the combined figure the report quotes is the one the budget has to
   // admit, not any single graph's share of it.
-  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
-  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
+  CHECK(cuminlp::backend::graph::cost_model_for<double>(p).bundle_bytes(
             composition_fan_out(narrowed, fan_out),
             solve_sample_points,
-            n_buffers,
             cuminlp::is_fully_enumerable(narrowed))
         <= budget);
 }
@@ -466,10 +476,11 @@ TEST_CASE("auto_max_cycle_size picks a cap whose whole graph set fits",
   FanOutSpec const fan_out {7};
   std::size_t const sample_points = 5;
   std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
-  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
+  auto const cost = cuminlp::backend::graph::cost_model_for<double>(p);
 
   std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
-      p, fan_out, sample_points, budget, cuminlp::kMaxSlots);
+      /*n_binary=*/0, /*n_integer=*/10, /*n_continuous=*/0, cost, fan_out,
+      sample_points, budget, cuminlp::kMaxSlots);
   REQUIRE(cap >= 1);
   REQUIRE(cap <= 10);  // never more slots than the problem has variables
 
@@ -483,13 +494,9 @@ TEST_CASE("auto_max_cycle_size picks a cap whose whole graph set fits",
     }
     return r;
   };
-  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
-            regions(cap), sample_points, n_buffers, true)
-        <= budget);
+  CHECK(cost.bundle_bytes(regions(cap), sample_points, true) <= budget);
   if (cap < 10) {
-    CHECK(cuminlp::dag::composition_footprint_bytes<double>(
-              regions(cap + 1), sample_points, n_buffers, true)
-          > budget);
+    CHECK(cost.bundle_bytes(regions(cap + 1), sample_points, true) > budget);
   }
 }
 
@@ -517,10 +524,11 @@ TEST_CASE("auto_max_cycle_size charges the widest composition the search can "
   FanOutSpec const fan_out {64};
   std::size_t const sample_points = 5;
   std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
-  std::size_t const n_buffers = cuminlp::dag::buffer_node_count(p);
+  auto const cost = cuminlp::backend::graph::cost_model_for<double>(p);
 
   std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
-      p, fan_out, sample_points, budget, cuminlp::kMaxSlots);
+      /*n_binary=*/24, /*n_integer=*/0, /*n_continuous=*/22, cost, fan_out,
+      sample_points, budget, cuminlp::kMaxSlots);
   REQUIRE(cap >= 1);
 
   // The all-continuous composition of `cap` slots is reachable -- every
@@ -534,11 +542,9 @@ TEST_CASE("auto_max_cycle_size charges the widest composition the search can "
     }
     return r;
   };
-  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
-            continuous_regions(cap), sample_points, n_buffers, false)
+  CHECK(cost.bundle_bytes(continuous_regions(cap), sample_points, false)
         <= budget);
-  CHECK(cuminlp::dag::composition_footprint_bytes<double>(
-            continuous_regions(cap + 1), sample_points, n_buffers, false)
+  CHECK(cost.bundle_bytes(continuous_regions(cap + 1), sample_points, false)
         > budget);
 
   // And the all-binary composition, which is what the old scan charged, is
@@ -564,7 +570,10 @@ TEST_CASE("auto_max_cycle_size never exceeds kMaxSlots",
   p.set_objective(sum);
 
   std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
-      p,
+      /*n_binary=*/0,
+      /*n_integer=*/0,
+      /*n_continuous=*/200,
+      cuminlp::backend::graph::cost_model_for<double>(p),
       FanOutSpec {2},
       /*sample_points=*/1,
       std::numeric_limits<std::size_t>::max(),
