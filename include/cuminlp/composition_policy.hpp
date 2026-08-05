@@ -186,7 +186,7 @@ inline std::vector<std::size_t> slot_prefixes(const Composition& composition,
 // actually filled (checked separately, since that's a property of a box,
 // not of a Composition in isolation), this is exactly the condition under
 // which every child this Composition produces is a fully-resolved point --
-// see GraphDriver's use of ExactGraphReplay.
+// see SearchDriver's use of the backend's enumerator role.
 inline bool is_fully_enumerable(const Composition& composition)
 {
   for (SlotKind kind : composition) {
@@ -203,7 +203,7 @@ inline bool is_fully_enumerable(const Composition& composition)
 // Composition is fully enumerable (TEST_EXTENSION.md). Pure function of a
 // box's live-variable count and the Composition the policy chose for it, so
 // it's testable independent of the surrounding search loop (see
-// graph_driver.cuh).
+// search/driver.hpp).
 inline bool can_fathom_without_children(std::size_t live_count,
                                         const Composition& composition)
 {
@@ -214,7 +214,7 @@ inline bool can_fathom_without_children(std::size_t live_count,
 // the lifetime of a solve.
 //
 // The freezing is a *correctness* requirement, not a performance choice.
-// search::CompositionInterval::materialise reconstructs a node's box by
+// search::Node::materialise reconstructs a node's box by
 // re-invoking policy.choose() on the parent box and decoding sidx against
 // the fan-outs that produces. If choose() consulted live device state --
 // free memory, occupancy, queue depth -- then the assignment at enqueue time
@@ -244,7 +244,7 @@ inline constexpr std::size_t kMaxSlots = 64;
 // can change during a run (see SearchCalibration above).
 //
 // The policy also *owns* the FanOutSpec. This is deliberate: decoding a
-// node's box (search::CompositionInterval::materialise) needs both the
+// node's box (search::Node::materialise) needs both the
 // SlotAssignment and the fan-outs its sidx was encoded against, and reading
 // both off one object makes them impossible to disagree.
 //
@@ -252,7 +252,7 @@ inline constexpr std::size_t kMaxSlots = 64;
 // and each index a live (lb < ub) dimension (design/MODULE_REFACTOR.md §4.5)
 // -- GreedyCompositionPolicy satisfies this by construction (fill_binary/
 // fill_integer/fill_continuous each visit distinct vids and partition by
-// VarKind), and GraphDriver asserts it in debug builds.
+// VarKind), and SearchDriver asserts it in debug builds.
 template<typename T>
 class CompositionPolicy
 {
@@ -436,7 +436,7 @@ private:
 
 // True iff every var_id in `assignment` is unique and indexes a live
 // (lb < ub) dimension of `box` -- CompositionPolicy's contract (§4.5), a
-// debug-only check (see GraphDriver::solve()). GreedyCompositionPolicy
+// debug-only check (see SearchDriver::solve()). GreedyCompositionPolicy
 // satisfies it by construction; nothing asserted it before this.
 template<typename T>
 bool assignment_is_distinct_and_live(const SlotAssignment& assignment,

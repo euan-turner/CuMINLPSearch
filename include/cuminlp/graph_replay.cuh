@@ -99,7 +99,7 @@ __global__ void apply_slots_kernel(
 
 /**
  * @brief Deterministic counterpart, for a fully-enumerable Composition
- * (every slot IntegerEnumerate/BinaryEnumerate, GraphDriver's precondition
+ * (every slot IntegerEnumerate/BinaryEnumerate, SearchDriver's precondition
  * for using this pair): broadcasts each variable's exact point value
  * (parent_domain[vid].lb -- a non-live dimension is degenerate, so lb is
  * the exact point). Writes T rather than cu::interval<T>, so it plugs into
@@ -1516,7 +1516,7 @@ private:
 // These are free functions rather than GraphReplay members because the
 // quantity that actually decides whether a configuration runs is not any one
 // graph's footprint but the footprint of *every* graph a solve holds at once.
-// GraphDriver caches, per Composition it encounters, a point graph, an
+// BackendCache holds, per Composition the search encounters, a point graph, an
 // interval graph, and -- when the Composition is fully enumerable -- an exact
 // graph, and those are live simultaneously.
 //
@@ -2395,10 +2395,10 @@ using PointGraphReplay = GraphReplay<T, T>;
 // Deterministic evaluation over a fully-enumerable Composition: every region
 // is an exact grid point rather than a random sample, so its CUB ArgMin
 // reduction gives the true minimum objective over every point the
-// Composition enumerates -- not a bound, the answer. GraphDriver only builds
+// Composition enumerates -- not a bound, the answer. BackendCache only builds
 // and uses one of these for Compositions where is_fully_enumerable() holds,
 // and only dispatches to it for a node once every live variable in the box
-// has a slot (see GraphDriver::solve()).
+// has a slot (see SearchDriver::solve()).
 template<typename T>
 using ExactGraphReplay = GraphReplay<T, T, /*Exact=*/true>;
 
@@ -2438,22 +2438,27 @@ public:
       const Problem<T>& problem,
       const Composition& composition,
       const FanOutSpec& fan_out,
-      const backend::BuildBudget& budget) const override
+      const backend::BuildBudget& budget,
+      backend::RoleRequest roles) const override
   {
     backend::SubdivisionBundle<T> bundle;
-    bundle.sampler =
-        std::make_unique<PointGraphReplay<T>>(PointGraphReplay<T>::build(
-            problem, composition, fan_out, budget.bytes,
-            budget.samples_per_region));
+    if (roles.sampler) {
+      bundle.sampler =
+          std::make_unique<PointGraphReplay<T>>(PointGraphReplay<T>::build(
+              problem, composition, fan_out, budget.bytes,
+              budget.samples_per_region));
+    }
     // samples_per_region reaches the bounder and enumerator only so their
     // over-budget facts can cost a suggested cap against the sampler too;
     // build() clamps their own allocation to one element per region
     // regardless (GraphReplay::build, `is_point && !Exact`).
-    bundle.bounder =
-        std::make_unique<IntervalGraphReplay<T>>(IntervalGraphReplay<T>::build(
-            problem, composition, fan_out, budget.bytes,
-            budget.samples_per_region));
-    if (is_fully_enumerable(composition)) {
+    if (roles.bounder) {
+      bundle.bounder = std::make_unique<IntervalGraphReplay<T>>(
+          IntervalGraphReplay<T>::build(problem, composition, fan_out,
+                                        budget.bytes,
+                                        budget.samples_per_region));
+    }
+    if (roles.enumerator && is_fully_enumerable(composition)) {
       bundle.enumerator =
           std::make_unique<ExactGraphReplay<T>>(ExactGraphReplay<T>::build(
               problem, composition, fan_out, budget.bytes,

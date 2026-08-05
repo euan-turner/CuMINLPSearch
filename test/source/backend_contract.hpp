@@ -124,16 +124,35 @@ inline void check_backend_contract(
 
   // ---- bundle shape: a missing role is a capability, not a surprise ----
   backend::SubdivisionBundle<double> flat = factory.build_subdivision(
-      model.problem, subdividing.composition, fan_out, budget);
+      model.problem, subdividing.composition, fan_out, budget,
+      backend::RoleRequest::all());
   REQUIRE(flat.bounder != nullptr);
   REQUIRE(flat.sampler != nullptr);
   CHECK(flat.enumerator == nullptr);  // not fully enumerable
 
   backend::SubdivisionBundle<double> exact = factory.build_subdivision(
-      model.problem, enumerable.composition, fan_out, budget);
+      model.problem, enumerable.composition, fan_out, budget,
+      backend::RoleRequest::all());
   REQUIRE(exact.bounder != nullptr);
   REQUIRE(exact.sampler != nullptr);
   CHECK((exact.enumerator != nullptr) == caps.exact_enumeration);
+
+  // A role not asked for is not built. The driver reaches a Composition by
+  // one path or the other, and a backend that builds both anyway charges the
+  // device for graphs that iteration will not launch.
+  backend::SubdivisionBundle<double> const bound_only =
+      factory.build_subdivision(model.problem, enumerable.composition, fan_out,
+                                budget, backend::RoleRequest::subdividing());
+  CHECK(bound_only.bounder != nullptr);
+  CHECK(bound_only.sampler != nullptr);
+  CHECK(bound_only.enumerator == nullptr);
+
+  backend::SubdivisionBundle<double> const fathom_only =
+      factory.build_subdivision(model.problem, enumerable.composition, fan_out,
+                                budget, backend::RoleRequest::enumerating());
+  CHECK(fathom_only.bounder == nullptr);
+  CHECK(fathom_only.sampler == nullptr);
+  CHECK((fathom_only.enumerator != nullptr) == caps.exact_enumeration);
 
   // ---- bounder ----
   std::size_t const flat_regions =
@@ -231,8 +250,8 @@ inline void check_backend_contract(
   tiny.bytes = 1;
   tiny.samples_per_region = samples_per_region;
   try {
-    factory.build_subdivision(
-        model.problem, enumerable.composition, fan_out, tiny);
+    factory.build_subdivision(model.problem, enumerable.composition, fan_out,
+                              tiny, backend::RoleRequest::all());
     FAIL("a one-byte budget must not admit a build");
   } catch (const backend::OverBudgetError& e) {
     backend::OverBudget const& facts = e.facts();

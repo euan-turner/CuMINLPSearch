@@ -105,7 +105,7 @@ std::size_t buffer_node_count(const Problem<T>& problem)
  *    FanOutSpec invariant), so filling greedily by width maximises the
  *    product;
  *  - the widest *enumerable* shape -- integers then binaries, no continuous
- *    slot -- which pays for a third graph (the exact one GraphDriver caches
+ *    slot -- which pays for a third role (the enumerator BackendCache holds
  *    for a fully-enumerable Composition) that the first candidate may not.
  *
  * Every integer slot is charged max(partition_num, enumerate_cap), since a

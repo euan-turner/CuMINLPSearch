@@ -17,7 +17,7 @@ add_subdirectory(lib/cuinterval)
 
 # ---- Declare library ----
 
-# Header-only core (dag, graph_replay, graph_driver, search, ...) plus
+# Header-only core (dag, graph_replay, search/driver, search, ...) plus
 # cuinterval linkage and include dirs, shared by every driver and example
 # below. Holds no compiled sources of its own -- it isn't any one driver's
 # library, so it stays an interface target.
@@ -52,7 +52,7 @@ target_link_libraries(gams_report PRIVATE cuminlp::gams)
 
 target_compile_features(gams_report PRIVATE cxx_std_20)
 
-# Solves any parseable .gms through GraphDriver, with no per-instance code.
+# Solves any parseable .gms through SearchDriver, with no per-instance code.
 add_executable(gams_solve source/gams/solve.cu)
 
 target_link_libraries(gams_solve PRIVATE cuminlp::gams PRIVATE cuminlp::lib)
@@ -65,7 +65,7 @@ endif()
 
 # ---- Examples ----
 
-# Rosenbrock instance solved via GraphDriver -- the DAG/CUDA-graph-replay
+# Rosenbrock instance solved via SearchDriver -- the DAG/CUDA-graph-replay
 # evaluator.
 add_executable(graph_rosenbrock source/fixed_examples/graph_rosenbrock.cu)
 
@@ -78,7 +78,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # 10-point Morse cluster energy minimisation (MINLPLib ex8_6_2), solved via
-# GraphDriver with translational/rotational symmetry broken by fixing 6 of
+# SearchDriver with translational/rotational symmetry broken by fixing 6 of
 # the 30 coordinates.
 add_executable(graph_morse source/fixed_examples/graph_morse_cluster.cu)
 

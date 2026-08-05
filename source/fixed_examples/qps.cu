@@ -5,7 +5,8 @@
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/example_main.hpp"
-#include "cuminlp/graph_driver.cuh"
+#include "cuminlp/graph_replay.cuh"
+#include "cuminlp/search/driver.hpp"
 
 using cuminlp::dag::Cmp;
 using cuminlp::dag::Expr;
@@ -74,13 +75,15 @@ auto main(int argc, char* argv[]) -> int
         auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
             cuminlp::FanOutSpec {20},
             cuminlp::SearchCalibration {.max_cycle_size = 2});
+        auto backend =
+            std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
         if (problem == 212) {
           std::cout << "Ex. 2.1.2" << '\n';
-          cuminlp::GraphDriver<double> drv_212(policy, iters, 1e-6, 100);
+          cuminlp::SearchDriver<double> drv_212(policy, backend, iters, 1e-6, 100);
           drv_212.solve(problem_212());
         } else if (problem == 219) {
           std::cout << "Ex. 2.1.9" << '\n';
-          cuminlp::GraphDriver<double> drv_219(policy, iters, 1e-6, 100);
+          cuminlp::SearchDriver<double> drv_219(policy, backend, iters, 1e-6, 100);
           drv_219.solve(problem_219());
         }
       });

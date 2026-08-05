@@ -411,7 +411,7 @@ TEST_CASE("The suggested cap is one the budget actually admits",
   // number the report recommends and check a build at that cap succeeds.
   //
   // Checking only the graph that failed is what let a broken suggestion ship:
-  // GraphDriver holds a point, an interval and (when enumerable) an exact
+  // BackendCache holds a point, an interval and (when enumerable) an exact
   // graph for the same composition at once, so the report has to be costed
   // against all of them. Every kind is rebuilt below, and the point graph at
   // the *solve-wide* sample count -- the one that is not 1 -- is the case

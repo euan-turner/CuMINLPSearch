@@ -150,6 +150,33 @@ struct BuildBudget
 };
 
 /**
+ * @brief Which of a Composition's roles a build should actually produce.
+ *
+ * The driver reaches a Composition by the fathom path or by the subdividing
+ * path, never both in one iteration, and a role it did not ask for is device
+ * memory spent on something nothing will launch. So the request is explicit
+ * rather than implied by the composition: an unrequested role comes back
+ * null, and the caller's cache decides when to ask again.
+ *
+ * `sampler` disappears from this once §5.2 makes the sampler a function of
+ * the problem rather than of a composition.
+ */
+struct RoleRequest
+{
+  bool sampler = false;
+  bool bounder = false;
+  bool enumerator = false;
+
+  /// What the subdividing path needs: an incumbent and the bounds to prune by.
+  static RoleRequest subdividing() { return {true, true, false}; }
+
+  /// What the fathom path needs, and nothing else.
+  static RoleRequest enumerating() { return {false, false, true}; }
+
+  static RoleRequest all() { return {true, true, true}; }
+};
+
+/**
  * @brief Builds the roles for a problem, and prices them before they exist.
  *
  * `cost_model` is what makes the resolver possible: it answers "what would
@@ -169,12 +196,15 @@ public:
   virtual BackendCapabilities capabilities() const = 0;
   virtual RegionCostModel cost_model(const dag::Problem<T>& problem) const = 0;
 
-  /// Once per distinct Composition.
+  /// Once per distinct Composition, for the roles `roles` asks for. Roles it
+  /// does not ask for come back null; so does `enumerator` for a composition
+  /// that is not fully enumerable, or from a backend that cannot enumerate.
   virtual SubdivisionBundle<T> build_subdivision(
       const dag::Problem<T>& problem,
       const Composition& composition,
       const FanOutSpec& fan_out,
-      const BuildBudget& budget) const = 0;
+      const BuildBudget& budget,
+      RoleRequest roles) const = 0;
 };
 
 /**

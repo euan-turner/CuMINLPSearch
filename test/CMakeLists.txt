@@ -77,7 +77,7 @@ catch_discover_tests(cuminlp_dag_test)
 
 # Host-only: cuminlp::decode::slot_bounds (slot_decode.hpp) is a CUMINLP_HD
 # function that's a no-op host function outside __CUDACC__, and
-# CompositionInterval::materialise (search.hpp) has no CUDA dependency, so
+# search::Node::materialise (search.hpp) has no CUDA dependency, so
 # §3a/§3b/§4a's decode invariants don't need a CUDA device either.
 add_executable(cuminlp_decode_test source/decode_test.cpp)
 target_link_libraries(
@@ -94,7 +94,7 @@ catch_discover_tests(cuminlp_decode_test)
 # is deliberately device-free for exactly this reason -- the budget
 # arithmetic, the eviction order, the refcounted history GC and the
 # dropped-floor gating of the epilogue's claims are all decidable without a
-# GPU. Only their wiring into graph_driver.cuh is not.
+# GPU. Only their wiring into search/driver.hpp is not.
 add_executable(cuminlp_host_budget_test source/host_budget_test.cpp)
 target_link_libraries(
     cuminlp_host_budget_test

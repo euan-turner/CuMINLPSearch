@@ -5,7 +5,7 @@
 //
 // None of it needs a GPU. search.hpp deliberately includes only
 // cuinterval/interval.h, and host_budget.hpp is arithmetic on counts and
-// bounds -- the CUDA-side wiring (graph_driver.cuh) is the only part that
+// bounds -- the backend-side wiring is the only part that
 // cannot be reached from a plain host translation unit. See TEST_EXTENSION.md.
 #include <algorithm>
 #include <cmath>
@@ -20,6 +20,9 @@
 #include <cuinterval/interval.h>
 
 #include "cuminlp/search.hpp"
+// Not used below: included so a plain host compiler proves the search
+// layer names no CUDA type (design/MODULE_REFACTOR.md invariant 18, §3.1).
+#include "cuminlp/search/driver.hpp"
 
 using cuminlp::compact_keep_count;
 using cuminlp::DropAccounting;
@@ -27,7 +30,7 @@ using cuminlp::FinalBounds;
 using cuminlp::finalise_bounds;
 using cuminlp::over_host_budget;
 using cuminlp::StopReason;
-using cuminlp::search::CompositionInterval;
+using cuminlp::search::Node;
 using cuminlp::search::IntervalHistory;
 using cuminlp::search::IntervalPQueue;
 
@@ -41,12 +44,12 @@ bool feq(double a, double b)
   return !(a < b) && !(b < a);
 }
 
-using Node = CompositionInterval<double>;
-using Queue = IntervalPQueue<double, Node>;
+using Entry = Node<double>;
+using Queue = IntervalPQueue<double>;
 
-Node node(double lb, std::size_t depth = 1, std::size_t pidx = 1)
+Entry node(double lb, std::size_t depth = 1, std::size_t pidx = 1)
 {
-  return Node {
+  return Entry {
       .sidx = 0, .pidx = pidx, .depth = depth, .lb = lb, .slot_count = 1};
 }
 
@@ -79,7 +82,7 @@ TEST_CASE("compact keeps exactly the n_keep best elements", "[frontier][8.1]")
   std::sort(sorted.begin(), sorted.end());
 
   std::vector<double> evicted;
-  q.compact(n_keep, [&](const Node& e) { evicted.push_back(e.lb); });
+  q.compact(n_keep, [&](const Entry& e) { evicted.push_back(e.lb); });
 
   REQUIRE(q.size() == n_keep);
   CHECK(q.capacity() <= 2 * n_keep);
@@ -111,7 +114,7 @@ TEST_CASE("compact preserves count_viable for surviving regions",
   constexpr double gub = 10.0;
   REQUIRE(q.count_viable(gub) == 3);
 
-  q.compact(3, [](const Node&) {});
+  q.compact(3, [](const Entry&) {});
 
   CHECK(q.size() == 3);
   CHECK(q.count_viable(gub) == 3);
@@ -126,11 +129,11 @@ TEST_CASE("compact is a no-op when the frontier already fits",
   }
 
   std::size_t evictions = 0;
-  q.compact(3, [&](const Node&) { ++evictions; });
+  q.compact(3, [&](const Entry&) { ++evictions; });
   CHECK(evictions == 0);
   CHECK(q.size() == 3);
 
-  q.compact(99, [&](const Node&) { ++evictions; });
+  q.compact(99, [&](const Entry&) { ++evictions; });
   CHECK(evictions == 0);
   CHECK(q.size() == 3);
   CHECK(drain(q).size() == 3);
@@ -144,7 +147,7 @@ TEST_CASE("compact to a single element keeps the frontier minimum",
     q.enqueue(node(lb));
   }
 
-  q.compact(1, [](const Node&) {});
+  q.compact(1, [](const Entry&) {});
   REQUIRE(q.size() == 1);
   CHECK(feq(q.peek().lb, -1.5));
 }
@@ -164,7 +167,7 @@ TEST_CASE("eviction takes dominated regions before viable ones",
   }
 
   DropAccounting dropped;
-  q.compact(3, [&](const Node& e) { dropped.fold(e.lb, gub); });
+  q.compact(3, [&](const Entry& e) { dropped.fold(e.lb, gub); });
 
   // Every eviction was of a region the search had already dominated, so this
   // compaction cost the reported bound nothing at all.
@@ -183,7 +186,7 @@ TEST_CASE("among equal bounds the shallower region is evicted first",
   q.enqueue(node(1.0, /*depth=*/9));
 
   std::vector<std::size_t> evicted_depths;
-  q.compact(2, [&](const Node& e) { evicted_depths.push_back(e.depth); });
+  q.compact(2, [&](const Entry& e) { evicted_depths.push_back(e.depth); });
 
   REQUIRE(evicted_depths.size() == 1);
   CHECK(evicted_depths[0] == 2);
@@ -199,7 +202,7 @@ TEST_CASE("a viable eviction lowers the floor to its bound", "[frontier][8.2]")
   }
 
   DropAccounting dropped;
-  q.compact(2, [&](const Node& e) { dropped.fold(e.lb, gub); });
+  q.compact(2, [&](const Entry& e) { dropped.fold(e.lb, gub); });
 
   // The two worst survive nothing: both were still viable, so the floor drops
   // to the better of them.
@@ -519,13 +522,13 @@ TEST_CASE("frontier_bytes counts capacity rather than size", "[budget][8.5]")
 {
   Queue q(64);
   CHECK(q.size() == 0);
-  CHECK(q.capacity_bytes() >= 64 * sizeof(Node));
+  CHECK(q.capacity_bytes() >= 64 * sizeof(Entry));
 
   q.enqueue(node(1.0));
   CHECK(q.size() == 1);
   // Still the whole allocation: what the budget must account for is what was
   // allocated, not what is occupied.
-  CHECK(q.capacity_bytes() >= 64 * sizeof(Node));
+  CHECK(q.capacity_bytes() >= 64 * sizeof(Entry));
 }
 
 TEST_CASE("a compaction gives the capacity back", "[budget][8.5]")
@@ -536,10 +539,10 @@ TEST_CASE("a compaction gives the capacity back", "[budget][8.5]")
   }
   std::size_t const before = q.capacity_bytes();
 
-  q.compact(10, [](const Node&) {});
+  q.compact(10, [](const Entry&) {});
 
   CHECK(q.capacity_bytes() < before);
-  CHECK(q.capacity_bytes() <= 20 * sizeof(Node));
+  CHECK(q.capacity_bytes() <= 20 * sizeof(Entry));
 }
 
 TEST_CASE("a compacted frontier absorbs n_keep insertions before it grows",
@@ -554,7 +557,7 @@ TEST_CASE("a compacted frontier absorbs n_keep insertions before it grows",
   for (std::size_t i = 0; i < 500; ++i) {
     q.enqueue(node(static_cast<double>(i)));
   }
-  q.compact(n_keep, [](const Node&) {});
+  q.compact(n_keep, [](const Entry&) {});
   REQUIRE(q.size() == n_keep);
 
   std::size_t const cap_after = q.capacity();

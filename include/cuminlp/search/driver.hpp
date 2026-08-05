@@ -14,54 +14,89 @@
 #include <utility>
 #include <vector>
 
+#include "cuminlp/backend/backend.hpp"
 #include "cuminlp/composition_policy.hpp"
-#include "cuminlp/cuda_utils.cuh"
-#include "cuminlp/cuminlp.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
-#include "cuminlp/graph_replay.cuh"
 #include "cuminlp/host_budget.hpp"
 #include "cuminlp/policy_catalogue.hpp"
 #include "cuminlp/search.hpp"
+#include "cuminlp/search/cache.hpp"
 
 namespace cuminlp
 {
 
-// Driver for an arbitrary dag::Problem. Each iteration, the CompositionPolicy
-// picks a SlotAssignment for the current node's box; the corresponding
-// (point, interval) GraphReplay pair -- point for GUB candidates, interval
-// for sound lower bounds / pruning -- is built lazily on first use and
-// cached (find_graphs/find_exact_graphs), since the reachable Compositions
-// can be numerous and most go unused for a given problem.
+/// What one solve() found, and what it proved. Everything a caller used to
+/// reach for through accessors on a shared base class, plus the counters the
+/// run's summary quotes (design/MODULE_REFACTOR.md §6.1).
+struct SearchCounters
+{
+  std::uint32_t iterations = 0;
+  std::size_t pending = 0;
+  std::size_t viable = 0;  ///< pending regions not proven suboptimal
+  std::size_t pruned_infeasible = 0;
+  DropAccounting dropped;
+  std::size_t cache_evictions = 0;
+};
+
+template<typename T>
+struct SolveOutcome
+{
+  double lower_bound = std::numeric_limits<double>::lowest();
+  double upper_bound = std::numeric_limits<double>::max();
+  std::vector<T> best_point;  ///< the witness for upper_bound; empty if none
+  StopReason stop_reason = StopReason::IterationLimit;
+  bool proven_optimal = false;
+  bool infeasible = false;
+  SearchCounters counters;
+
+  bool found_incumbent() const
+  {
+    return upper_bound < std::numeric_limits<double>::max();
+  }
+};
+
+// Branch-and-bound over an arbitrary dag::Problem. Each iteration, the
+// CompositionPolicy picks a SlotAssignment for the current node's box, and
+// the backend supplies the roles that act on it: a sampler for GUB
+// candidates and a bounder for sound lower bounds / pruning. BackendCache
+// owns when those get built and when they are given back.
 //
 // If the chosen Composition is fully enumerable and every live dimension has
-// a slot, an ExactGraphReplay evaluates it exactly in one shot and fathoms
-// it directly instead of enqueueing children for interval pruning.
+// a slot, the backend's enumerator evaluates it exactly in one shot and the
+// node is fathomed directly instead of enqueueing children for pruning.
+//
+// Names no backend, and includes no CUDA: this header compiles under a plain
+// host compiler (§3.1), and the application picks the RegionBackendFactory.
 template<typename T>
-class GraphDriver : public driver
+class SearchDriver
 {
 public:
   /**
-   * @brief Construct a new Graph Driver object
+   * @brief Construct a new search driver
    *
    * @param policy determines the order and partitioning/enumeration of variables
+   * @param backend supplies the sampler/bounder/enumerator roles
    * @param iter_limit iteration limit (number of domains)
    * @param tolerance tolerance for primal/dual convergence check
    * @param sample_points number of points to sample per subdomain
-   * @param budget_bytes caps device memory per graph
+   * @param budget_bytes caps device memory per build
    * @param host_budget_bytes caps the pending frontier and live interval history
    * @param frontier_policy policy for handling frontier growth
    */
-  explicit GraphDriver(
+  explicit SearchDriver(
       std::shared_ptr<const CompositionPolicy<T>> policy,
+      std::shared_ptr<const backend::RegionBackendFactory<T>> backend,
       uint32_t iter_limit = 1000000,
       double tolerance = 1e-6,
       std::size_t sample_points = 1,
       std::size_t budget_bytes = 0,
       std::size_t host_budget_bytes = 0,
       FrontierPolicy frontier_policy = FrontierPolicy::StopAtBudget)
-      : driver(iter_limit, tolerance)
-      , policy_(std::move(policy))
+      : policy_(std::move(policy))
+      , backend_(std::move(backend))
+      , tolerance_(tolerance)
+      , iter_limit_(iter_limit)
       , sample_points_(sample_points)
       , budget_bytes_(budget_bytes)
       , host_budget_bytes_(host_budget_bytes)
@@ -69,172 +104,38 @@ public:
   {
     if (policy_ == nullptr) {
       throw cuminlp::InvalidConfiguration(
-          "GraphDriver requires a non-null CompositionPolicy");
+          "SearchDriver requires a non-null CompositionPolicy");
+    }
+    if (backend_ == nullptr) {
+      throw cuminlp::InvalidConfiguration(
+          "SearchDriver requires a non-null RegionBackendFactory");
     }
   }
 
-  // The sampled point that attained GUB_, indexed by variable. Empty until
-  // solve() finds a feasible sample.
-  std::span<const T> best_point() const { return best_point_; }
-
   // the driver loop
-  auto solve(const dag::Problem<T>& problem) -> double
+  auto solve(const dag::Problem<T>& problem) -> SolveOutcome<T>
   {
-    using search::CompositionInterval;
     using search::IntervalHistory;
     using search::IntervalPQueue;
+    using search::Node;
+
+    GUB_ = std::numeric_limits<double>::max();
+    GLB_ = std::numeric_limits<double>::lowest();
+    iter_idx_ = 0;
+    best_point_.clear();
 
     std::streamsize const prev_precision = std::cout.precision(17);
 
     std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
     FanOutSpec const& fan_out = policy_->fan_out();
 
-    // One (point, interval) replay pair per Composition actually encountered,
-    // built lazily and cached -- eagerly building every reachable Composition
-    // could waste enormous GPU memory on graphs nothing ever launches.
-    //
-    // `stamp` is what makes the cache *bounded*..
-    struct CompositionGraphs
-    {
-      Composition composition;
-      dag::PointGraphReplay<T> point;
-      dag::IntervalGraphReplay<T> interval;
-      std::size_t stamp = 0;  ///< use_clock at the last hit
-    };
+    // Roles per Composition, built on first use and evicted under pressure
+    // -- see search/cache.hpp for why that is the search layer's decision
+    // and not the backend's.
+    search::BackendCache<T> cache(
+        backend_, problem, fan_out, budget_bytes_, sample_points_);
 
-    // Same lazy/cached approach, one ExactGraphReplay per fully-enumerable
-    // Composition actually encountered.
-    struct ExactGraphs
-    {
-      Composition composition;
-      dag::ExactGraphReplay<T> exact;
-      std::size_t stamp = 0;
-    };
-
-    std::vector<CompositionGraphs> graphs;
-    std::vector<ExactGraphs> exact_graphs;
-    std::size_t use_clock = 0;
-    std::size_t evictions = 0;
-
-    /*
-     * Give one cached Composition's device memory back, least recently used
-     * first. Returns false when there is nothing left to give.
-     */
-    auto evict_lru = [&]() -> bool
-    {
-      std::size_t oldest = std::numeric_limits<std::size_t>::max();
-      std::size_t idx = 0;
-      bool from_exact = false;
-      bool found = false;
-      for (std::size_t i = 0; i < graphs.size(); ++i) {
-        if (graphs[i].stamp < oldest) {
-          oldest = graphs[i].stamp;
-          idx = i;
-          from_exact = false;
-          found = true;
-        }
-      }
-      for (std::size_t i = 0; i < exact_graphs.size(); ++i) {
-        if (exact_graphs[i].stamp < oldest) {
-          oldest = exact_graphs[i].stamp;
-          idx = i;
-          from_exact = true;
-          found = true;
-        }
-      }
-      if (!found) {
-        return false;
-      }
-      if (from_exact) {
-        exact_graphs.erase(exact_graphs.begin() + static_cast<std::ptrdiff_t>(idx));
-      } else {
-        graphs.erase(graphs.begin() + static_cast<std::ptrdiff_t>(idx));
-      }
-      if (evictions++ == 0) {
-        std::cout << "Device graph cache full: evicting the least recently "
-                     "used composition's graphs and rebuilding as the search "
-                     "revisits them.\n";
-      }
-      return true;
-    };
-
-    // Retry a cache fill, evicting until it fits. Only when this driver is
-    // sizing against whatever the device has free (budget_bytes_ == 0): under
-    // an explicit per-graph budget, freeing memory cannot change the verdict,
-    // so evicting the cache would cost the rebuilds and still rethrow.
-    auto fill_cache = [&](auto&& build_entry)
-    {
-      for (;;) {
-        try {
-          build_entry();
-          return;
-        } catch (const cuminlp::ResourceExhausted&) {
-          if (budget_bytes_ != 0 || !evict_lru()) {
-            throw;
-          }
-        }
-      }
-    };
-
-    auto find_graphs =
-        [&](const Composition& composition) -> CompositionGraphs&
-    {
-      for (auto& g : graphs) {
-        if (g.composition == composition) {
-          g.stamp = ++use_clock;
-          return g;
-        }
-      }
-      fill_cache(
-          [&]
-          {
-            graphs.push_back(CompositionGraphs {
-                composition,
-                dag::PointGraphReplay<T>::build(
-                    problem, composition, fan_out, budget_bytes_, sample_points_),
-                // sample_points_ reaches the interval graph only so its
-                // out-of-memory report can cost a suggested cap against the
-                // point graph too; build() clamps its own allocation to one
-                // element per region regardless (GraphReplay::build,
-                // `is_point && !Exact`).
-                dag::IntervalGraphReplay<T>::build(
-                    problem, composition, fan_out, budget_bytes_, sample_points_),
-                ++use_clock,
-            });
-          });
-      return graphs.back();
-    };
-
-    auto find_exact_graphs =
-        [&](const Composition& composition) -> ExactGraphs*
-    {
-      if (!is_fully_enumerable(composition)) {
-        return nullptr;
-      }
-      for (auto& g : exact_graphs) {
-        if (g.composition == composition) {
-          g.stamp = ++use_clock;
-          return &g;
-        }
-      }
-      fill_cache(
-          [&]
-          {
-            exact_graphs.push_back(ExactGraphs {
-                composition,
-                // Likewise for the exact graph: reporting only, never
-                // allocation.
-                dag::ExactGraphReplay<T>::build(
-                    problem, composition, fan_out, budget_bytes_, sample_points_),
-                ++use_clock,
-            });
-          });
-      return &exact_graphs.back();
-    };
-
-    using Node = CompositionInterval<T>;
-
-    IntervalPQueue<T, Node> pending(10000);
+    IntervalPQueue<T> pending(10000);
     IntervalHistory<T> history;
 
     // Slot 0, the root sentinel: materialise() answers pidx == 0 from
@@ -260,7 +161,7 @@ public:
                 << '\n';
     }
 
-    pending.enqueue(CompositionInterval<T> {
+    pending.enqueue(Node<T> {
         .sidx = 0,
         .pidx = 0,
         .depth = 0,
@@ -293,7 +194,7 @@ public:
       while (iter_idx_ < iter_limit_ && !pending.empty() && !gap_closed(GLB_)) {
         ++iter_idx_;
 
-        CompositionInterval<T> cur = pending.dequeue();
+        Node<T> cur = pending.dequeue();
 
         if (gap_closed(cur.lb)) {
           converged = true;
@@ -320,18 +221,18 @@ public:
             ++live_count;
           }
         }
-        ExactGraphs* const eg =
+        backend::RegionEnumerator<T>* const enumerator =
             can_fathom_without_children(live_count, assignment.composition)
-            ? find_exact_graphs(assignment.composition)
+            ? cache.enumerator(assignment.composition)
             : nullptr;
 
         backend::Region<T> const region {box, assignment};
 
-        if (eg != nullptr) {
+        if (enumerator != nullptr) {
           // Every live dimension is enumerated, so this launch's ArgMin is the
           // true best value over the remaining subtree, not just a bound --
           // fold into GUB_ and fathom, no children to enqueue.
-          auto const exact = eg->exact.enumerate(region);
+          auto const exact = enumerator->enumerate(region);
           if (exact.found) {
             double const val = static_cast<double>(exact.value);
             if (val < GUB_) {
@@ -340,17 +241,18 @@ public:
             }
           }
           std::cout << "iter " << iter_idx_ << ": fully enumerated and fathomed ("
-                    << eg->exact.n_points() << " points), GUB = " << GUB_
+                    << enumerator->n_points() << " points), GUB = " << GUB_
                     << '\n';
           continue;
         }
 
         std::size_t const box_idx = history.enqueue(box);
-        CompositionGraphs& g = find_graphs(assignment.composition);
+        backend::SubdivisionBundle<T>& roles =
+            cache.subdivision(assignment.composition);
 
         // Best sampled feasible value from this domain; iter_idx_ salts the
         // sampler so revisited/sibling boxes draw fresh points.
-        auto const drawn = g.point.sample(region, iter_idx_);
+        auto const drawn = roles.sampler->sample(region, iter_idx_);
         double cand = static_cast<double>(drawn.value);
         if (cand < GUB_) {
           GUB_ = cand;
@@ -358,7 +260,7 @@ public:
         }
 
         // Interval analysis of sub-domains, then feasibility and GUB pruning
-        auto const bounds = g.interval.bound(region);
+        auto const bounds = roles.bounder->bound(region);
         auto obj_lb = bounds.obj_lb;
         auto feasible = bounds.feasible;
         for (std::size_t tid = 0; tid < bounds.n_regions; ++tid) {
@@ -372,7 +274,7 @@ public:
             continue;
           }
 
-          pending.enqueue(CompositionInterval<T> {
+          pending.enqueue(Node<T> {
               .sidx = tid,
               .pidx = box_idx,
               .depth = cur.depth + 1,
@@ -415,9 +317,9 @@ public:
 
           std::size_t const before = pending.size();
           std::size_t const n_keep = compact_keep_count(
-              host_budget, history.live_bytes(), sizeof(Node));
+              host_budget, history.live_bytes(), sizeof(Node<T>));
           pending.compact(n_keep,
-                          [&](const Node& e)
+                          [&](const Node<T>& e)
                           {
                             dropped.fold(static_cast<double>(e.lb), GUB_);
                             history.release(e.pidx);
@@ -567,16 +469,43 @@ public:
       std::cout << dropped.lb_min << '\n';
     }
     std::cout.precision(prev_precision);
-    return GUB_;
+
+    return SolveOutcome<T> {
+        .lower_bound = GLB_,
+        .upper_bound = GUB_,
+        .best_point = best_point_,
+        .stop_reason = stop_reason,
+        .proven_optimal = proven_optimal,
+        .infeasible = outcome.infeasible,
+        .counters =
+            SearchCounters {
+                .iterations = iter_idx_,
+                .pending = pending.size(),
+                .viable = viable,
+                .pruned_infeasible = pruned_infeasible,
+                .dropped = dropped,
+                .cache_evictions = cache.evictions(),
+            },
+    };
   }
 
 private:
-  std::vector<T> best_point_;
   std::shared_ptr<const CompositionPolicy<T>> policy_;
+  std::shared_ptr<const backend::RegionBackendFactory<T>> backend_;
+  double tolerance_;
+  std::uint32_t iter_limit_;
   std::size_t sample_points_;
   std::size_t budget_bytes_;
   std::size_t host_budget_bytes_;
   FrontierPolicy frontier_policy_;
+
+  // The bracket the loop maintains: GLB_ <= min <= GUB_ at every iteration.
+  // Members rather than locals only so gap_closed() can close over them;
+  // solve() resets all four on entry, so a driver is reusable.
+  double GUB_ = std::numeric_limits<double>::max();
+  double GLB_ = std::numeric_limits<double>::lowest();
+  std::uint32_t iter_idx_ = 0;
+  std::vector<T> best_point_;
 };
 
 }  // namespace cuminlp

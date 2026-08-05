@@ -5,7 +5,8 @@
 
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/example_main.hpp"
-#include "cuminlp/graph_driver.cuh"
+#include "cuminlp/graph_replay.cuh"
+#include "cuminlp/search/driver.hpp"
 #include "nvs09_problem.hpp"
 
 using namespace cuminlp::examples::nvs09;
@@ -20,7 +21,9 @@ auto main(int argc, char* argv[]) -> int
         auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
             cuminlp::FanOutSpec {PARTITION_NUM},
             cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
-        cuminlp::GraphDriver<double> drv(policy, iters, 1e-6, SAMPLE_POINTS);
+        auto backend =
+            std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
+        cuminlp::SearchDriver<double> drv(policy, backend, iters, 1e-6, SAMPLE_POINTS);
         drv.solve(make_nvs09());
       });
 }

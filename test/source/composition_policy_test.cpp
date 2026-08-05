@@ -209,7 +209,7 @@ TEST_CASE(
 }
 
 // TEST_EXTENSION.md: the fathoming predicate, tested directly and
-// independent of the surrounding search loop (see graph_driver.cuh).
+// independent of the surrounding search loop (see search/driver.hpp).
 TEST_CASE("can_fathom_without_children at live_count == slot count",
           "[composition_policy][4b]")
 {
@@ -328,7 +328,7 @@ TEST_CASE("slot_prefixes agrees with repeated-division digits",
 TEST_CASE("A policy's fan_out is what its callers decode against",
           "[composition_policy][config]")
 {
-  // The reason FanOutSpec lives on the policy: CompositionInterval::materialise
+  // The reason FanOutSpec lives on the policy: Node::materialise
   // reads it off the same object it calls choose() on, so the widths used to
   // encode a node's sidx and to decode it cannot come apart.
   GreedyCompositionPolicy<double> policy {FanOutSpec {4, 50}};
@@ -401,7 +401,7 @@ TEST_CASE("A policy cannot be capped above kMaxSlots",
 // choose() must return pairwise-distinct var_ids, each indexing a live
 // (lb < ub) dimension -- GreedyCompositionPolicy satisfies this by
 // construction; assignment_is_distinct_and_live is the debug assertion
-// GraphDriver checks it with.
+// SearchDriver checks it with.
 
 TEST_CASE("GreedyCompositionPolicy always satisfies the distinct-and-live "
           "var_ids contract",

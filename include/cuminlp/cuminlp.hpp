@@ -1,44 +1,21 @@
 #pragma once
 
-#include <cstdint>
-#include <limits>
+// Umbrella include: the search layer and everything below it, for callers
+// that want the whole solver rather than one module.
+//
+// This header used to define a `driver` base class holding the global bounds,
+// the tolerance and the iteration budget for every concrete driver. With the
+// legacy fixed-Rosenbrock driver retired there is exactly one derived class,
+// so that state moved into SearchDriver itself and its accessors became
+// SolveOutcome's fields (design/MODULE_REFACTOR.md §6.1). No backend is
+// included here: the application chooses one (e.g. graph_replay.cuh's
+// GraphBackendFactory) and hands it to the driver.
 
-namespace cuminlp
-{
-
-// Shared bookkeeping (global bounds, tolerance, iteration budget) for every
-// concrete driver. Concrete drivers -- GraphDriver (graph_driver.cuh), and
-// later JITKernelDriver -- derive from this and each define their own
-// solve(), since how a problem is supplied differs per driver and isn't
-// expressible as one shared virtual signature.
-class driver
-{
-public:
-  explicit driver(uint32_t iter_limit = 1000000, double tolerance = 1e-9)
-      : GUB_(std::numeric_limits<double>::max())
-      , GLB_(std::numeric_limits<double>::lowest())
-      , tolerance_(tolerance)
-      , iter_limit_(iter_limit)
-      , iter_idx_(0)
-  {
-  }
-
-  virtual ~driver() = default;
-
-  // The bracket the search finished on: lower_bound() <= min <= upper_bound().
-  // solve() returns only the incumbent, so without these a caller recording
-  // both a primal and a dual bound would have to scrape the driver's own
-  // progress output. Meaningless before solve() runs; upper_bound() stays at
-  // double's max if no feasible point was ever sampled.
-  double lower_bound() const { return GLB_; }
-  double upper_bound() const { return GUB_; }
-
-protected:
-  double GUB_;
-  double GLB_;
-  double tolerance_;
-  uint32_t iter_limit_;
-  uint32_t iter_idx_;
-};
-
-}  // namespace cuminlp
+#include "cuminlp/composition_policy.hpp"
+#include "cuminlp/dag.hpp"
+#include "cuminlp/errors.hpp"
+#include "cuminlp/host_budget.hpp"
+#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/search.hpp"
+#include "cuminlp/search/cache.hpp"
+#include "cuminlp/search/driver.hpp"

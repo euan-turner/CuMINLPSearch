@@ -1,5 +1,5 @@
 // Host-only tests for cuminlp::decode::slot_bounds (slot_decode.hpp) and
-// search::CompositionInterval::materialise (search.hpp). Both are pure
+// search::Node::materialise (search.hpp). Both are pure
 // functions of a box/composition/index, with no CUDA dependency despite
 // slot_bounds also being the exact function partition.cuh's __device__
 // get_slot_bounds calls -- see TEST_EXTENSION.md: host/device agreement
@@ -22,7 +22,7 @@ using cuminlp::GreedyCompositionPolicy;
 using cuminlp::SlotKind;
 using cuminlp::dag::VarKind;
 using cuminlp::decode::slot_bounds;
-using cuminlp::search::CompositionInterval;
+using cuminlp::search::Node;
 using cuminlp::search::IntervalHistory;
 
 namespace
@@ -154,7 +154,7 @@ TEST_CASE("BinaryEnumerate decodes 0 and 1 exactly", "[decode][3b]")
 // materialise() at pidx == 0 uses the Problem's actual root box, not an
 // unbounded-domain fallback disconnected from the real problem.
 TEST_CASE(
-    "CompositionInterval::materialise at pidx == 0 returns the given root box",
+    "Node::materialise at pidx == 0 returns the given root box",
     "[decode][4a]")
 {
   std::vector<VarKind> kinds = {VarKind::Continuous};
@@ -163,7 +163,7 @@ TEST_CASE(
   IntervalHistory<double> history;
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
-  CompositionInterval<double> node {
+  Node<double> node {
       .sidx = 0, .pidx = 0, .depth = 0, .lb = 0.0};
 
   std::vector<cu::interval<double>> out;
@@ -175,7 +175,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "CompositionInterval::materialise decodes a non-root node by "
+    "Node::materialise decodes a non-root node by "
     "reconstructing its " "parent's Composition",
     "[decode][4a]")
 {
@@ -183,7 +183,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> root_box = {{0.0, 8.0}};
 
   IntervalHistory<double> history;
-  history.enqueue({});  // index 0: unused sentinel, mirrors GraphDriver's usage
+  history.enqueue({});  // index 0: unused sentinel, mirrors SearchDriver's usage
   std::size_t parent_idx =
       history.enqueue({{0.0, 8.0}});  // index 1: the real parent box
 
@@ -195,7 +195,7 @@ TEST_CASE(
   // continuous variable, so one slot); materialise() checks it before
   // decoding, since a disagreement means sidx would be decoded against the
   // wrong radix vector.
-  CompositionInterval<double> node {.sidx = 2,
+  Node<double> node {.sidx = 2,
                                     .pidx = parent_idx,
                                     .depth = 1,
                                     .lb = 0.0,
@@ -229,7 +229,7 @@ TEST_CASE(
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
   // The policy fills 2 slots for this box; claim 1.
-  CompositionInterval<double> node {.sidx = 2,
+  Node<double> node {.sidx = 2,
                                     .pidx = parent_idx,
                                     .depth = 1,
                                     .lb = 0.0,

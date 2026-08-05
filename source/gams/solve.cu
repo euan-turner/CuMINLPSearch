@@ -40,8 +40,9 @@
 #include "cuminlp/dag.hpp"
 #include "cuminlp/dag_print.hpp"
 #include "cuminlp/gams.hpp"
-#include "cuminlp/graph_driver.cuh"
+#include "cuminlp/graph_replay.cuh"
 #include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/search/driver.hpp"
 
 namespace
 {
@@ -58,7 +59,7 @@ struct Solution {
 };
 
 /**
-  * @brief Construct a concrete CompositionPolicy and GraphDriver, then solve
+  * @brief Construct a concrete CompositionPolicy and SearchDriver, then solve
   *
   * @param problem
   * @param iters
@@ -81,13 +82,14 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
 {
   std::shared_ptr<const cuminlp::CompositionPolicy<double>> policy =
       cuminlp::make_policy<double>(kind, fan_out, calibration);
-  cuminlp::GraphDriver<double> driver(
-      policy, iters, 1e-6, sample_points, /*budget_bytes=*/0,
+  auto backend =
+      std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
+  cuminlp::SearchDriver<double> driver(
+      policy, backend, iters, 1e-6, sample_points, /*budget_bytes=*/0,
       host_budget_bytes, frontier_policy);
-  double const bound = driver.solve(problem);
-  auto const best = driver.best_point();
-  return Solution{bound, driver.lower_bound(), driver.upper_bound(),
-                  std::vector<double>(best.begin(), best.end())};
+  cuminlp::SolveOutcome<double> const outcome = driver.solve(problem);
+  return Solution{outcome.upper_bound, outcome.lower_bound,
+                  outcome.upper_bound, outcome.best_point};
 }
 
 /**

@@ -13,7 +13,7 @@
 // arithmetic -- interval.h (a plain struct definition) is enough, and unlike
 // cuinterval.h (which pulls in operations.cuh's unconditional __device__
 // arithmetic overloads) it's compilable by a plain host compiler, which is
-// what keeps this header's search::CompositionInterval::materialise
+// what keeps this header's search::Node::materialise
 // host-testable without a CUDA toolchain (see TEST_EXTENSION.md).
 #include <cuinterval/interval.h>
 
@@ -28,7 +28,7 @@ namespace cuminlp::search
 // vector.
 
 // A history entry is only ever read back as the direct parent of a dequeued
-// node (CompositionInterval::materialise's `history.intervals[pidx]` lookup),
+// node (Node::materialise's `history.intervals[pidx]` lookup),
 // so an entry with no pending children is garbage the moment its last child
 // leaves the queue. Refcounting says exactly when that is: an entry's count is
 // the construction reference enqueue() hands back, plus one per pending node
@@ -47,7 +47,7 @@ struct IntervalHistory
 
   // Appends an interval to the history, returning the slot holding it with one
   // reference -- the "construction reference" -- held by the caller. The slot
-  // index is what CompositionInterval entries derived from this box carry as
+  // index is what Node entries derived from this box carry as
   // their pidx.
   //
   // A slot freed by release() is reused here rather than growing the vector,
@@ -139,7 +139,7 @@ private:
 };
 
 /**
- * @brief GraphDriver's node type. CompositionPolicy is a pure function of a
+ * @brief SearchDriver's node type. CompositionPolicy is a pure function of a
  * node's box + variable kinds (see composition_policy.hpp), so `materialise`
  * recovers the SlotAssignment that produced this interval by just
  * re-invoking the policy on the reconstructed parent box, rather than by
@@ -152,7 +152,7 @@ private:
  * @tparam T
  */
 template<typename T>
-struct CompositionInterval
+struct Node
 {
   std::size_t sidx;  // index within parent interval
   std::size_t pidx;  // index of parent interval in history
@@ -169,7 +169,7 @@ struct CompositionInterval
   // at the exact point of violation.
   std::size_t slot_count = 0;
 
-  bool operator<(const CompositionInterval& other) const
+  bool operator<(const Node& other) const
   {
     // Lower is higher priority to explore
     // 1. by least lower bound
@@ -194,7 +194,7 @@ struct CompositionInterval
     return pidx > other.pidx;
   }
 
-  bool operator==(const CompositionInterval& other) const
+  bool operator==(const Node& other) const
   {
     return lb == other.lb && pidx == other.pidx;
   }
@@ -215,7 +215,7 @@ struct CompositionInterval
   // from `history` the way every other node's box can. Passing it explicitly
   // keeps materialise() usable as the single decode path for every node,
   // including the root, rather than callers special-casing pidx == 0
-  // themselves (see GraphDriver::solve()).
+  // themselves (see SearchDriver::solve()).
   void materialise(const IntervalHistory<T>& history,
                    std::vector<cu::interval<T>>& out,
                    const cuminlp::CompositionPolicy<T>& policy,
@@ -267,22 +267,25 @@ struct CompositionInterval
   }
 };
 
-// Min-Heap of Intervals for the pending list.
-// highest priority is least lb, then least pidx. GraphDriver instantiates
-// this with CompositionInterval<T>; the heap logic itself only needs Node's
-// operator</.lb.
-template<typename T, typename Node>
+// Min-Heap of pending search-tree nodes.
+// highest priority is least lb, then least pidx. One node type since the
+// legacy path retired (design/MODULE_REFACTOR.md §6.3), so the element type
+// is Node<T> rather than a second template parameter; the heap logic itself
+// only needs Node's operator</.lb.
+template<typename T>
 class IntervalPQueue
 {
 private:
-  std::vector<Node> elems;
+  using Element = Node<T>;
+
+  std::vector<Element> elems;
   std::size_t num_elems = 0;
 
   void grow() { elems.resize(elems.empty() ? 1 : elems.size() * 2); }
 
   void sift_up(std::size_t idx)
   {
-    Node e = elems[idx];
+    Element e = elems[idx];
     while (!is_root(idx) && e < elems[parent_idx(idx)]) {
       elems[idx] = elems[parent_idx(idx)];
       idx = parent_idx(idx);
@@ -292,7 +295,7 @@ private:
 
   void sift_down(std::size_t idx)
   {
-    Node e = elems[idx];
+    Element e = elems[idx];
     while (has_left_child(idx)) {
       std::size_t child = smallest_child_idx(idx);
       if (!(elems[child] < e)) {
@@ -348,7 +351,7 @@ public:
   {
   }
 
-  void enqueue(const Node& new_elem)
+  void enqueue(const Element& new_elem)
   {
     if (num_elems == elems.size()) {
       grow();
@@ -359,11 +362,11 @@ public:
     ++num_elems;
   }
 
-  Node dequeue()
+  Element dequeue()
   {
     assert(num_elems > 0 && "dequeue() called on empty IntervalPQueue");
 
-    Node res = elems[0];
+    Element res = elems[0];
     --num_elems;
     if (num_elems > 0) {
       elems[0] = elems[num_elems];
@@ -376,7 +379,7 @@ public:
 
   std::size_t size() const { return num_elems; }
 
-  const Node& peek() const { return elems[0]; }
+  const Element& peek() const { return elems[0]; }
 
   // Number of pending regions not yet proven suboptimal against gub, i.e.
   // regions that could still contain the global optimum.
@@ -389,9 +392,9 @@ public:
   // process is already past. See design/BOUNDED_FRONTIER.md §3.3.
   std::size_t capacity() const { return elems.capacity(); }
 
-  std::size_t capacity_bytes() const { return elems.capacity() * sizeof(Node); }
+  std::size_t capacity_bytes() const { return elems.capacity() * sizeof(Element); }
 
-  // Keep the `n_keep` best elements under Node::operator<, hand each of the
+  // Keep the `n_keep` best elements under Element::operator<, hand each of the
   // others to `on_evict`, restore the heap invariant over the survivors, and
   // shrink the backing vector to hold 2 * n_keep. No-op when size() <= n_keep.
   //
@@ -434,7 +437,7 @@ public:
                      elems.begin() + static_cast<std::ptrdiff_t>(num_elems));
 
     for (std::size_t i = n_keep; i < num_elems; ++i) {
-      on_evict(static_cast<const Node&>(elems[i]));
+      on_evict(static_cast<const Element&>(elems[i]));
     }
     num_elems = n_keep;
 
@@ -445,7 +448,7 @@ public:
     }
 
     if (elems.size() > 2 * n_keep) {
-      std::vector<Node> shrunk(2 * n_keep);
+      std::vector<Element> shrunk(2 * n_keep);
       std::copy(elems.begin(),
                 elems.begin() + static_cast<std::ptrdiff_t>(num_elems),
                 shrunk.begin());

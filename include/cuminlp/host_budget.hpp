@@ -15,7 +15,7 @@
 //
 // Deliberately device-free, for the same reason search_sizing.hpp is: every
 // decision here is arithmetic on counts and bounds, and none of it needs a GPU
-// to test. graph_driver.cuh is where they are wired to an actual search.
+// to test. search/driver.hpp is where they are wired to an actual search.
 namespace cuminlp
 {
 
