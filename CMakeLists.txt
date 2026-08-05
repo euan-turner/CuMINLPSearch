@@ -36,8 +36,16 @@ target_compile_features(cuminlp_lib INTERFACE cxx_std_20)
 
 # FixedRosenbrockDriver::solve() is a plain (non-template) method, so unlike
 # the rest of cuminlp_lib it needs an actual translation unit to compile.
-add_library(fixed_rosenbrock_driver_lib source/fixed_rosenbrock_driver.cu)
+add_library(
+  fixed_rosenbrock_driver_lib
+  source/fixed_examples/fixed_rosenbrock_driver.cu
+)
 add_library(cuminlp::fixed_rosenbrock_driver ALIAS fixed_rosenbrock_driver_lib)
+
+target_include_directories(
+    fixed_rosenbrock_driver_lib
+    PUBLIC "${PROJECT_SOURCE_DIR}/source/fixed_examples"
+)
 
 target_link_libraries(fixed_rosenbrock_driver_lib PUBLIC cuminlp::lib)
 
@@ -80,7 +88,9 @@ endif()
 
 # ---- Examples ----
 
-add_executable(fixed_rosenbrock source/main.cpp)
+# Reference-only fixed instance retained for comparison with the current
+# solver entrypoint below.
+add_executable(fixed_rosenbrock source/fixed_examples/fixed_rosenbrock.cu)
 
 target_link_libraries(fixed_rosenbrock PRIVATE cuminlp::fixed_rosenbrock_driver)
 
@@ -90,7 +100,7 @@ target_compile_features(fixed_rosenbrock PRIVATE cxx_std_20)
 # GraphDriver -- the DAG/CUDA-graph-replay evaluator -- instead of the
 # hand-written kernels in FixedRosenbrockDriver. Run alongside
 # fixed_rosenbrock to compare the two.
-add_executable(graph_rosenbrock source/rosenbrock.cu)
+add_executable(graph_rosenbrock source/fixed_examples/graph_rosenbrock.cu)
 
 target_link_libraries(graph_rosenbrock PRIVATE cuminlp::lib)
 
@@ -103,7 +113,7 @@ endif()
 # 10-point Morse cluster energy minimisation (MINLPLib ex8_6_2), solved via
 # GraphDriver with translational/rotational symmetry broken by fixing 6 of
 # the 30 coordinates.
-add_executable(graph_morse source/morse_cluster_energy.cu)
+add_executable(graph_morse source/fixed_examples/graph_morse_cluster.cu)
 
 target_link_libraries(graph_morse PRIVATE cuminlp::lib)
 
@@ -116,7 +126,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # power series problem (MINLPLib ex4_1_2)
-add_executable(graph_power_series source/power_series.cu)
+add_executable(graph_power_series source/fixed_examples/graph_ex412.cu)
 
 target_link_libraries(graph_power_series PRIVATE cuminlp::lib)
 
@@ -127,7 +137,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # qps
-add_executable(graph_qps source/qps.cu)
+add_executable(graph_qps source/fixed_examples/qps.cu)
 
 target_link_libraries(graph_qps PRIVATE cuminlp::lib)
 
@@ -138,7 +148,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # nvs09 (MINLPLib INLP, all-integer objective, no constraints)
-add_executable(graph_nvs09 source/nvs09.cu)
+add_executable(graph_nvs09 source/fixed_examples/nvs09.cu)
 
 target_link_libraries(graph_nvs09 PRIVATE cuminlp::lib)
 
@@ -149,7 +159,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # autocorr_bern20-03 (MINLPLib MBQCP, 20 binary variables, no integers/continuous)
-add_executable(graph_autocorr_bern20_03 source/autocorr_bern20_03.cu)
+add_executable(graph_autocorr_bern20_03 source/fixed_examples/autocorr_bern20_03.cu)
 
 target_link_libraries(graph_autocorr_bern20_03 PRIVATE cuminlp::lib)
 

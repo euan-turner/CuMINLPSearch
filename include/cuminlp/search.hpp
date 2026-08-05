@@ -35,7 +35,7 @@ namespace cuminlp::search
 // naming it as pidx. See design/BOUNDED_FRONTIER.md §6.
 //
 // The counting is opt-in. A caller that never calls release() (
-// FixedRosenbrockDriver, source/fixed_rosenbrock_driver.cu) never drops a
+// FixedRosenbrockDriver, source/fixed_examples/fixed_rosenbrock_driver.cu) never drops a
 // count to zero, so nothing is ever freed and nothing is ever reused -- which
 // is today's behaviour exactly, indices included.
 template<typename T>

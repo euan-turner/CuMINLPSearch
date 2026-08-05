@@ -96,10 +96,7 @@ struct ProblemProfile
 
   /// True iff the objective variable survived lowering as a real continuous
   /// variable (neither the `=E=` nor the inequality elimination pass could
-  /// solve for it). `profile_problem` cannot compute this from a bare
-  /// `dag::Problem<T>` -- it isn't recorded there -- so
-  /// callers that have a `gams::ParsedModel<T>` in hand set it themselves
-  /// from `ParsedModel::objvar_kept` after calling `profile_problem`.
+  /// solve for it).
   bool objvar_kept = false;
 };
 
@@ -144,10 +141,14 @@ ProblemProfile profile_problem(const dag::Problem<T>& problem)
 /// The four resolved shape numbers plus the compiled rung they dispatch to.
 struct ResolvedShape
 {
-  std::size_t partition_num = 0;
-  std::size_t enumerate_cap = 0;
-  std::size_t sample_points = 0;
-  std::size_t max_cycle_size = 0;
+  std::size_t partition_num = 0; ///< number of partitions to split
+                                 // a variable domain into
+  std::size_t enumerate_cap = 0; ///< width of an integer domain at which to
+                                 // enumerate it
+  std::size_t sample_points = 0; ///< number of points to sample from a variable
+                                 // subdomain in a single evaluation
+  std::size_t max_cycle_size = 0; ///< max number of variables to 
+                                  // partition/enumerate at once
   std::size_t rung = 0;  ///< ladder_rung_for(max_cycle_size)
 };
 

@@ -42,10 +42,12 @@ target_compile_definitions(
     PRIVATE "CUMINLP_GAMS_TEST_DATA=\"${CMAKE_CURRENT_SOURCE_DIR}/data/gams\""
 )
 # nvs09_problem.hpp / autocorr_bern20_03_problem.hpp: the hand-built Problem
-# builders shared with source/nvs09.cu and source/autocorr_bern20_03.cu, used
-# here as an independent equivalence oracle for the discrete-driver .gms
-# fixtures.
-target_include_directories(cuminlp_gams_test PRIVATE "${PROJECT_SOURCE_DIR}/source")
+# builders shared with source/fixed_examples/nvs09.cu and
+# source/fixed_examples/autocorr_bern20_03.cu, used here as an independent
+# equivalence oracle for the discrete-driver .gms fixtures.
+target_include_directories(
+    cuminlp_gams_test PRIVATE "${PROJECT_SOURCE_DIR}/source/fixed_examples"
+)
 catch_discover_tests(cuminlp_gams_test)
 
 add_executable(cuminlp_test source/cuminlp_test.cpp)
@@ -115,8 +117,8 @@ catch_discover_tests(cuminlp_host_budget_test)
 # design/POLICY_SELECTION.md §3. Links cuminlp::gams (not just cuminlp::lib)
 # to parse the autocorr_bern20-03.gms/ex8_6_2.gms fixtures its evidence tests
 # use, and includes source/ for nvs09_problem.hpp, the hand-built Problem
-# shared with source/nvs09.cu -- used instead of a .gms fixture so the nvs09
-# tests need no GPU and no .gms file either.
+# shared with source/fixed_examples/nvs09.cu -- used instead of a .gms
+# fixture so the nvs09 tests need no GPU and no .gms file either.
 add_executable(cuminlp_policy_catalogue_test source/policy_catalogue_test.cpp)
 target_link_libraries(
     cuminlp_policy_catalogue_test
@@ -129,7 +131,8 @@ target_compile_definitions(
     PRIVATE "CUMINLP_GAMS_TEST_DATA=\"${CMAKE_CURRENT_SOURCE_DIR}/data/gams\""
 )
 target_include_directories(
-    cuminlp_policy_catalogue_test PRIVATE "${PROJECT_SOURCE_DIR}/source"
+    cuminlp_policy_catalogue_test
+    PRIVATE "${PROJECT_SOURCE_DIR}/source/fixed_examples"
 )
 
 catch_discover_tests(cuminlp_policy_catalogue_test)

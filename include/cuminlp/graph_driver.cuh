@@ -36,34 +36,21 @@ namespace cuminlp
 // Composition is fully enumerable, an ExactGraphReplay evaluates it exactly
 // in one shot and fathoms it directly instead of enqueueing children for
 // interval pruning.
-//
-// CompositionPolicy is a runtime constructor argument (not a template
-// parameter) so it can be chosen via CLI flag without recompiling. The
-// fan-out widths (formerly the PartitionNum/EnumerateCap template
-// parameters) come from that same policy via CompositionPolicy::fan_out, so
-// the driver and the policy cannot disagree about them -- previously they
-// were independent template arguments whose agreement nothing checked.
 template<typename T, std::size_t Capacity>
 class GraphDriver : public driver
 {
 public:
-  // `sample_points` is how many points the point graph draws per subdomain
-  // (formerly the SamplePoints template parameter); it does not reach the
-  // interval or exact graphs, which evaluate one element per region.
-  // `budget_bytes` caps device memory per built graph; 0 means "whatever is
-  // free at the time each graph is built". See GraphReplay::build.
-  //
-  // `host_budget_bytes` caps the two unbounded *host* structures -- the
-  // pending frontier and the live interval history -- taken together, with the
-  // same convention: 0 means "measured at solve() start" (half of
-  // /proc/meminfo's MemAvailable). Reaching it ends the run through the
-  // ordinary epilogue with the bracket intact, instead of leaving the OOM
-  // killer to throw the bracket away.
-  //
-  // `frontier_policy` decides what reaching it means, and defaults to the
-  // option that changes nothing about the search: FrontierPolicy::Compact
-  // halves the frontier and keeps going, which trades unexplored regions for
-  // a longer run and is therefore opt-in. See design/BOUNDED_FRONTIER.md.
+  /**
+   * @brief Construct a new Graph Driver object
+   * 
+   * @param policy determines the order and partitioning/enumeration of variables
+   * @param iter_limit iteration limit (number of domains)
+   * @param tolerance tolerance for primal/dual convergence check
+   * @param sample_points number of points to sample per subdomain
+   * @param budget_bytes caps device memory per graph
+   * @param host_budget_bytes caps the pending frontier and live interval history
+   * @param frontier_policy policy for handling frontier growth
+   */
   explicit GraphDriver(
       std::shared_ptr<const CompositionPolicy<T, Capacity>> policy,
       uint32_t iter_limit = 1000000,
@@ -89,16 +76,13 @@ public:
   // solve() finds a feasible sample.
   std::span<const T> best_point() const { return best_point_; }
 
+  // the driver loop
   auto solve(const dag::Problem<T>& problem) -> double
   {
     using search::CompositionInterval;
     using search::IntervalHistory;
     using search::IntervalPQueue;
 
-    // Full double precision throughout: at this magnitude-vs-tolerance ratio
-    // (e.g. objective ~1e3, tolerance ~1e-9) the default 6-sig-fig cout
-    // format prints the same rounded value for boxes that are still ~1e-8
-    // apart, which reads as "converged" long before gap_closed() agrees.
     std::streamsize const prev_precision = std::cout.precision(17);
 
     std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
@@ -108,7 +92,7 @@ public:
     // built lazily and cached -- eagerly building every possible_compositions()
     // entry could waste enormous GPU memory on graphs nothing ever launches.
     //
-    // `stamp` is what makes the cache *bounded*: see evict_lru below.
+    // `stamp` is what makes the cache *bounded*..
     struct CompositionGraphs
     {
       Composition<Capacity> composition;
@@ -134,22 +118,6 @@ public:
     /*
      * Give one cached Composition's device memory back, least recently used
      * first. Returns false when there is nothing left to give.
-     *
-     * Without this the caches were unbounded, and that made
-     * dag::auto_max_cycle_size unsound no matter how carefully it charged a
-     * composition: it fits a cap to `composition_footprint_bytes`, which is
-     * by definition what *one* Composition costs, while a search that reaches
-     * n distinct Compositions held all n at once. On batch.gms the resolver
-     * spent two thirds of free memory on a cap of 14 -- correctly, for one
-     * composition -- and the third distinct Composition the search reached
-     * then failed to build. No fraction fixes that: the policy admits over a
-     * hundred Compositions on a problem with both binaries and continuous
-     * variables, and dividing the budget by that would leave a cap of 1.
-     *
-     * Eviction is sound because these are pure caches: an entry is a function
-     * of its Composition and the problem, `set_domain` supplies everything
-     * that varies per node, and a rebuilt entry replays identically. The cost
-     * is the rebuild, paid only when the device is actually full.
      */
     auto evict_lru = [&]() -> bool
     {
@@ -265,7 +233,7 @@ public:
 
     using Node = CompositionInterval<T, Capacity>;
 
-    IntervalPQueue<T, Node> pending(1000);
+    IntervalPQueue<T, Node> pending(10000);
     IntervalHistory<T> history;
 
     // Slot 0, the root sentinel: materialise() answers pidx == 0 from
@@ -305,7 +273,6 @@ public:
     std::size_t pruned_infeasible = 0;
 
     // What the frontier gave up, and the floor that keeps giving it up sound.
-    // See design/BOUNDED_FRONTIER.md §4 and DropAccounting.
     DropAccounting dropped;
 
     // Set at every break out of the loop below; when nothing breaks, the loop
@@ -313,12 +280,6 @@ public:
     StopReason stop_reason = StopReason::IterationLimit;
     bool stopped_early = false;
 
-    // tolerance_ is now relative to |GUB_| (floored at 1.0), not absolute:
-    // an absolute 1e-9 on an objective of magnitude ~1e3 asks for ~1e-12
-    // relative precision, which a wide-fan-out policy can take thousands of
-    // extra iterations to certify even after the bound has visually
-    // "arrived" at the printed value. bound is the tightest lower bound
-    // known for the remaining search (the least pending lb, or GLB_).
     auto const gap_closed = [this](double bound) {
       return cuminlp::gap_closed(GUB_, bound, tolerance_);
     };
@@ -326,9 +287,7 @@ public:
     // The loop is wrapped so a failed allocation ends the run through the same
     // epilogue as a spent iteration budget: the bracket GLB_ <= min <= GUB_ is
     // valid at every iteration, and letting the exception out of solve() would
-    // throw it away. This is the seatbelt, not the brake -- on Linux with
-    // default overcommit the usual failure is a SIGKILL no C++ mechanism sees,
-    // which is what the host budget below is for.
+    // throw it away. A SIGKILL still fails abnormally.
     try {
       while (iter_idx_ < iter_limit_ && !pending.empty() && !gap_closed(GLB_)) {
         ++iter_idx_;
@@ -347,12 +306,6 @@ public:
 
         std::vector<cu::interval<T>> box;
         cur.materialise(history, box, *policy_, var_kinds, problem.box_bounds);
-        // Strictly after materialise(), which is the read this reference was
-        // being held for: the parent entry is history.intervals[cur.pidx]. Once
-        // the last pending child of a box has been dequeued, nothing can ever
-        // look the box up again, so this is where it becomes garbage. (The
-        // convergence break above skips the release, harmlessly -- the search is
-        // ending.)
         history.release(cur.pidx);
 
         auto const assignment = policy_->choose(box, var_kinds);
@@ -432,9 +385,6 @@ public:
           history.add_ref(box_idx);
         }
 
-        // The construction reference goes here, so a node all of whose children
-        // were pruned frees its box immediately rather than retaining it for the
-        // rest of the run.
         history.release(box_idx);
 
         std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_

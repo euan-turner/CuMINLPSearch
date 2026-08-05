@@ -5,48 +5,29 @@
 //              [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]
 //              <model.gms> <iterations>
 //
-// --dump-dag prints the lowered Problem before solving. Problem::validate()
-// proves the DAG is well-formed, not that it is the *right* DAG: outside the
-// two instances with a hand-built oracle in the test suite, reading the
-// expression back is the only check there is. --dump-only stops after
-// printing, which needs no GPU.
+// --dump-dag prints the lowered Problem before solving. The problem DAG
+// is validated during parsing, but this just checks it is well-formed,
+// not an exact semantic match to the original.
 //
 // The last line of a successful run is a tab-separated
 //
 //   RESULT<TAB>sense=min|max<TAB>primal=<value|none><TAB>dual=<value|none>
 //
-// in the file's own sense, which is what tools/minlp_status.py records into
+// for tools/minlp_status.py to record into MINLP_STATUS.md
 // MINLP_STATUS.md. Everything else on stdout is progress narration, with one
 // exception: a
 //
 //   PARAMS<TAB>policy=<name><TAB>source=auto|named|overridden<TAB>...
 //
-// line before the search, the machine-readable twin of the status line. It
-// carries the *resolved* search shape -- policy_catalogue.hpp's `resolve`,
-// after any experimental override -- because a bound is only reproducible
-// from the policy name that produced it (plus the commit hash), not from the
-// four numbers themselves: two of them are now fitted to this device's free
-// memory, and pasting them back onto a different GPU reproduces a shape but
-// not the decision. See design/POLICY_SELECTION.md.
-//
-// The point of the frontend: no hand-written builder, no recompilation per
-// instance. Compare source/morse_cluster_energy.cu, which builds the same
-// ex8_6_2 problem by hand -- running both on ex8_6_2.gms should agree.
+// line before the search, carrying the resolved search shape.
 //
 // With no --policy, the search shape comes entirely from the problem's
-// variable kinds/counts and this device's free memory (policy_catalogue.hpp's
-// select_policy + resolve) -- no table lookup, no positional shape argument
-// (that argument is gone; see --policy and --list-policies below). The four
-// underlying numbers (--partition-num, --enumerate-cap, --sample-points,
-// --max-cycle-size) still exist, but only as experimental overrides applied
-// on top of the resolved shape, for A/B-ing the resolver against a pinned
-// one -- see USAGE.md.
+// variable kinds/counts and this device's free memory.
 //
 // The one value that still has to reach device codegen is the slot capacity
 // (partition::SlotContext's array bound). It is handled by compiling a small
 // ladder of capacities and dispatching to the narrowest rung that holds
-// max_cycle_size, rather than by baking one into the binary -- see
-// capacity_ladder.hpp and design/RUNTIME_SHAPE.md.
+// max_cycle_size, rather than by baking one into the binary.
 
 #include <algorithm>
 #include <cmath>
@@ -70,26 +51,31 @@
 namespace
 {
 
-/// A GraphDriver's final bounds plus the sample point that attained the
-/// incumbent, kept alive past the driver's own lifetime. Both bounds are in
-/// the *minimising* sense the driver works in; the sign flip for a Maximise
-/// file happens where they are reported.
+
+/**
+ * @brief The result of a solve run in the minimising sense
+ */
 struct Solution {
   double bound;  ///< the incumbent, == upper
-  double lower;  ///< dual bound: nothing beats this
+  double lower;  ///< dual bound: lower bound over all pending intervals
   double upper;  ///< primal bound: best feasible value actually attained
   std::vector<double> point;  ///< the sample point that attained `upper`
 };
 
 /**
- * @brief Construct the policy PolicyKind names and the GraphDriver it
- *        drives, and run the solve.
- *
- * make_policy (policy_catalogue.hpp) is what turns a PolicyKind into a
- * concrete CompositionPolicy subclass; today that is always
- * GreedyCompositionPolicy, but nothing here would need to change if a second
- * PolicyKind existed (design/POLICY_SELECTION.md).
- */
+  * @brief Construct a concrete CompositionPolicy and GraphDriver, then solve
+  * 
+  * @tparam Capacity 
+  * @param problem 
+  * @param iters 
+  * @param kind 
+  * @param fan_out 
+  * @param sample_points 
+  * @param host_budget_bytes 
+  * @param frontier_policy 
+  * @param calibration 
+  * @return Solution 
+  */
 template<std::size_t Capacity>
 auto solve_with(cuminlp::dag::Problem<double> const& problem,
                 int iters,
@@ -112,12 +98,8 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
 }
 
 /**
- * @brief Read the hardware inputs the policy is allowed to see, once.
+ * @brief Read the volume of free device memory available to the driver.
  *
- * Frozen here and never re-read: CompositionPolicy::choose must be a pure
- * function of (box, var_kinds, calibration), because materialise() re-invokes
- * it to decode a node's box and a differing answer would decode sidx against
- * the wrong radix. See design/RUNTIME_SHAPE.md.
  */
 auto free_device_bytes() -> std::size_t
 {
@@ -150,19 +132,6 @@ auto probe_calibration(std::size_t max_cycle_size) -> cuminlp::SearchCalibration
  * @brief Warn when overriding --partition-num has quietly changed what
  *        integer slots do.
  *
- * Only reachable on the experimental-override path now: resolve() decouples
- * enumerate_cap from partition_num by construction, so the coupling this
- * warns about only exists again when a caller
- * overrides --partition-num without also overriding --enumerate-cap, which
- * reapplies the old single-arg-FanOutSpec shorthand on top of the resolved
- * shape.
- *
- * States the mechanism and stops there, rather than predicting that the
- * search will suffer. Bisecting is cheaper per slot, so the auto-fitted cap
- * usually widens to compensate, and on nvs09 the bisecting run converges
- * while "fixing" it with --enumerate-cap=7 narrows the cap to 6 and stops
- * converging. The knob is worth knowing about; which way to turn it is not
- * something this can tell from here.
  */
 void warn_on_implied_enumerate_cap(cuminlp::dag::Problem<double> const& problem,
                                    cuminlp::FanOutSpec const& fan_out)
@@ -524,9 +493,6 @@ auto main(int argc, char* argv[]) -> int
         cuminlp::profile_problem(parsed.problem);
     problem_profile.objvar_kept = parsed.objvar_kept;
 
-    // Only free_device_bytes matters to select_policy/resolve; the fuller
-    // probe (multiprocessor_count too) happens again once the shape is final
-    // and solve() actually needs a SearchCalibration for the policy object.
     cuminlp::SearchCalibration selection_calibration;
     selection_calibration.free_device_bytes = free_device_bytes();
 
@@ -587,9 +553,6 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::FanOutSpec const fan_out {chosen_partition_num,
                                        chosen_enumerate_cap};
 
-    // Resolved before the status line rather than inside it: an
-    // out-of-ladder cap throws, and doing that mid-`<<` would leave a
-    // half-written line in front of the error message.
     std::size_t const rung = cuminlp::ladder_rung_for(chosen_max_cycle_size);
 
     std::cout << "policy: " << policy.name << " (" << source
@@ -601,7 +564,7 @@ auto main(int argc, char* argv[]) -> int
 
     // The machine-readable twin, for tools/minlp_status.py. `overrides=`
     // only appears on the overridden path, and lists only the flags actually
-    // given -- see design/POLICY_SELECTION.md.
+    // given.
     std::cout << "PARAMS\tpolicy=" << policy.name << "\tsource=" << source
               << "\tpartition_num=" << chosen_partition_num
               << "\tenumerate_cap=" << chosen_enumerate_cap
@@ -654,6 +617,7 @@ auto main(int argc, char* argv[]) -> int
     bool const found_incumbent =
         solution.upper < std::numeric_limits<double>::max();
     std::streamsize const prev_precision = std::cout.precision(17);
+
     // A dual bound still at its initial sentinel means the search never
     // dequeued anything, so there is no bound to record -- distinct from one
     // that is merely weak, and the tracker must not conflate them.

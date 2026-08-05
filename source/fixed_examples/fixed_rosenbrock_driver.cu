@@ -5,7 +5,7 @@
 #include <span>
 #include <vector>
 
-#include "cuminlp/fixed_rosenbrock_driver.hpp"
+#include "fixed_rosenbrock_driver.hpp"
 #include "cuminlp/rosenbrock.cuh"
 #include "cuminlp/search.hpp"
 

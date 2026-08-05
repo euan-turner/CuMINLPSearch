@@ -2,7 +2,7 @@
 #include <limits>
 #include <string>
 
-#include "cuminlp/fixed_rosenbrock_driver.hpp"
+#include "fixed_rosenbrock_driver.hpp"
 
 auto main() -> int
 {
