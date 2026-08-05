@@ -50,12 +50,6 @@ target_include_directories(
 )
 catch_discover_tests(cuminlp_gams_test)
 
-add_executable(cuminlp_test source/cuminlp_test.cpp)
-target_link_libraries(cuminlp_test PRIVATE cuminlp::fixed_rosenbrock_driver)
-target_compile_features(cuminlp_test PRIVATE cxx_std_20)
-
-add_test(NAME cuminlp_test COMMAND cuminlp_test)
-
 # Host-only: GreedyCompositionPolicy is plain templated C++ with no device
 # code, so this doesn't need a CUDA device to run.
 add_executable(cuminlp_composition_policy_test source/composition_policy_test.cpp)
@@ -136,31 +130,6 @@ target_include_directories(
 )
 
 catch_discover_tests(cuminlp_policy_catalogue_test)
-
-# Checks rosenbrock_kernel/interval_rosenbrock_kernel against independent CPU
-# reference implementations (see rosenbrock_test.cu). Requires an actual CUDA
-# device. -frounding-math is needed for the CpuRounding oracle helpers (see
-# cpu_rounding.hpp); --diag-suppress=20011 silences an unrelated nvcc warning.
-add_executable(cuminlp_rosenbrock_test source/rosenbrock_test.cu)
-target_link_libraries(
-    cuminlp_rosenbrock_test
-    PRIVATE cuminlp::lib
-    PRIVATE Catch2::Catch2WithMain
-)
-target_compile_features(cuminlp_rosenbrock_test PRIVATE cxx_std_20)
-target_compile_options(
-    cuminlp_rosenbrock_test
-    PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-frounding-math>
-    $<$<COMPILE_LANGUAGE:CUDA>:--diag-suppress=20011>
-)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set_target_properties(
-      cuminlp_rosenbrock_test PROPERTIES CUDA_ARCHITECTURES native
-  )
-endif()
-
-catch_discover_tests(cuminlp_rosenbrock_test)
 
 # Launches graph_replay.cuh's sample_points_kernel directly (bypassing
 # GraphBuilder/GraphReplay) to check Integer/Binary variables are always

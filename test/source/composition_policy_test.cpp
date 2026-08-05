@@ -285,85 +285,6 @@ TEST_CASE(
   CHECK_FALSE(can_fathom_without_children(2, comp));
 }
 
-TEST_CASE(
-    "GreedyCompositionPolicy::possible_compositions enumerates every reachable "
-    "single-slot composition",
-    "[composition_policy]")
-{
-  // At least one of each kind present, so none of the five structural
-  // patterns get capped away by var-kind counts. With CycleSize == 1 the
-  // one slot is either BinaryEnumerate, IntegerEnumerate, IntegerBisect,
-  // real Continuous, or unused Padding -- 5 possibilities, not 4: Padding is
-  // distinct from a genuine Continuous slot (TEST_EXTENSION.md), even
-  // though both were the same SlotKind::Continuous before that fix.
-  std::vector<VarKind> kinds = {
-      VarKind::Continuous, VarKind::Binary, VarKind::Integer};
-
-  GreedyCompositionPolicy<double, 1> policy {FanOutSpec {4}};
-  auto compositions = policy.possible_compositions(kinds);
-
-  auto contains = [&](SlotKind kind)
-  {
-    return std::any_of(compositions.begin(),
-                       compositions.end(),
-                       [&](const Composition<1>& c) { return c[0] == kind; });
-  };
-
-  CHECK(compositions.size() == 5);
-  CHECK(contains(SlotKind::Continuous));
-  CHECK(contains(SlotKind::IntegerBisect));
-  CHECK(contains(SlotKind::IntegerEnumerate));
-  CHECK(contains(SlotKind::BinaryEnumerate));
-  CHECK(contains(SlotKind::Padding));
-}
-
-TEST_CASE(
-    "GreedyCompositionPolicy::choose always returns a Composition "
-    "possible_compositions() reports",
-    "[composition_policy]")
-{
-  std::vector<cu::interval<double>> box = {
-      {0.0, 10.0},
-      {0.0, 1.0},
-      {0.0, 3.0},
-  };
-  std::vector<VarKind> kinds = {
-      VarKind::Continuous, VarKind::Binary, VarKind::Integer};
-
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
-  auto assignment = policy.choose(box, kinds);
-  auto compositions = policy.possible_compositions(kinds);
-
-  CHECK(std::find(
-            compositions.begin(), compositions.end(), assignment.composition)
-        != compositions.end());
-}
-
-TEST_CASE(
-    "GreedyCompositionPolicy::possible_compositions caps k/m by the problem's "
-    "actual variable counts",
-    "[composition_policy]")
-{
-  // 3 binary variables, no integer or continuous ones. Uncapped, CycleSize=5
-  // would yield 56 structurally-possible splits of binary/integer/continuous
-  // slot counts; capped by what this problem can actually produce (m is
-  // always 0 -- there are no integers to ever fill an integer slot, so k can
-  // only run 0..3), there are exactly 4: k = 0, 1, 2, 3.
-  std::vector<VarKind> kinds = {
-      VarKind::Binary, VarKind::Binary, VarKind::Binary};
-
-  GreedyCompositionPolicy<double, 5> policy {FanOutSpec {4}};
-  auto compositions = policy.possible_compositions(kinds);
-
-  CHECK(compositions.size() == 4);
-  for (const auto& c : compositions) {
-    for (SlotKind kind : c) {
-      CHECK(kind != SlotKind::IntegerEnumerate);
-      CHECK(kind != SlotKind::IntegerBisect);
-    }
-  }
-}
-
 // --- FanOutSpec: the checks the compiler used to do for us ------------------
 //
 // While these were the PartitionNum/EnumerateCap template parameters, a
@@ -498,21 +419,6 @@ TEST_CASE("max_cycle_size caps the slots a policy fills below its capacity",
   // slots, even though every filled slot enumerates.
   CHECK(is_fully_enumerable(assignment.composition));
   CHECK_FALSE(can_fathom_without_children(5, assignment.composition));
-}
-
-TEST_CASE("possible_compositions respects max_cycle_size",
-          "[composition_policy][capacity]")
-{
-  // The driver sizes its work off this enumeration, so it must not contain
-  // compositions choose() would never return.
-  std::vector<VarKind> kinds(6, VarKind::Binary);
-
-  GreedyCompositionPolicy<double, 8> policy {
-      FanOutSpec {4}, cuminlp::SearchCalibration {.max_cycle_size = 2}};
-
-  for (auto const& comp : policy.possible_compositions(kinds)) {
-    CHECK(comp.count <= 2);
-  }
 }
 
 TEST_CASE("A policy cannot be capped above the capacity it was compiled for",

@@ -34,29 +34,6 @@ target_link_libraries(cuminlp_lib INTERFACE cuinterval)
 
 target_compile_features(cuminlp_lib INTERFACE cxx_std_20)
 
-# FixedRosenbrockDriver::solve() is a plain (non-template) method, so unlike
-# the rest of cuminlp_lib it needs an actual translation unit to compile.
-add_library(
-  fixed_rosenbrock_driver_lib
-  source/fixed_examples/fixed_rosenbrock_driver.cu
-)
-add_library(cuminlp::fixed_rosenbrock_driver ALIAS fixed_rosenbrock_driver_lib)
-
-target_include_directories(
-    fixed_rosenbrock_driver_lib
-    PUBLIC "${PROJECT_SOURCE_DIR}/source/fixed_examples"
-)
-
-target_link_libraries(fixed_rosenbrock_driver_lib PUBLIC cuminlp::lib)
-
-target_compile_features(fixed_rosenbrock_driver_lib PUBLIC cxx_std_20)
-
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set_target_properties(
-      fixed_rosenbrock_driver_lib PROPERTIES CUDA_ARCHITECTURES native
-  )
-endif()
-
 # GAMS scalar-format frontend: reads a .gms model into a dag::Problem. Pure
 # host C++ with no CUDA and no external dependencies, so it is a CXX target --
 # it compiles fast and its tests run on machines with no GPU.
@@ -88,18 +65,8 @@ endif()
 
 # ---- Examples ----
 
-# Reference-only fixed instance retained for comparison with the current
-# solver entrypoint below.
-add_executable(fixed_rosenbrock source/fixed_examples/fixed_rosenbrock.cu)
-
-target_link_libraries(fixed_rosenbrock PRIVATE cuminlp::fixed_rosenbrock_driver)
-
-target_compile_features(fixed_rosenbrock PRIVATE cxx_std_20)
-
-# Same Rosenbrock instance/search as fixed_rosenbrock, but solved via
-# GraphDriver -- the DAG/CUDA-graph-replay evaluator -- instead of the
-# hand-written kernels in FixedRosenbrockDriver. Run alongside
-# fixed_rosenbrock to compare the two.
+# Rosenbrock instance solved via GraphDriver -- the DAG/CUDA-graph-replay
+# evaluator.
 add_executable(graph_rosenbrock source/fixed_examples/graph_rosenbrock.cu)
 
 target_link_libraries(graph_rosenbrock PRIVATE cuminlp::lib)

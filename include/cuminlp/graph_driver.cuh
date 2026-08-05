@@ -29,8 +29,8 @@ namespace cuminlp
 // picks a SlotAssignment for the current node's box; the corresponding
 // (point, interval) GraphReplay pair -- point for GUB candidates, interval
 // for sound lower bounds / pruning -- is built lazily on first use and
-// cached (find_graphs/find_exact_graphs), since possible_compositions() can
-// be large and most entries may go unused for a given problem/Capacity.
+// cached (find_graphs/find_exact_graphs), since the reachable Compositions
+// can be numerous and most go unused for a given problem/Capacity.
 //
 // If a node's live dimensions all fit within Capacity and the chosen
 // Composition is fully enumerable, an ExactGraphReplay evaluates it exactly
@@ -89,8 +89,8 @@ public:
     FanOutSpec const& fan_out = policy_->fan_out();
 
     // One (point, interval) replay pair per Composition actually encountered,
-    // built lazily and cached -- eagerly building every possible_compositions()
-    // entry could waste enormous GPU memory on graphs nothing ever launches.
+    // built lazily and cached -- eagerly building every reachable Composition
+    // could waste enormous GPU memory on graphs nothing ever launches.
     //
     // `stamp` is what makes the cache *bounded*..
     struct CompositionGraphs

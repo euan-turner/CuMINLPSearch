@@ -6,12 +6,11 @@
 namespace cuminlp
 {
 
-// Shared bookkeeping (global bounds, tolerance, iteration
-// budget) for every concrete driver. Concrete drivers -- FixedRosenbrockDriver
-// (fixed_examples/fixed_rosenbrock_driver.hpp), GraphDriver (graph_driver.cuh), and later
-// JITKernelDriver -- derive from this and each define their own solve(),
-// since how a problem is supplied (hardcoded vs. a Problem instance) differs
-// per driver and isn't expressible as one shared virtual signature.
+// Shared bookkeeping (global bounds, tolerance, iteration budget) for every
+// concrete driver. Concrete drivers -- GraphDriver (graph_driver.cuh), and
+// later JITKernelDriver -- derive from this and each define their own
+// solve(), since how a problem is supplied differs per driver and isn't
+// expressible as one shared virtual signature.
 class driver
 {
 public:

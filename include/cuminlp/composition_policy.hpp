@@ -308,11 +308,6 @@ public:
       std::span<const cu::interval<T>> box,
       std::span<const dag::VarKind> var_kinds) const = 0;
 
-  // Every Composition `choose` could return, for any box with these
-  // var_kinds.
-  virtual std::vector<Composition<Capacity>> possible_compositions(
-      std::span<const dag::VarKind> var_kinds) const = 0;
-
 private:
   FanOutSpec fan_out_;
   SearchCalibration calibration_;
@@ -368,80 +363,6 @@ public:
     // what the composition means (see Composition's comment).
     out.composition.count = filled;
 
-    return out;
-  }
-
-  // `choose` always lays out slots as a run of BinaryEnumerate, then a run of
-  // IntegerEnumerate, then a run of IntegerBisect, then Continuous, then
-  // Padding for whatever's left: fill_integer visits candidates in ascending
-  // domain-size order and decides Enumerate vs Bisect by comparing each
-  // candidate's own domain size against enumerate_cap, so once one candidate
-  // exceeds EnumerateCap, every later (larger-or-equal) one does too -- the
-  // Enumerate/Bisect split within the integer run can only happen at one
-  // point, not in an arbitrary per-slot pattern. So every reachable
-  // composition is fixed by 4 counts: how many leading slots are binary (k),
-  // how many of the following integer slots enumerate (e) vs bisect (m - e)
-  // out of m total integer slots, and how many of the remaining slots are
-  // genuinely continuous (c) vs unused Padding. k, m and c are bounded not
-  // just by CycleSize but by how many binary/integer/continuous variables
-  // the problem actually has -- fill_binary/fill_integer/fill_continuous can
-  // never fill more slots than there are live candidates of that kind, at
-  // any node, ever.
-  std::vector<Composition<Capacity>> possible_compositions(
-      std::span<const dag::VarKind> var_kinds) const override
-  {
-    std::size_t num_binary = 0;
-    std::size_t num_integer = 0;
-    std::size_t num_continuous = 0;
-    for (dag::VarKind kind : var_kinds) {
-      if (kind == dag::VarKind::Binary) {
-        ++num_binary;
-      }
-      if (kind == dag::VarKind::Integer) {
-        ++num_integer;
-      }
-      if (kind == dag::VarKind::Continuous) {
-        ++num_continuous;
-      }
-    }
-    // Bounded by the policy's cap, not the compiled capacity: a rung wider
-    // than --max-cycle-size must not enumerate compositions choose() would
-    // never return, or the driver would size its ladder rung off phantom
-    // entries.
-    std::size_t const slots = max_cycle_size();
-    std::size_t const max_k = std::min(slots, num_binary);
-
-    std::vector<Composition<Capacity>> out;
-    for (std::size_t k = 0; k <= max_k; ++k) {
-      std::size_t const max_m = std::min(slots - k, num_integer);
-      for (std::size_t m = 0; m <= max_m; ++m) {
-        for (std::size_t e = 0; e <= m; ++e) {
-          std::size_t const remaining = slots - k - m;
-          std::size_t const max_c = std::min(remaining, num_continuous);
-          for (std::size_t c = 0; c <= max_c; ++c) {
-            Composition<Capacity> comp {};
-            std::size_t s = 0;
-            for (std::size_t i = 0; i < k; ++i) {
-              comp[s++] = SlotKind::BinaryEnumerate;
-            }
-            for (std::size_t i = 0; i < e; ++i) {
-              comp[s++] = SlotKind::IntegerEnumerate;
-            }
-            for (std::size_t i = 0; i < m - e; ++i) {
-              comp[s++] = SlotKind::IntegerBisect;
-            }
-            for (std::size_t i = 0; i < c; ++i) {
-              comp[s++] = SlotKind::Continuous;
-            }
-            comp.count = s;
-            for (; s < Capacity; ++s) {
-              comp[s] = SlotKind::Padding;
-            }
-            out.push_back(comp);
-          }
-        }
-      }
-    }
     return out;
   }
 

@@ -33,11 +33,6 @@ namespace cuminlp::search
 // leaves the queue. Refcounting says exactly when that is: an entry's count is
 // the construction reference enqueue() hands back, plus one per pending node
 // naming it as pidx. See design/BOUNDED_FRONTIER.md §6.
-//
-// The counting is opt-in. A caller that never calls release() (
-// FixedRosenbrockDriver, source/fixed_examples/fixed_rosenbrock_driver.cu) never drops a
-// count to zero, so nothing is ever freed and nothing is ever reused -- which
-// is today's behaviour exactly, indices included.
 template<typename T>
 struct IntervalHistory
 {
@@ -52,8 +47,8 @@ struct IntervalHistory
 
   // Appends an interval to the history, returning the slot holding it with one
   // reference -- the "construction reference" -- held by the caller. The slot
-  // index is what CompressedInterval/CompositionInterval entries derived from
-  // this box carry as their pidx.
+  // index is what CompositionInterval entries derived from this box carry as
+  // their pidx.
   //
   // A slot freed by release() is reused here rather than growing the vector,
   // so an index is only unique among *live* entries: pidx is no longer a
@@ -144,96 +139,10 @@ private:
 };
 
 /**
- * @brief Compressed format for an interval, used to store all intervals pending
- * in the list and all intervals that have been explored. This is
- * FixedRosenbrockDriver's own node type, cycling a fixed, contiguous
- * cycle_start block uniformly -- see CompositionInterval below for
- * GraphDriver's composition/policy-aware equivalent.
- *
- * @tparam T
- */
-template<typename T>
-struct CompressedInterval
-{
-  std::size_t sidx;  // index within parent interval
-  std::size_t pidx;  // index of parent interval in history
-  std::size_t depth;  // tree depth of interval
-  std::size_t cycle_start;  // start of block of dimensions to partition
-  T lb;  // sound lower bound over this interval
-
-  bool operator<(const CompressedInterval<T>& other) const
-  {
-    // Lower is higher priority to explore
-    // 1. by least lower bound
-    // 2. by deepest in the tree
-    // 3. by most recent parent
-    if (lb != other.lb) {
-      return lb < other.lb;
-    }
-    if (depth != other.depth) {
-      return depth > other.depth;
-    }
-    return pidx > other.pidx;
-  }
-
-  bool operator==(const CompressedInterval& other) const
-  {
-    return lb == other.lb && pidx == other.pidx;
-  }
-
-  // Reconstructs the explicit bounds for this interval, looking up its
-  // parent in `history` if it has one and narrowing by this interval's own
-  // sidx/cycle_start. `out.bounds` must already be sized to the problem's
-  // dimensionality. `cycle_size`/`partition_num` mirror the CycleSize and
-  // PartitionNum used to build the partition::CycleContext that produced this
-  // interval on device.
-  void materialise(const IntervalHistory<T>& history,
-                   std::vector<cu::interval<T>>& out,
-                   std::size_t cycle_size,
-                   std::size_t partition_num) const
-  {
-    if (pidx == 0) {
-      // first interval - full (unbounded) domain
-      for (auto& b : out) {
-        b.lb = std::numeric_limits<T>::lowest();
-        b.ub = std::numeric_limits<T>::max();
-      }
-      return;
-    }
-
-    const std::vector<cu::interval<T>>& parent = history.intervals[pidx];
-
-    // Decode sidx into a per-dimension partition index within the cycled
-    // block of dimensions, mirroring partition::make_cycle_context.
-    std::vector<std::size_t> part(cycle_size);
-    std::size_t idx = sidx;
-    for (std::size_t j = 0; j < cycle_size; ++j) {
-      part[j] = idx % partition_num;
-      idx /= partition_num;
-    }
-
-    // Narrow each dimension, mirroring partition::get_bounds.
-    for (std::size_t dim = 0; dim < out.size(); ++dim) {
-      const cu::interval<T>& pb = parent[dim];
-      if (dim >= cycle_start && dim < cycle_start + cycle_size) {
-        std::size_t i = dim - cycle_start;
-        T width = (pb.ub - pb.lb) / static_cast<T>(partition_num);
-        out[dim].lb = pb.lb + width * static_cast<T>(part[i]);
-        out[dim].ub = pb.lb + width * static_cast<T>(part[i] + 1);
-      } else {
-        out[dim] = pb;
-      }
-    }
-  }
-};
-
-/**
- * @brief GraphDriver's node type: like CompressedInterval, but for a
- * CompositionPolicy-driven search instead of a fixed contiguous cycle_start
- * block. No cycle-position bookkeeping is stored here: CompositionPolicy is a
- * pure function of a node's box + variable kinds (see composition_policy.hpp),
- * so `materialise` recovers the SlotAssignment that produced this interval by
- * just re-invoking the policy on the reconstructed parent box, rather than by
+ * @brief GraphDriver's node type. CompositionPolicy is a pure function of a
+ * node's box + variable kinds (see composition_policy.hpp), so `materialise`
+ * recovers the SlotAssignment that produced this interval by just
+ * re-invoking the policy on the reconstructed parent box, rather than by
  * tracking which slots/variables were used at each node.
  *
  * The fan-outs sidx is encoded against are read off `policy` in materialise()
@@ -371,13 +280,11 @@ struct CompositionInterval
   }
 };
 
-// Min-Heap of Intervals for the pending list
-// highest priority is least lb, then least pidx
-// Node defaults to FixedRosenbrockDriver's CompressedInterval<T>; GraphDriver
-// instantiates this with CompositionInterval<T, CycleSize>
-// instead -- the heap logic itself only needs Node's operator</.lb, so it's
-// shared between both node shapes rather than duplicated.
-template<typename T, typename Node = CompressedInterval<T>>
+// Min-Heap of Intervals for the pending list.
+// highest priority is least lb, then least pidx. GraphDriver instantiates
+// this with CompositionInterval<T, Capacity>; the heap logic itself only
+// needs Node's operator</.lb.
+template<typename T, typename Node>
 class IntervalPQueue
 {
 private:
