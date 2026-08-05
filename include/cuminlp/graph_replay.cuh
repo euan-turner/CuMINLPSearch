@@ -22,100 +22,130 @@
 #include "composition_policy.hpp"
 #include "cuda_utils.cuh"
 #include "dag.hpp"
-#include "partition.cuh"
 #include "search_sizing.hpp"
+#include "slot_decode.hpp"
 
 namespace cuminlp::dag
 {
 
-/**
- * @brief Partitions the `parent_domain` into materialised sub-domains
- *
- * @tparam T
- * @tparam CycleSize
- * @param parent_domain
- * @param slot_var_ids  which variable each of the CycleSize slots acts on
- * @param slot_fan_out  fan-out (radix) of each slot
- * @param slot_kind     operation each slot performs
- * @param var_buffers
- * @param n_vars
- * @param n_regions
- * @return __global__
- */
-template<typename T, std::size_t CycleSize>
-__global__ void partition_variables_kernel(
-    const cu::interval<T>* __restrict__ parent_domain,  // NUM_VARS (box bounds
-                                                        // per variable)
+// Two-pass region materialisation (design/MODULE_REFACTOR.md §4.2-4.3),
+// replacing a per-thread register-resident slot context and an
+// O(n_vars x slot_count) scan with two grid-parallel kernels:
+//
+//   broadcast_domain_kernel*  every (variable, region[, sample]) starts at
+//                             the parent box's value for that variable.
+//   apply_slots_kernel*       for each (live slot, region), decodes that
+//                             slot's digit arithmetically from the region
+//                             index (`(r / prefix[j]) % fan_out[j]`, the same
+//                             digit a repeated-division loop computes -- see
+//                             slot_prefixes in composition_policy.hpp) and
+//                             overwrites exactly the (variable, region) pairs
+//                             that slot narrows.
+//
+// The two run with an explicit graph dependency (apply after broadcast), so
+// the overwrite cannot race the broadcast. Distinct var_ids across slots
+// (CompositionPolicy's contract) is what makes apply's "last write wins"
+// agree with the old context's "first match wins": each dimension is
+// touched by at most one slot. Both kernels are template-free in any
+// capacity -- slot_count is a runtime argument, not an array bound.
+
+/// Broadcasts the parent box into every region's interval buffer.
+template<typename T>
+__global__ void broadcast_domain_kernel(
+    const cu::interval<T>* __restrict__ parent_domain,
+    cu::interval<T>* const* __restrict__ var_buffers,
+    std::size_t n_vars,
+    std::size_t n_regions)
+{
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = n_vars * n_regions;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const vid = idx / n_regions;
+    var_buffers[vid][idx % n_regions] = parent_domain[vid];
+  }
+}
+
+/// Narrows each live slot's region-specific bound, overwriting what
+/// broadcast_domain_kernel wrote for that (variable, region) pair.
+template<typename T>
+__global__ void apply_slots_kernel(
+    const cu::interval<T>* __restrict__ parent_domain,
     const std::size_t* __restrict__ slot_var_ids,
     const std::uint32_t* __restrict__ slot_fan_out,
+    const std::size_t* __restrict__ slot_prefix,
     const SlotKind* __restrict__ slot_kind,
-    cu::interval<T>* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS
-                                                       // (box bounds per
-                                                       // variable per region)
-    std::size_t n_vars,
+    cu::interval<T>* const* __restrict__ var_buffers,
     std::size_t n_regions,
     std::size_t slot_count)
 {
-  std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  std::size_t num_threads = gridDim.x * blockDim.x;
-
-  for (std::size_t r = tid; r < n_regions; r += num_threads) {
-    auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
-    for (std::size_t vid = 0; vid < n_vars; ++vid) {
-      cu::interval<T> v;
-      partition::get_slot_bounds(ctx, parent_domain, vid, v);
-      var_buffers[vid][r] = v;
-    }
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = slot_count * n_regions;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const j = idx / n_regions;
+    std::size_t const r = idx % n_regions;
+    std::size_t const part = (r / slot_prefix[j]) % slot_fan_out[j];
+    std::size_t const vid = slot_var_ids[j];
+    cu::interval<T> v;
+    decode::slot_bounds<T>(
+        slot_kind[j], parent_domain[vid], part, slot_fan_out[j], v);
+    var_buffers[vid][r] = v;
   }
 }
 
 /**
- * @brief Deterministic counterpart to sample_points_kernel: every slot must
- * be IntegerEnumerate/BinaryEnumerate (GraphDriver only wires this up when
- * that holds and every live variable fits in CycleSize slots), so every
- * region's per-variable bound from get_slot_bounds is already an exact point
- * (lb == ub) -- nothing to sample, just take it. Otherwise identical to
- * partition_variables_kernel, just writing the scalar T rather than
- * cu::interval<T>, so it plugs into the same V=T op-kernel pipeline
- * (feasibility_check_kernel, objective_extract_kernel, CUB ArgMin) that
- * sample_points_kernel already feeds -- this reuses that pipeline as-is to
- * get the true minimum objective over every point in the enumeration, not
- * an interval relaxation.
- *
- * @tparam T
- * @tparam CycleSize
- * @param parent_domain
- * @param slot_var_ids  which variable each of the CycleSize slots acts on
- * @param slot_fan_out  fan-out (radix) of each slot
- * @param slot_kind     operation each slot performs (always Enumerate here)
- * @param var_buffers
- * @param n_vars
- * @param n_regions
- * @return __global__
+ * @brief Deterministic counterpart, for a fully-enumerable Composition
+ * (every slot IntegerEnumerate/BinaryEnumerate, GraphDriver's precondition
+ * for using this pair): broadcasts each variable's exact point value
+ * (parent_domain[vid].lb -- a non-live dimension is degenerate, so lb is
+ * the exact point). Writes T rather than cu::interval<T>, so it plugs into
+ * the same V=T op-kernel pipeline (feasibility_check_kernel,
+ * objective_extract_kernel, CUB ArgMin) the sampling point graph feeds --
+ * this reuses that pipeline as-is to get the true minimum objective over
+ * every point in the enumeration, not an interval relaxation.
  */
-template<typename T, std::size_t CycleSize>
-__global__ void enumerate_points_kernel(
+template<typename T>
+__global__ void broadcast_domain_point_kernel(
+    const cu::interval<T>* __restrict__ parent_domain,
+    T* const* __restrict__ var_buffers,
+    std::size_t n_vars,
+    std::size_t n_regions)
+{
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = n_vars * n_regions;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const vid = idx / n_regions;
+    var_buffers[vid][idx % n_regions] = parent_domain[vid].lb;
+  }
+}
+
+/// Enumerate counterpart of apply_slots_kernel: every slot decodes to an
+/// exact point (lb == ub), so the narrowed bound's lb is taken directly.
+template<typename T>
+__global__ void apply_slots_point_kernel(
     const cu::interval<T>* __restrict__ parent_domain,
     const std::size_t* __restrict__ slot_var_ids,
     const std::uint32_t* __restrict__ slot_fan_out,
+    const std::size_t* __restrict__ slot_prefix,
     const SlotKind* __restrict__ slot_kind,
-    T* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS
-    std::size_t n_vars,
+    T* const* __restrict__ var_buffers,
     std::size_t n_regions,
     std::size_t slot_count)
 {
-  std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  std::size_t num_threads = gridDim.x * blockDim.x;
-
-  for (std::size_t r = tid; r < n_regions; r += num_threads) {
-    auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
-    for (std::size_t vid = 0; vid < n_vars; ++vid) {
-      cu::interval<T> v;
-      partition::get_slot_bounds(ctx, parent_domain, vid, v);
-      var_buffers[vid][r] = v.lb;  // exact point: v.lb == v.ub
-    }
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = slot_count * n_regions;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const j = idx / n_regions;
+    std::size_t const r = idx % n_regions;
+    std::size_t const part = (r / slot_prefix[j]) % slot_fan_out[j];
+    std::size_t const vid = slot_var_ids[j];
+    cu::interval<T> v;
+    decode::slot_bounds<T>(
+        slot_kind[j], parent_domain[vid], part, slot_fan_out[j], v);
+    var_buffers[vid][r] = v.lb;  // exact point: v.lb == v.ub
   }
 }
 
@@ -165,8 +195,8 @@ __device__ __forceinline__ T sample_from_interval(T lb,
 // feasible point of the original problem, so it can never be a valid GUB
 // witness. ceil/floor (rather than assuming lb/ub are themselves already
 // integers) is what keeps this correct even for a sub-box produced by
-// bisecting an integer variable whose domain was too wide to enumerate
-// outright (see GreedyCompositionPolicy) -- IntegerBisect reuses the same
+// partitioning an integer variable whose domain was too wide to enumerate
+// outright (see GreedyCompositionPolicy) -- IntegerPartition reuses the same
 // linear-width formula as Continuous, so its sub-box boundaries generally
 // land off the integer lattice.
 template<typename T>
@@ -193,61 +223,80 @@ __device__ __forceinline__ T sample_discrete_from_interval(T lb,
 }
 
 /**
- * @brief Samples points uniformly from each subdomain
+ * @brief Broadcast pass for the sampling point graph: draws `sample_points`
+ * samples per (variable, region) directly from the parent box -- the value
+ * every region starts with before any live slot narrows it. Every
+ * (variable, region, sample-index) triple is an independent thread, unlike
+ * apply_slots_sample_kernel below which threads over (slot, region) and
+ * loops sample_points internally.
  *
- * `sample_points` is a kernel argument rather than a template parameter: it
- * only ever appeared here, as this loop's bound and the row stride into
- * var_buffers, so making it runtime costs the full unroll of a loop that is
- * not the hot path (the DAG evaluation kernels dominate, and they see only
- * n_elems). Everything else that used it -- n_elems, every buffer size --
- * was already runtime arithmetic.
- *
- * @tparam T numerical precision
- * @tparam CycleSize number of variables being cycled
- * @param parent_domain interval domain being divided
- * @param slot_var_ids  which variable each of the CycleSize slots acts on
- * @param slot_fan_out  fan-out (radix) of each slot
- * @param slot_kind     operation each slot performs
- * @param var_kinds     per-variable kind (Continuous samples get a uniform
- *                      real value; Integer/Binary get a uniform integer)
- * @param var_buffers buffer for sampled points
- * @param n_vars
- * @param n_regions
- * @param sample_points number of points sampled per subdomain
- * @param salt per-launch seed component, so re-visiting a box draws fresh
- * points
+ * `sample_points` is a kernel argument rather than a template parameter,
+ * same as before the two-pass split.
  */
-template<typename T, std::size_t CycleSize>
-__global__ void sample_points_kernel(
-    const cu::interval<T>* __restrict parent_domain,
-    const std::size_t* __restrict__ slot_var_ids,
-    const std::uint32_t* __restrict__ slot_fan_out,
-    const SlotKind* __restrict__ slot_kind,
+template<typename T>
+__global__ void broadcast_domain_sample_kernel(
+    const cu::interval<T>* __restrict__ parent_domain,
     const VarKind* __restrict__ var_kinds,
     T* const* __restrict__ var_buffers,  // NUM_VARS x NUM_REGIONS x
                                          // sample_points
     std::size_t n_vars,
     std::size_t n_regions,
+    std::size_t sample_points,
+    std::size_t salt)
+{
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = n_vars * n_regions * sample_points;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const per_var = n_regions * sample_points;
+    std::size_t const vid = idx / per_var;
+    std::size_t const rem = idx % per_var;
+    std::size_t const r = rem / sample_points;
+    std::size_t const i = rem % sample_points;
+    cu::interval<T> const v = parent_domain[vid];
+    bool const discrete = var_kinds[vid] != VarKind::Continuous;
+    T const p = discrete
+        ? sample_discrete_from_interval(v.lb, v.ub, vid, i, r, salt)
+        : sample_from_interval(v.lb, v.ub, vid, i, r, salt);
+    var_buffers[vid][r * sample_points + i] = p;
+  }
+}
+
+/// Sample counterpart of apply_slots_kernel: re-draws each live slot's
+/// sample_points from its narrowed bound, overwriting the broadcast pass's
+/// draw from the parent bound for that (variable, region) pair -- last
+/// write wins (design/MODULE_REFACTOR.md §4.4).
+template<typename T>
+__global__ void apply_slots_sample_kernel(
+    const cu::interval<T>* __restrict__ parent_domain,
+    const std::size_t* __restrict__ slot_var_ids,
+    const std::uint32_t* __restrict__ slot_fan_out,
+    const std::size_t* __restrict__ slot_prefix,
+    const SlotKind* __restrict__ slot_kind,
+    const VarKind* __restrict__ var_kinds,
+    T* const* __restrict__ var_buffers,
+    std::size_t n_regions,
     std::size_t slot_count,
     std::size_t sample_points,
     std::size_t salt)
 {
-  std::size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  std::size_t num_threads = gridDim.x * blockDim.x;
-
-  for (std::size_t r = tid; r < n_regions; r += num_threads) {
-    auto ctx = partition::make_slot_context<CycleSize>(
-        r, slot_var_ids, slot_fan_out, slot_kind, slot_count);
-    for (std::size_t vid = 0; vid < n_vars; ++vid) {
-      cu::interval<T> v;
-      partition::get_slot_bounds(ctx, parent_domain, vid, v);
-      bool discrete = var_kinds[vid] != VarKind::Continuous;
-      for (std::size_t i = 0; i < sample_points; ++i) {
-        T p = discrete
-            ? sample_discrete_from_interval(v.lb, v.ub, vid, i, r, salt)
-            : sample_from_interval(v.lb, v.ub, vid, i, r, salt);
-        var_buffers[vid][r * sample_points + i] = p;
-      }
+  std::size_t const tid = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t const stride = gridDim.x * blockDim.x;
+  std::size_t const total = slot_count * n_regions;
+  for (std::size_t idx = tid; idx < total; idx += stride) {
+    std::size_t const j = idx / n_regions;
+    std::size_t const r = idx % n_regions;
+    std::size_t const part = (r / slot_prefix[j]) % slot_fan_out[j];
+    std::size_t const vid = slot_var_ids[j];
+    cu::interval<T> v;
+    decode::slot_bounds<T>(
+        slot_kind[j], parent_domain[vid], part, slot_fan_out[j], v);
+    bool const discrete = var_kinds[vid] != VarKind::Continuous;
+    for (std::size_t i = 0; i < sample_points; ++i) {
+      T const p = discrete
+          ? sample_discrete_from_interval(v.lb, v.ub, vid, i, r, salt)
+          : sample_from_interval(v.lb, v.ub, vid, i, r, salt);
+      var_buffers[vid][r * sample_points + i] = p;
     }
   }
 }
@@ -997,11 +1046,12 @@ __global__ void gather_candidate_point_kernel(
 // constraint), so a node reachable from more than one is allocated and
 // evaluated exactly once. V is the value type of a node's buffer, either
 // cu::interval<T> for the interval graph, or T for the sample/exact graphs.
-// Below the root node partitioning/sampling/enumerating node, the graphs are
-// identical as the kernels and operators are overloaded. Exact (only meaningful
-// when V=T) selects the deterministic enumerate_points_kernel instead of
-// sample_points_kernel's random sampling -- see ExactGraphReplay.
-template<typename T, typename V, std::size_t CycleSize, bool Exact = false>
+// Below the root's broadcast/apply pair, the graphs are identical as the
+// kernels and operators are overloaded. Exact (only meaningful when V=T)
+// selects the deterministic broadcast/apply_slots_point_kernel pair instead
+// of the sampling point graph's broadcast/apply_slots_sample_kernel pair --
+// see ExactGraphReplay.
+template<typename T, typename V, bool Exact = false>
 class GraphBuilder
 {
   static_assert(
@@ -1016,15 +1066,18 @@ public:
    * @param problem Problem representation
    * @param domain_buffer Storage for domain being evaluated
    * @param n_regions Number of regions (the composition's fan-out)
-   * @param slot_var_ids Device buffer, CycleSize entries: which variable each
-   * slot acts on
-   * @param slot_fan_out Device buffer, CycleSize entries: fan-out of each slot
-   * @param slot_kind Device buffer, CycleSize entries: operation each slot
+   * @param slot_var_ids Device buffer, slot_count entries: which variable
+   * each slot acts on
+   * @param slot_fan_out Device buffer, slot_count entries: fan-out of each
+   * slot
+   * @param slot_prefix Device buffer, slot_count entries: prefix product of
+   * each slot's fan-out (see slot_prefixes, composition_policy.hpp)
+   * @param slot_kind Device buffer, slot_count entries: operation each slot
    * performs
    * @param var_kinds Device buffer, n_vars entries: per-variable kind. Only
-   *                  consumed by the point graph's root node (so samples for
-   *                  Integer/Binary variables land on the integer lattice);
-   *                  the interval graph ignores it.
+   *                  consumed by the point graph's root nodes (so samples
+   *                  for Integer/Binary variables land on the integer
+   *                  lattice); the interval graph ignores it.
    * @param sample_points Points sampled per subdomain. Meaningful only for
    *                  the sampling point graph; the interval and exact graphs
    *                  evaluate one element per region and pass 1.
@@ -1034,6 +1087,7 @@ public:
                std::size_t n_regions,
                const std::size_t* slot_var_ids,
                const std::uint32_t* slot_fan_out,
+               const std::size_t* slot_prefix,
                const SlotKind* slot_kind,
                const VarKind* var_kinds,
                std::size_t sample_points,
@@ -1048,17 +1102,20 @@ public:
                 : n_regions)  // the number of V-typed slots to operate over
       , block_(256)
       , grid_(static_cast<unsigned int>(detail::ceil_div(n_elems_, 256)))
-      , root_grid_(static_cast<unsigned int>(detail::ceil_div(n_regions_, 256)))
+      , broadcast_grid_(static_cast<unsigned int>(
+            detail::ceil_div(problem_.box_bounds.size() * n_elems_, 256)))
+      , apply_grid_(static_cast<unsigned int>(
+            detail::ceil_div(slot_count_ * n_regions_, 256)))
   {
     detail::check(cudaGraphCreate(&graph_, 0), "cudaGraphCreate");
 
     buffers_.resize(problem_.graph.nodes.size(), nullptr);
     producer_nodes_.resize(problem_.graph.nodes.size(), nullptr);
 
-    // Every Op::Var node is materialised eagerly in one shared kernel node
-    // that partitions the parent domain and scatters it into each variable's
-    // buffer. Op::Const nodes get no buffer; their payload is consumed by
-    // value at the use site (see wire_binary).
+    // Every Op::Var node is materialised eagerly by the root's broadcast/
+    // apply pair, which scatters the parent domain (narrowed by any live
+    // slot) into each variable's buffer. Op::Const nodes get no buffer;
+    // their payload is consumed by value at the use site (see wire_binary).
     std::size_t n_vars = problem_.box_bounds.size();
     std::vector<V*> var_buffer_list(n_vars, nullptr);
     for (const auto& node : problem_.graph.nodes) {
@@ -1076,54 +1133,93 @@ public:
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
 
+    // Broadcast, then apply the live slots on top -- an explicit dependency
+    // edge so the narrowing cannot race the broadcast (§4.3). root_node_ is
+    // the apply node: it is what every Op::Var producer, and hence every
+    // downstream node, actually depends on. slot_count_ == 0 (a fully
+    // resolved box) has nothing to apply, so the broadcast alone is root.
+    cudaGraphNode_t broadcast_node;
     if constexpr (is_point && Exact) {
-      root_node_ =
-          detail::add_kernel_node(graph_,
-                                  {},
-                                  enumerate_points_kernel<T, CycleSize>,
-                                  root_grid_,
-                                  block_,
-                                  domain_buffer,
-                                  slot_var_ids,
-                                  slot_fan_out,
-                                  slot_kind,
-                                  var_buffers_device_,
-                                  n_vars,
-                                  n_regions_,
-                                  slot_count_);
+      broadcast_node = detail::add_kernel_node(graph_,
+                                               {},
+                                               broadcast_domain_point_kernel<T>,
+                                               broadcast_grid_,
+                                               block_,
+                                               domain_buffer,
+                                               var_buffers_device_,
+                                               n_vars,
+                                               n_regions_);
+      root_node_ = slot_count_ == 0 ? broadcast_node
+          : detail::add_kernel_node(graph_,
+                                    {broadcast_node},
+                                    apply_slots_point_kernel<T>,
+                                    apply_grid_,
+                                    block_,
+                                    domain_buffer,
+                                    slot_var_ids,
+                                    slot_fan_out,
+                                    slot_prefix,
+                                    slot_kind,
+                                    var_buffers_device_,
+                                    n_regions_,
+                                    slot_count_);
     } else if constexpr (is_point) {
-      root_node_ = detail::add_kernel_node(graph_,
-                                           {},
-                                           sample_points_kernel<T, CycleSize>,
-                                           root_grid_,
-                                           block_,
-                                           domain_buffer,
-                                           slot_var_ids,
-                                           slot_fan_out,
-                                           slot_kind,
-                                           var_kinds,
-                                           var_buffers_device_,
-                                           n_vars,
-                                           n_regions_,
-                                           slot_count_,
-                                           sample_points_,
-                                           std::size_t {0});
-    } else {
-      root_node_ =
+      broadcast_node =
           detail::add_kernel_node(graph_,
                                   {},
-                                  partition_variables_kernel<T, CycleSize>,
-                                  root_grid_,
+                                  broadcast_domain_sample_kernel<T>,
+                                  broadcast_grid_,
                                   block_,
                                   domain_buffer,
-                                  slot_var_ids,
-                                  slot_fan_out,
-                                  slot_kind,
+                                  var_kinds,
                                   var_buffers_device_,
                                   n_vars,
                                   n_regions_,
-                                  slot_count_);
+                                  sample_points_,
+                                  std::size_t {0});
+      root_node_ = slot_count_ == 0 ? broadcast_node
+          : detail::add_kernel_node(graph_,
+                                    {broadcast_node},
+                                    apply_slots_sample_kernel<T>,
+                                    apply_grid_,
+                                    block_,
+                                    domain_buffer,
+                                    slot_var_ids,
+                                    slot_fan_out,
+                                    slot_prefix,
+                                    slot_kind,
+                                    var_kinds,
+                                    var_buffers_device_,
+                                    n_regions_,
+                                    slot_count_,
+                                    sample_points_,
+                                    std::size_t {0});
+    } else {
+      broadcast_node = detail::add_kernel_node(graph_,
+                                               {},
+                                               broadcast_domain_kernel<T>,
+                                               broadcast_grid_,
+                                               block_,
+                                               domain_buffer,
+                                               var_buffers_device_,
+                                               n_vars,
+                                               n_regions_);
+      root_node_ = slot_count_ == 0 ? broadcast_node
+          : detail::add_kernel_node(graph_,
+                                    {broadcast_node},
+                                    apply_slots_kernel<T>,
+                                    apply_grid_,
+                                    block_,
+                                    domain_buffer,
+                                    slot_var_ids,
+                                    slot_fan_out,
+                                    slot_prefix,
+                                    slot_kind,
+                                    var_buffers_device_,
+                                    n_regions_,
+                                    slot_count_);
     }
+    broadcast_node_ = broadcast_node;
 
     for (const auto& node : problem_.graph.nodes) {
       if (node.op == Op::Var) {
@@ -1223,11 +1319,19 @@ public:
 
   cudaGraphNode_t root_node() const { return root_node_; }
 
+  // The broadcast node, distinct from root_node() (the apply node) whenever
+  // this Composition has at least one live slot. Equal to root_node() when
+  // slot_count_ == 0 (a fully resolved box), since there is then nothing to
+  // apply.
+  cudaGraphNode_t broadcast_node() const { return broadcast_node_; }
+
   V** var_buffers_device() const { return var_buffers_device_; }
 
   dim3 grid() const { return grid_; }
 
-  dim3 root_grid() const { return root_grid_; }
+  dim3 broadcast_grid() const { return broadcast_grid_; }
+
+  dim3 apply_grid() const { return apply_grid_; }
 
   dim3 block() const { return block_; }
 
@@ -1392,8 +1496,10 @@ private:
   std::size_t n_elems_;
   dim3 block_;
   dim3 grid_;
-  dim3 root_grid_;
+  dim3 broadcast_grid_;
+  dim3 apply_grid_;
   cudaGraph_t graph_ {};
+  cudaGraphNode_t broadcast_node_ {};
   cudaGraphNode_t root_node_ {};
   V** var_buffers_device_ = nullptr;
   std::vector<V*> buffers_;  // indexed by node id, null until allocated
@@ -1427,16 +1533,17 @@ private:
 
 // Owns the entire graph replay for a problem and value-type V (either T or
 // cu::interval<T>) This includes:
-// - The root node (partition for intervals, sample for points)
+// - The root's broadcast/apply node pair (§4.3)
 // - Every op-kernel node
 // - A feasibility check kernel per constraint
 // - An objective extraction kernel
 // Main usage is `build`, `set_domain` and `launch`.
 // Each instance owns device memory, a cudaGraph_t and a cudaGraphExec_t
 // Exact (only meaningful when V=T) selects the deterministic
-// enumerate_points_kernel as the root node instead of sample_points_kernel's
-// random sampling -- see ExactGraphReplay/GraphBuilder.
-template<typename T, typename V, std::size_t CycleSize, bool Exact = false>
+// broadcast_domain_point_kernel/apply_slots_point_kernel pair as the root
+// instead of the sampling point graph's random-draw pair -- see
+// ExactGraphReplay/GraphBuilder.
+template<typename T, typename V, bool Exact = false>
 class GraphReplay
 {
   static constexpr bool is_point = std::is_same_v<V, T>;
@@ -1534,7 +1641,7 @@ public:
    */
   static std::string out_of_memory_report(
       const Problem<T>& problem,
-      const Composition<CycleSize>& composition,
+      const Composition& composition,
       const FanOutSpec& fan_out,
       std::size_t sample_points,
       std::size_t n_buffers,
@@ -1549,16 +1656,12 @@ public:
         + detail::format_bytes(budget) + " is available.\n";
 
     // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)".
-    msg += "  composition: " + std::to_string(composition.count)
-        + " live slot(s) of " + std::to_string(CycleSize) + " compiled";
-    for (int k = 0; k < 5; ++k) {
+    msg += "  composition: " + std::to_string(composition.size()) + " live slot(s)";
+    for (int k = 0; k < 4; ++k) {
       auto const kind = static_cast<SlotKind>(k);
-      if (kind == SlotKind::Padding) {
-        continue;
-      }
       std::size_t slots = 0;
-      for (std::size_t j = 0; j < composition.count; ++j) {
-        if (composition[j] == kind) {
+      for (SlotKind s : composition) {
+        if (s == kind) {
           ++slots;
         }
       }
@@ -1603,7 +1706,7 @@ public:
                                                           fan_out,
                                                           solve_sample_points,
                                                           budget,
-                                                          CycleSize);
+                                                          kMaxSlots);
 
     if (best_slots > 0) {
       std::size_t const best_bytes =
@@ -1616,7 +1719,7 @@ public:
                                          solve_sample_points);
       msg += "\n  Acting on " + std::to_string(best_slots)
           + " variable(s) at a time instead of "
-          + std::to_string(composition.count)
+          + std::to_string(composition.size())
           + " keeps every composition the search can reach -- point, interval"
             " and exact graphs together -- within "
           + detail::format_bytes(best_bytes)
@@ -1641,17 +1744,13 @@ public:
   // `budget_bytes` caps what this build may allocate on the device; 0 means
   // "ask the driver for what's currently free". A composition whose fan-out
   // exceeds it raises ResourceExhausted *before* allocating anything, rather
-  // than dying partway through with a bare cudaErrorMemoryAllocation. This
-  // guard did not exist while partition_num was a template parameter: the
-  // handful of compile-time shapes were hand-tuned to fit, whereas a runtime
-  // `--partition-num 10` with CycleSize 20 now asks for 10^20 regions from a
-  // command line.
+  // than dying partway through with a bare cudaErrorMemoryAllocation.
   //
   // `sample_points` is ignored by the interval and exact graphs, which
   // evaluate exactly one element per region; only the sampling point graph
   // reads it.
   static GraphReplay build(const Problem<T>& problem,
-                           const Composition<CycleSize>& composition,
+                           const Composition& composition,
                            const FanOutSpec& fan_out,
                            std::size_t budget_bytes = 0,
                            std::size_t sample_points = 1)
@@ -1667,7 +1766,7 @@ public:
     replay.n_regions_ = composition_fan_out(composition, fan_out);
     replay.n_vars_ = problem.box_bounds.size();
     replay.sample_points_ = is_point && !Exact ? sample_points : 1;
-    replay.slot_count_ = composition.count;
+    replay.slot_count_ = composition.size();
 
     std::size_t const n_buffers = count_buffer_nodes(problem);
     std::size_t const needed = bytes_for(
@@ -1685,46 +1784,58 @@ public:
           needed, budget_bytes, sample_points));
     }
 
+    std::size_t const slot_count = replay.slot_count_;
     replay.domain_buffer_ =
         detail::alloc_device<cu::interval<T>>(replay.n_vars_);
-    replay.slot_var_ids_device_ = detail::alloc_device<std::size_t>(CycleSize);
-    replay.slot_fan_out_device_ = detail::alloc_device<std::uint32_t>(CycleSize);
-    replay.slot_kind_device_ = detail::alloc_device<SlotKind>(CycleSize);
+    replay.slot_var_ids_device_ = detail::alloc_device<std::size_t>(slot_count);
+    replay.slot_fan_out_device_ = detail::alloc_device<std::uint32_t>(slot_count);
+    replay.slot_prefix_device_ = detail::alloc_device<std::size_t>(slot_count);
+    replay.slot_kind_device_ = detail::alloc_device<SlotKind>(slot_count);
     replay.var_kinds_device_ = detail::alloc_device<VarKind>(replay.n_vars_);
 
-    // fan_out/kind are fixed by `composition`, and var_kinds by the problem,
-    // so they're all uploaded once here rather than on every set_domain()
-    // call like var_ids.
-    std::array<std::uint32_t, CycleSize> fan_out_host {};
-    for (std::size_t j = 0; j < CycleSize; ++j) {
-      fan_out_host[j] =
-          static_cast<std::uint32_t>(slot_fan_out(composition[j], fan_out));
+    // fan_out/prefix/kind are fixed by `composition`, and var_kinds by the
+    // problem, so they're all uploaded once here rather than on every
+    // set_domain() call like var_ids.
+    if (slot_count > 0) {
+      std::vector<std::uint32_t> fan_out_host(slot_count);
+      for (std::size_t j = 0; j < slot_count; ++j) {
+        fan_out_host[j] =
+            static_cast<std::uint32_t>(slot_fan_out(composition[j], fan_out));
+      }
+      detail::check(cudaMemcpy(replay.slot_fan_out_device_,
+                               fan_out_host.data(),
+                               slot_count * sizeof(std::uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "cudaMemcpy");
+      std::vector<std::size_t> const prefix_host =
+          slot_prefixes(composition, fan_out);
+      detail::check(cudaMemcpy(replay.slot_prefix_device_,
+                               prefix_host.data(),
+                               slot_count * sizeof(std::size_t),
+                               cudaMemcpyHostToDevice),
+                    "cudaMemcpy");
+      detail::check(cudaMemcpy(replay.slot_kind_device_,
+                               composition.data(),
+                               slot_count * sizeof(SlotKind),
+                               cudaMemcpyHostToDevice),
+                    "cudaMemcpy");
     }
-    detail::check(cudaMemcpy(replay.slot_fan_out_device_,
-                             fan_out_host.data(),
-                             CycleSize * sizeof(std::uint32_t),
-                             cudaMemcpyHostToDevice),
-                  "cudaMemcpy");
-    detail::check(cudaMemcpy(replay.slot_kind_device_,
-                             composition.data(),
-                             CycleSize * sizeof(SlotKind),
-                             cudaMemcpyHostToDevice),
-                  "cudaMemcpy");
     detail::check(cudaMemcpy(replay.var_kinds_device_,
                              problem.var_kinds.data(),
                              replay.n_vars_ * sizeof(VarKind),
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
 
-    GraphBuilder<T, V, CycleSize, Exact> builder(problem,
-                                                 replay.domain_buffer_,
-                                                 replay.n_regions_,
-                                                 replay.slot_var_ids_device_,
-                                                 replay.slot_fan_out_device_,
-                                                 replay.slot_kind_device_,
-                                                 replay.var_kinds_device_,
-                                                 replay.sample_points_,
-                                                 replay.slot_count_);
+    GraphBuilder<T, V, Exact> builder(problem,
+                                      replay.domain_buffer_,
+                                      replay.n_regions_,
+                                      replay.slot_var_ids_device_,
+                                      replay.slot_fan_out_device_,
+                                      replay.slot_prefix_device_,
+                                      replay.slot_kind_device_,
+                                      replay.var_kinds_device_,
+                                      replay.sample_points_,
+                                      replay.slot_count_);
 
     // n_elems_ is n_regions_ for the interval graph, n_regions_ * sample_points
     // for the point graph -- every per-node buffer (feasible[], obj_lb[]
@@ -1879,8 +1990,10 @@ public:
                   "cudaGraphInstantiate");
 
     replay.root_node_ = builder.root_node();
+    replay.broadcast_node_ = builder.broadcast_node();
     replay.var_buffers_device_ = builder.var_buffers_device();
-    replay.root_grid_ = builder.root_grid();
+    replay.broadcast_grid_ = builder.broadcast_grid();
+    replay.apply_grid_ = builder.apply_grid();
     replay.block_ = builder.block();
     replay.node_buffers_ = builder.take_node_buffers();
 
@@ -1912,9 +2025,11 @@ public:
     var_buffers_device_ = other.var_buffers_device_;
     slot_var_ids_device_ = other.slot_var_ids_device_;
     slot_fan_out_device_ = other.slot_fan_out_device_;
+    slot_prefix_device_ = other.slot_prefix_device_;
     slot_kind_device_ = other.slot_kind_device_;
     var_kinds_device_ = other.var_kinds_device_;
     root_node_ = other.root_node_;
+    broadcast_node_ = other.broadcast_node_;
     composition_ = other.composition_;
     n_regions_ = other.n_regions_;
     n_elems_ = other.n_elems_;
@@ -1922,7 +2037,8 @@ public:
     sample_points_ = other.sample_points_;
     slot_count_ = other.slot_count_;
     n_vars_ = other.n_vars_;
-    root_grid_ = other.root_grid_;
+    broadcast_grid_ = other.broadcast_grid_;
+    apply_grid_ = other.apply_grid_;
     block_ = other.block_;
     node_buffers_ = std::move(other.node_buffers_);
     feasible_host_ = std::move(other.feasible_host_);
@@ -1944,9 +2060,11 @@ public:
     other.var_buffers_device_ = nullptr;
     other.slot_var_ids_device_ = nullptr;
     other.slot_fan_out_device_ = nullptr;
+    other.slot_prefix_device_ = nullptr;
     other.slot_kind_device_ = nullptr;
     other.var_kinds_device_ = nullptr;
     other.root_node_ = nullptr;
+    other.broadcast_node_ = nullptr;
     return *this;
   }
 
@@ -1954,14 +2072,17 @@ public:
 
   // Driver calls this before each launch to update the parent domain and
   // which variable fills each slot. Both update via plain memcpy into fixed
-  // buffer addresses (slot_fan_out_/slot_kind_ don't need re-uploading --
-  // they're fixed by this replay's composition); the kernel args are
-  // re-baked via cudaGraphExecKernelNodeSetParams regardless, since the API
-  // requires the whole arg list on every update, not just what changed.
-  // `salt` seeds the point graph's sampler (see sample_from_interval); the
-  // interval graph's root kernel takes no such argument and ignores it.
+  // buffer addresses (slot_fan_out_/slot_prefix_/slot_kind_ don't need
+  // re-uploading -- they're fixed by this replay's composition); the kernel
+  // args for both the broadcast and apply nodes are re-baked via
+  // cudaGraphExecKernelNodeSetParams regardless, since the API requires the
+  // whole arg list on every update, not just what changed. `salt` seeds the
+  // point graph's sampler (see sample_from_interval); the interval graph
+  // takes no such argument and ignores it. `slot_count_ == 0` (a fully
+  // resolved box) has no apply node -- root_node_ == broadcast_node_, so
+  // only the broadcast rebake below runs.
   void set_domain(std::span<const cu::interval<T>> domain,
-                  const std::array<std::size_t, CycleSize>& var_ids,
+                  std::span<const std::size_t> var_ids,
                   std::size_t salt = 0)
   {
     if (exec_ == nullptr) {
@@ -1972,6 +2093,10 @@ public:
           "set_domain: domain size does not match the problem's variable "
           "count");
     }
+    if (var_ids.size() != slot_count_) {
+      throw cuminlp::ShapeMismatch(
+          "set_domain: var_ids size does not match this replay's slot count");
+    }
     detail::check(cudaMemcpy(domain_buffer_,
                              domain.data(),
                              n_vars_ * sizeof(cu::interval<T>),
@@ -1979,70 +2104,121 @@ public:
                   "cudaMemcpy");
     detail::check(cudaMemcpy(slot_var_ids_device_,
                              var_ids.data(),
-                             CycleSize * sizeof(std::size_t),
+                             slot_count_ * sizeof(std::size_t),
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
 
-    cudaKernelNodeParams params {};
-    params.gridDim = root_grid_;
-    params.blockDim = block_;
-    params.sharedMemBytes = 0;
-    params.extra = nullptr;
+    cudaKernelNodeParams broadcast_params {};
+    broadcast_params.gridDim = broadcast_grid_;
+    broadcast_params.blockDim = block_;
+    broadcast_params.sharedMemBytes = 0;
+    broadcast_params.extra = nullptr;
 
-    // The root kernels differ in arity, so the argument arrays do too.
+    // The broadcast/apply kernels differ in arity, so the argument arrays do
+    // too.
     if constexpr (is_point && Exact) {
-      void* kernel_args[] = {
+      void* broadcast_args[] = {
           &domain_buffer_,
-          &slot_var_ids_device_,
-          &slot_fan_out_device_,
-          &slot_kind_device_,
           &var_buffers_device_,
           &n_vars_,
           &n_regions_,
-          &slot_count_,
       };
-      params.func =
-          reinterpret_cast<void*>(enumerate_points_kernel<T, CycleSize>);
-      params.kernelParams = kernel_args;
-      detail::check(
-          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
-          "cudaGraphExecKernelNodeSetParams");
+      broadcast_params.func =
+          reinterpret_cast<void*>(broadcast_domain_point_kernel<T>);
+      broadcast_params.kernelParams = broadcast_args;
+      detail::check(cudaGraphExecKernelNodeSetParams(
+                        exec_, broadcast_node_, &broadcast_params),
+                    "cudaGraphExecKernelNodeSetParams");
     } else if constexpr (is_point) {
-      void* kernel_args[] = {
+      void* broadcast_args[] = {
           &domain_buffer_,
-          &slot_var_ids_device_,
-          &slot_fan_out_device_,
-          &slot_kind_device_,
           &var_kinds_device_,
           &var_buffers_device_,
           &n_vars_,
+          &n_regions_,
+          &sample_points_,
+          &salt,
+      };
+      broadcast_params.func =
+          reinterpret_cast<void*>(broadcast_domain_sample_kernel<T>);
+      broadcast_params.kernelParams = broadcast_args;
+      detail::check(cudaGraphExecKernelNodeSetParams(
+                        exec_, broadcast_node_, &broadcast_params),
+                    "cudaGraphExecKernelNodeSetParams");
+    } else {
+      void* broadcast_args[] = {
+          &domain_buffer_,
+          &var_buffers_device_,
+          &n_vars_,
+          &n_regions_,
+      };
+      broadcast_params.func = reinterpret_cast<void*>(broadcast_domain_kernel<T>);
+      broadcast_params.kernelParams = broadcast_args;
+      detail::check(cudaGraphExecKernelNodeSetParams(
+                        exec_, broadcast_node_, &broadcast_params),
+                    "cudaGraphExecKernelNodeSetParams");
+    }
+
+    if (slot_count_ == 0) {
+      return;
+    }
+
+    cudaKernelNodeParams apply_params {};
+    apply_params.gridDim = apply_grid_;
+    apply_params.blockDim = block_;
+    apply_params.sharedMemBytes = 0;
+    apply_params.extra = nullptr;
+
+    if constexpr (is_point && Exact) {
+      void* apply_args[] = {
+          &domain_buffer_,
+          &slot_var_ids_device_,
+          &slot_fan_out_device_,
+          &slot_prefix_device_,
+          &slot_kind_device_,
+          &var_buffers_device_,
+          &n_regions_,
+          &slot_count_,
+      };
+      apply_params.func = reinterpret_cast<void*>(apply_slots_point_kernel<T>);
+      apply_params.kernelParams = apply_args;
+      detail::check(
+          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &apply_params),
+          "cudaGraphExecKernelNodeSetParams");
+    } else if constexpr (is_point) {
+      void* apply_args[] = {
+          &domain_buffer_,
+          &slot_var_ids_device_,
+          &slot_fan_out_device_,
+          &slot_prefix_device_,
+          &slot_kind_device_,
+          &var_kinds_device_,
+          &var_buffers_device_,
           &n_regions_,
           &slot_count_,
           &sample_points_,
           &salt,
       };
-      params.func =
-          reinterpret_cast<void*>(sample_points_kernel<T, CycleSize>);
-      params.kernelParams = kernel_args;
+      apply_params.func = reinterpret_cast<void*>(apply_slots_sample_kernel<T>);
+      apply_params.kernelParams = apply_args;
       detail::check(
-          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
+          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &apply_params),
           "cudaGraphExecKernelNodeSetParams");
     } else {
-      void* kernel_args[] = {
+      void* apply_args[] = {
           &domain_buffer_,
           &slot_var_ids_device_,
           &slot_fan_out_device_,
+          &slot_prefix_device_,
           &slot_kind_device_,
           &var_buffers_device_,
-          &n_vars_,
           &n_regions_,
           &slot_count_,
       };
-      params.func =
-          reinterpret_cast<void*>(partition_variables_kernel<T, CycleSize>);
-      params.kernelParams = kernel_args;
+      apply_params.func = reinterpret_cast<void*>(apply_slots_kernel<T>);
+      apply_params.kernelParams = apply_args;
       detail::check(
-          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &params),
+          cudaGraphExecKernelNodeSetParams(exec_, root_node_, &apply_params),
           "cudaGraphExecKernelNodeSetParams");
     }
   }
@@ -2112,7 +2288,7 @@ public:
 
   std::size_t n_vars() const { return n_vars_; }
 
-  const Composition<CycleSize>& composition() const { return composition_; }
+  const Composition& composition() const { return composition_; }
 
 private:
   GraphReplay() = default;
@@ -2161,6 +2337,9 @@ private:
     if (slot_fan_out_device_) {
       cudaFree(slot_fan_out_device_);
     }
+    if (slot_prefix_device_) {
+      cudaFree(slot_prefix_device_);
+    }
     if (slot_kind_device_) {
       cudaFree(slot_kind_device_);
     }
@@ -2176,7 +2355,9 @@ private:
 
   cudaGraph_t graph_ = nullptr;
   cudaGraphExec_t exec_ = nullptr;
-  cudaGraphNode_t root_node_ = nullptr;
+  cudaGraphNode_t root_node_ = nullptr;  // the apply node, or broadcast_node_
+                                         // when slot_count_ == 0
+  cudaGraphNode_t broadcast_node_ = nullptr;
   cu::interval<T>* domain_buffer_ = nullptr;  // device, written by set_domain()
   unsigned char* feasible_buffer_ = nullptr;  // device
   T* obj_lb_buffer_ = nullptr;  // device, D2H-copied after each launch()
@@ -2191,11 +2372,13 @@ private:
       nullptr;  // device, CUB scratch, sized once at build
   V** var_buffers_device_ = nullptr;
   std::size_t* slot_var_ids_device_ =
-      nullptr;  // device, CycleSize entries, written by set_domain()
+      nullptr;  // device, slot_count_ entries, written by set_domain()
   std::uint32_t* slot_fan_out_device_ =
-      nullptr;  // device, CycleSize entries, fixed by composition_
+      nullptr;  // device, slot_count_ entries, fixed by composition_
+  std::size_t* slot_prefix_device_ =
+      nullptr;  // device, slot_count_ entries, fixed by composition_
   SlotKind* slot_kind_device_ =
-      nullptr;  // device, CycleSize entries, fixed by composition_
+      nullptr;  // device, slot_count_ entries, fixed by composition_
   VarKind* var_kinds_device_ =
       nullptr;  // device, n_vars_ entries, fixed by the problem
   std::vector<V*> node_buffers_;  // every op/Var node's buffer, owned here
@@ -2205,25 +2388,27 @@ private:
   T candidate_host_ =
       std::numeric_limits<T>::infinity();  // D2H-copied after each launch()
   std::int64_t candidate_index_host_ = -1;  // D2H-copied after each launch()
-  Composition<CycleSize> composition_ {};
+  Composition composition_ {};
   std::size_t n_regions_ = 0;
   std::size_t n_elems_ = 0;
 
   std::size_t sample_points_ = 1;
   std::size_t slot_count_ = 0;
   std::size_t n_vars_ = 0;
-  dim3 root_grid_ {};
+  dim3 broadcast_grid_ {};
+  dim3 apply_grid_ {};
   dim3 block_ {};
 };
 
-// Convenience aliases. Neither the fan-out widths nor the sample count are
-// part of the type any more: both arrive as build() arguments, so these
-// differ only in the value type V (and hence in which root kernel runs).
-template<typename T, std::size_t CycleSize>
-using IntervalGraphReplay = GraphReplay<T, cu::interval<T>, CycleSize>;
+// Convenience aliases. Neither the fan-out widths, the sample count, nor any
+// capacity are part of the type any more: they all arrive as build()
+// arguments (or, for capacity, don't exist at all), so these differ only in
+// the value type V (and hence in which root kernel pair runs).
+template<typename T>
+using IntervalGraphReplay = GraphReplay<T, cu::interval<T>>;
 
-template<typename T, std::size_t CycleSize>
-using PointGraphReplay = GraphReplay<T, T, CycleSize>;
+template<typename T>
+using PointGraphReplay = GraphReplay<T, T>;
 
 // Deterministic evaluation over a fully-enumerable Composition: every region
 // is an exact grid point rather than a random sample, so its CUB ArgMin
@@ -2231,8 +2416,8 @@ using PointGraphReplay = GraphReplay<T, T, CycleSize>;
 // Composition enumerates -- not a bound, the answer. GraphDriver only builds
 // and uses one of these for Compositions where is_fully_enumerable() holds,
 // and only dispatches to it for a node once every live variable in the box
-// fits in its CycleSize slots (see GraphDriver::solve()).
-template<typename T, std::size_t CycleSize>
-using ExactGraphReplay = GraphReplay<T, T, CycleSize, /*Exact=*/true>;
+// has a slot (see GraphDriver::solve()).
+template<typename T>
+using ExactGraphReplay = GraphReplay<T, T, /*Exact=*/true>;
 
 }  // namespace cuminlp::dag

@@ -159,7 +159,7 @@ TEST_CASE(
   CHECK(shape.max_cycle_size == 7);  // coverage sacrificed: 7 of 10
   CHECK(shape.partition_num == 7);  // phase 2 widened 2 -> 7 for free
   CHECK(shape.enumerate_cap == 7);
-  CHECK_NOTHROW(cuminlp::ladder_rung_for(shape.max_cycle_size));
+  CHECK(shape.max_cycle_size <= cuminlp::kMaxSlots);
 }
 
 TEST_CASE("resolve falls back to the profile's pinned cycle size with no "
@@ -245,7 +245,7 @@ TEST_CASE("select_policy's five predicates at their boundaries",
     CHECK(cuminlp::select_policy(p, calibration).name == "mixed-binary");
   }
 
-  SECTION("rule 4/5 split at num_live > max_capacity() (64)")
+  SECTION("rule 4/5 split at num_live > kMaxSlots (64)")
   {
     ProblemProfile at_cap;
     at_cap.num_continuous = 64;
@@ -436,7 +436,7 @@ TEST_CASE("nvs09 (the discrete row's evidence) selects discrete",
 TEST_CASE("make_policy<GreedyByKind> constructs a working GreedyCompositionPolicy",
           "[policy_catalogue]")
 {
-  auto policy = cuminlp::make_policy<double, 8>(
+  auto policy = cuminlp::make_policy<double>(
       PolicyKind::GreedyByKind, FanOutSpec {4}, SearchCalibration {});
   REQUIRE(policy != nullptr);
 

@@ -150,9 +150,8 @@ private:
  * the ones the policy itself used (see CompositionPolicy::fan_out).
  *
  * @tparam T
- * @tparam Capacity
  */
-template<typename T, std::size_t Capacity>
+template<typename T>
 struct CompositionInterval
 {
   std::size_t sidx;  // index within parent interval
@@ -207,9 +206,9 @@ struct CompositionInterval
   // on device, so re-invoking `policy.choose()` on the reconstructed parent
   // box deterministically recovers the same SlotAssignment (see
   // CompositionPolicy's class comment), which is then decoded via the same
-  // cuminlp::decode::slot_bounds partition::get_slot_bounds calls on device
-  // (see TEST_EXTENSION.md) -- host/device agreement is structural, not
-  // asserted by two hand-written implementations.
+  // cuminlp::decode::slot_bounds the device's apply_slots_kernel calls (see
+  // TEST_EXTENSION.md) -- host/device agreement is structural, not asserted
+  // by two hand-written implementations.
   //
   // `root_box` is the true root domain (Problem::box_bounds) for pidx == 0:
   // there is no parent to look up at the root, so it can't be reconstructed
@@ -219,7 +218,7 @@ struct CompositionInterval
   // themselves (see GraphDriver::solve()).
   void materialise(const IntervalHistory<T>& history,
                    std::vector<cu::interval<T>>& out,
-                   const cuminlp::CompositionPolicy<T, Capacity>& policy,
+                   const cuminlp::CompositionPolicy<T>& policy,
                    std::span<const dag::VarKind> var_kinds,
                    std::span<const cu::interval<T>> root_box) const
   {
@@ -231,43 +230,31 @@ struct CompositionInterval
     const std::vector<cu::interval<T>>& parent = history.intervals[pidx];
     out = parent;
 
-    cuminlp::SlotAssignment<Capacity> assignment =
-        policy.choose(parent, var_kinds);
+    cuminlp::SlotAssignment assignment = policy.choose(parent, var_kinds);
 
     // The purity tripwire (see slot_count above). If the policy did not
     // return the same assignment it returned when this node was enqueued,
     // every decode below is against the wrong radix vector and the box we
     // would hand back is wrong but entirely plausible-looking. Fail here
     // instead.
-    if (assignment.composition.count != slot_count) {
+    if (assignment.composition.size() != slot_count) {
       throw cuminlp::InvalidConfiguration(
           "CompositionPolicy::choose is not a pure function of (box, "
           "var_kinds): re-invoking it on this node's parent returned "
-          + std::to_string(assignment.composition.count) + " slots, but "
+          + std::to_string(assignment.composition.size()) + " slots, but "
           + std::to_string(slot_count)
           + " were used to encode the node's sidx. A policy must not depend "
             "on state that changes during a solve");
     }
 
     // Decode sidx into a per-slot partition/enumeration index, mirroring
-    // partition::make_slot_context, then narrow each cycled dimension via
-    // the same decode partition::get_slot_bounds uses on device.
-    //
-    // Live slots only. The padding tail must be skipped, not merely decoded
-    // to a no-op: `choose` fills a Padding slot's var_id by *repeating the
-    // last variable it assigned*, and slot_bounds() for Padding writes
-    // `out[dim] = parent[dim]`. Walking the tail therefore resets that
-    // variable's bounds to the parent's, silently undoing the narrowing an
-    // earlier real slot applied to the same dimension. The device is not
-    // affected: get_slot_bounds returns on its first var_ids match, so the
-    // real slot always wins there -- which is exactly what made this a
-    // host/device divergence rather than an obvious failure. Skipping the
-    // tail restores agreement.
-    //
-    // Padding contributes fan-out 1, so stopping early leaves the radix
-    // decode of sidx unchanged (`idx % 1 == 0`, `idx /= 1`).
+    // the device's arithmetic digit extraction (slot_prefixes,
+    // composition_policy.hpp), then narrow each slot's dimension via the
+    // same decode the device's apply_slots_kernel uses. A composition is
+    // exactly its live slots now, so every slot here is real -- nothing to
+    // skip (design/MODULE_REFACTOR.md §4.6).
     std::size_t idx = sidx;
-    for (std::size_t j = 0; j < assignment.composition.count; ++j) {
+    for (std::size_t j = 0; j < assignment.composition.size(); ++j) {
       SlotKind kind = assignment.composition[j];
       std::size_t fan_out = cuminlp::slot_fan_out(kind, policy.fan_out());
       std::size_t part = idx % fan_out;
@@ -282,8 +269,8 @@ struct CompositionInterval
 
 // Min-Heap of Intervals for the pending list.
 // highest priority is least lb, then least pidx. GraphDriver instantiates
-// this with CompositionInterval<T, Capacity>; the heap logic itself only
-// needs Node's operator</.lb.
+// this with CompositionInterval<T>; the heap logic itself only needs Node's
+// operator</.lb.
 template<typename T, typename Node>
 class IntervalPQueue
 {

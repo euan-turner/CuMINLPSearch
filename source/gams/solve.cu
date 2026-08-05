@@ -23,11 +23,6 @@
 //
 // With no --policy, the search shape comes entirely from the problem's
 // variable kinds/counts and this device's free memory.
-//
-// The one value that still has to reach device codegen is the slot capacity
-// (partition::SlotContext's array bound). It is handled by compiling a small
-// ladder of capacities and dispatching to the narrowest rung that holds
-// max_cycle_size, rather than by baking one into the binary.
 
 #include <algorithm>
 #include <cmath>
@@ -40,7 +35,6 @@
 #include <string>
 #include <vector>
 
-#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/dag_print.hpp"
@@ -64,19 +58,17 @@ struct Solution {
 
 /**
   * @brief Construct a concrete CompositionPolicy and GraphDriver, then solve
-  * 
-  * @tparam Capacity 
-  * @param problem 
-  * @param iters 
-  * @param kind 
-  * @param fan_out 
-  * @param sample_points 
-  * @param host_budget_bytes 
-  * @param frontier_policy 
-  * @param calibration 
-  * @return Solution 
+  *
+  * @param problem
+  * @param iters
+  * @param kind
+  * @param fan_out
+  * @param sample_points
+  * @param host_budget_bytes
+  * @param frontier_policy
+  * @param calibration
+  * @return Solution
   */
-template<std::size_t Capacity>
 auto solve_with(cuminlp::dag::Problem<double> const& problem,
                 int iters,
                 cuminlp::PolicyKind kind,
@@ -86,9 +78,9 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
                 cuminlp::FrontierPolicy frontier_policy,
                 cuminlp::SearchCalibration calibration) -> Solution
 {
-  std::shared_ptr<const cuminlp::CompositionPolicy<double, Capacity>> policy =
-      cuminlp::make_policy<double, Capacity>(kind, fan_out, calibration);
-  cuminlp::GraphDriver<double, Capacity> driver(
+  std::shared_ptr<const cuminlp::CompositionPolicy<double>> policy =
+      cuminlp::make_policy<double>(kind, fan_out, calibration);
+  cuminlp::GraphDriver<double> driver(
       policy, iters, 1e-6, sample_points, /*budget_bytes=*/0,
       host_budget_bytes, frontier_policy);
   double const bound = driver.solve(problem);
@@ -176,23 +168,15 @@ auto solve(cuminlp::dag::Problem<double> const& problem,
            std::size_t host_budget_bytes,
            cuminlp::FrontierPolicy frontier_policy) -> Solution
 {
-  // One templated lambda, instantiated once per ladder rung; which rung runs
-  // is a runtime decision. This is the only place the compile-time capacity
-  // is chosen.
   auto const calibration = probe_calibration(max_cycle_size);
-  return cuminlp::dispatch_on_capacity(
-      max_cycle_size,
-      [&]<std::size_t Capacity>() -> Solution
-      {
-        return solve_with<Capacity>(problem,
-                                    iters,
-                                    kind,
-                                    fan_out,
-                                    sample_points,
-                                    host_budget_bytes,
-                                    frontier_policy,
-                                    calibration);
-      });
+  return solve_with(problem,
+                    iters,
+                    kind,
+                    fan_out,
+                    sample_points,
+                    host_budget_bytes,
+                    frontier_policy,
+                    calibration);
 }
 
 /// One line per roster row: name, rules, evidence, provisional marker.
@@ -346,7 +330,7 @@ auto main(int argc, char* argv[]) -> int
   // Shared by --partition-num/--enumerate-cap/--sample-points/
   // --max-cycle-size. Rejects anything std::stoull wouldn't consume in full,
   // so `--partition-num=8x` is an error rather than a silent 8. Range
-  // checking beyond "is a number" is FanOutSpec's/ladder_rung_for's job.
+  // checking beyond "is a number" is FanOutSpec's/CompositionPolicy's job.
   auto parse_count = [&](std::string const& value,
                          char const* flag) -> std::optional<std::size_t>
   {
@@ -553,14 +537,11 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::FanOutSpec const fan_out {chosen_partition_num,
                                        chosen_enumerate_cap};
 
-    std::size_t const rung = cuminlp::ladder_rung_for(chosen_max_cycle_size);
-
     std::cout << "policy: " << policy.name << " (" << source
               << "), partition_num: " << chosen_partition_num
               << ", enumerate_cap: " << chosen_enumerate_cap
               << ", sample_points: " << chosen_sample_points
-              << ", max_cycle_size: " << chosen_max_cycle_size << " (rung "
-              << rung << ")\n";
+              << ", max_cycle_size: " << chosen_max_cycle_size << "\n";
 
     // The machine-readable twin, for tools/minlp_status.py. `overrides=`
     // only appears on the overridden path, and lists only the flags actually

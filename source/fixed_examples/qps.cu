@@ -2,7 +2,6 @@
 #include <memory>
 #include <string>
 
-#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/example_main.hpp"
@@ -72,17 +71,16 @@ auto main(int argc, char* argv[]) -> int
       {
         int problem = std::stoi(argv[1]);
         int iters = std::stoi(argv[2]);
-        auto policy =
-            std::make_shared<cuminlp::GreedyCompositionPolicy<double, 8>>(
-                cuminlp::FanOutSpec {20},
-                cuminlp::SearchCalibration {.max_cycle_size = 2});
+        auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
+            cuminlp::FanOutSpec {20},
+            cuminlp::SearchCalibration {.max_cycle_size = 2});
         if (problem == 212) {
           std::cout << "Ex. 2.1.2" << '\n';
-          cuminlp::GraphDriver<double, 8> drv_212(policy, iters, 1e-6, 100);
+          cuminlp::GraphDriver<double> drv_212(policy, iters, 1e-6, 100);
           drv_212.solve(problem_212());
         } else if (problem == 219) {
           std::cout << "Ex. 2.1.9" << '\n';
-          cuminlp::GraphDriver<double, 8> drv_219(policy, iters, 1e-6, 100);
+          cuminlp::GraphDriver<double> drv_219(policy, iters, 1e-6, 100);
           drv_219.solve(problem_219());
         }
       });

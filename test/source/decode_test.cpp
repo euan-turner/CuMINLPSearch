@@ -42,7 +42,7 @@ bool feq(double a, double b)
 // gaps at the seams or the outer edges. Checked directionally (containment),
 // not exact tiling, since lb + width*fan_out != ub in general floating point.
 TEST_CASE(
-    "Continuous/IntegerBisect children's union contains the parent interval",
+    "Continuous/IntegerPartition children's union contains the parent interval",
     "[decode][3a]")
 {
   cu::interval<double> parent {0.0, 10.0};
@@ -96,7 +96,7 @@ TEST_CASE("fan_out == 1 reproduces the parent interval exactly", "[decode][3a]")
 
 // IntegerEnumerate/BinaryEnumerate snap to the integer lattice even
 // when the parent box isn't already aligned (the normal case after an
-// IntegerBisect).
+// IntegerPartition).
 TEST_CASE(
     "IntegerEnumerate covers every integer in a lattice-aligned parent domain",
     "[decode][3b]")
@@ -113,7 +113,7 @@ TEST_CASE(
 TEST_CASE("IntegerEnumerate snaps to the lattice when the parent isn't aligned",
           "[decode][3b]")
 {
-  // Reachable directly from an IntegerBisect child: parent.lb == 2.4 is not
+  // Reachable directly from an IntegerPartition child: parent.lb == 2.4 is not
   // an integer. The enumerate decode must still land on integers: 3, 4, 5.
   cu::interval<double> parent {2.4, 5.6};
   for (std::size_t part = 0; part < 3; ++part) {
@@ -151,30 +151,19 @@ TEST_CASE("BinaryEnumerate decodes 0 and 1 exactly", "[decode][3b]")
   CHECK(feq(c1.ub, 1.0));
 }
 
-TEST_CASE("Padding leaves the dimension unchanged", "[decode]")
-{
-  cu::interval<double> parent {-2.0, 9.0};
-  cu::interval<double> child;
-  slot_bounds<double>(SlotKind::Padding, parent, 0, 1, child);
-
-  CHECK(feq(child.lb, parent.lb));
-  CHECK(feq(child.ub, parent.ub));
-}
-
 // materialise() at pidx == 0 uses the Problem's actual root box, not an
 // unbounded-domain fallback disconnected from the real problem.
 TEST_CASE(
     "CompositionInterval::materialise at pidx == 0 returns the given root box",
     "[decode][4a]")
 {
-  constexpr std::size_t CYCLE_SIZE = 1;
   std::vector<VarKind> kinds = {VarKind::Continuous};
   std::vector<cu::interval<double>> root_box = {{-1.0, 1.0}};
 
   IntervalHistory<double> history;
-  GreedyCompositionPolicy<double, CYCLE_SIZE> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
-  CompositionInterval<double, CYCLE_SIZE> node {
+  CompositionInterval<double> node {
       .sidx = 0, .pidx = 0, .depth = 0, .lb = 0.0};
 
   std::vector<cu::interval<double>> out;
@@ -190,7 +179,6 @@ TEST_CASE(
     "reconstructing its " "parent's Composition",
     "[decode][4a]")
 {
-  constexpr std::size_t CYCLE_SIZE = 1;
   std::vector<VarKind> kinds = {VarKind::Continuous};
   std::vector<cu::interval<double>> root_box = {{0.0, 8.0}};
 
@@ -199,19 +187,19 @@ TEST_CASE(
   std::size_t parent_idx =
       history.enqueue({{0.0, 8.0}});  // index 1: the real parent box
 
-  GreedyCompositionPolicy<double, CYCLE_SIZE> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
-  // The policy bisects the one continuous variable 4-ways; sidx == 2 is the
-  // third quarter: [4.0, 6.0].
+  // The policy partitions the one continuous variable 4-ways; sidx == 2 is
+  // the third quarter: [4.0, 6.0].
   // slot_count must match what the policy fills for this parent box (one
   // continuous variable, so one slot); materialise() checks it before
   // decoding, since a disagreement means sidx would be decoded against the
   // wrong radix vector.
-  CompositionInterval<double, CYCLE_SIZE> node {.sidx = 2,
-                                               .pidx = parent_idx,
-                                               .depth = 1,
-                                               .lb = 0.0,
-                                               .slot_count = 1};
+  CompositionInterval<double> node {.sidx = 2,
+                                    .pidx = parent_idx,
+                                    .depth = 1,
+                                    .lb = 0.0,
+                                    .slot_count = 1};
 
   std::vector<cu::interval<double>> out;
   node.materialise(history, out, policy, kinds, root_box);
@@ -231,7 +219,6 @@ TEST_CASE(
   // sidx, and every bound decoded below would be against the wrong radix
   // vector -- a wrong box, not an error. Simulated by handing materialise a
   // slot_count that disagrees with what the policy returns for this parent.
-  constexpr std::size_t CYCLE_SIZE = 2;
   std::vector<VarKind> kinds = {VarKind::Continuous, VarKind::Continuous};
   std::vector<cu::interval<double>> root_box = {{0.0, 8.0}, {0.0, 8.0}};
 
@@ -239,70 +226,17 @@ TEST_CASE(
   history.enqueue({});
   std::size_t parent_idx = history.enqueue({{0.0, 8.0}, {0.0, 8.0}});
 
-  GreedyCompositionPolicy<double, CYCLE_SIZE> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
   // The policy fills 2 slots for this box; claim 1.
-  CompositionInterval<double, CYCLE_SIZE> node {.sidx = 2,
-                                                .pidx = parent_idx,
-                                                .depth = 1,
-                                                .lb = 0.0,
-                                                .slot_count = 1};
+  CompositionInterval<double> node {.sidx = 2,
+                                    .pidx = parent_idx,
+                                    .depth = 1,
+                                    .lb = 0.0,
+                                    .slot_count = 1};
 
   std::vector<cu::interval<double>> out;
   CHECK_THROWS_AS(
       node.materialise(history, out, policy, kinds, root_box),
       cuminlp::InvalidConfiguration);
-}
-
-TEST_CASE(
-    "materialise does not let a Padding slot reset a variable an earlier slot "
-    "narrowed",
-    "[decode][4a]")
-{
-  // Regression test. `choose` fills a Padding slot's var_id by repeating the
-  // last variable it assigned, and decode::slot_bounds for Padding writes
-  // out[dim] = parent[dim]. If materialise walks the padding tail, that write
-  // reverts the narrowing the real slot performed on the same dimension, and
-  // the caller gets the parent's box back for that variable -- a strictly
-  // wider box than the node actually represents, so the search would report a
-  // bound it never proved.
-  //
-  // It is specifically a host/device divergence: get_slot_bounds returns on
-  // its first var_ids match, so the device always used the real slot.
-  //
-  // Reachable whenever live variables < slots, which is most of a solve's
-  // later nodes; capacity rounding up to a ladder rung makes it the norm.
-  constexpr std::size_t CAPACITY = 4;
-  std::vector<VarKind> kinds = {VarKind::Continuous, VarKind::Continuous};
-  std::vector<cu::interval<double>> root_box = {{0.0, 8.0}, {0.0, 8.0}};
-
-  IntervalHistory<double> history;
-  history.enqueue({});
-  // Variable 1 is already resolved, so only variable 0 is live: the policy
-  // fills one slot and pads the other three, each repeating var_id 0.
-  std::size_t parent_idx = history.enqueue({{0.0, 8.0}, {5.0, 5.0}});
-
-  GreedyCompositionPolicy<double, CAPACITY> policy {FanOutSpec {4}};
-  auto const assignment =
-      policy.choose(history.intervals[parent_idx], kinds);
-  REQUIRE(assignment.composition.count == 1);
-  REQUIRE(assignment.composition[1] == SlotKind::Padding);
-  REQUIRE(assignment.var_ids[1] == 0);  // the padding slot repeats var 0
-
-  CompositionInterval<double, CAPACITY> node {.sidx = 2,
-                                              .pidx = parent_idx,
-                                              .depth = 1,
-                                              .lb = 0.0,
-                                              .slot_count = 1};
-
-  std::vector<cu::interval<double>> out;
-  node.materialise(history, out, policy, kinds, root_box);
-
-  REQUIRE(out.size() == 2);
-  // Third quarter of [0, 8]. Not [0, 8], which is what the padding tail
-  // would have restored.
-  CHECK(feq(out[0].lb, 4.0));
-  CHECK(feq(out[0].ub, 6.0));
-  CHECK(feq(out[1].lb, 5.0));
-  CHECK(feq(out[1].ub, 5.0));
 }

@@ -18,13 +18,16 @@ using cuminlp::dag::VarKind;
 namespace
 {
 
-// Directly launches sample_points_kernel (graph_replay.cuh) -- bypassing
-// GraphBuilder/GraphReplay entirely -- against a 3-variable synthetic domain:
-// var 0 continuous [0,10], var 1 integer [3,9], var 2 binary [0,1]. Only var
-// 0 is cycled (bisected into 4 slices); vars 1 and 2 keep their parent
-// bounds unchanged, which is exactly the case that mattered here: even a
-// variable this iteration isn't touching must still be sampled on the
-// integer lattice if its kind isn't Continuous.
+// Directly launches broadcast_domain_sample_kernel then
+// apply_slots_sample_kernel (graph_replay.cuh) -- bypassing GraphBuilder/
+// GraphReplay entirely -- against a 3-variable synthetic domain: var 0
+// continuous [0,10], var 1 integer [3,9], var 2 binary [0,1]. Only var 0 has
+// a slot (partitioned into 4 slices); vars 1 and 2 keep their parent bounds
+// unchanged, which is exactly the case that mattered here: even a variable
+// this iteration isn't touching must still be sampled on the integer
+// lattice if its kind isn't Continuous. Sequential launches on the default
+// stream give the same ordering the CUDA graph's explicit dependency edge
+// gives GraphBuilder, so no extra synchronisation is needed between them.
 template<typename T>
 struct SampleResult
 {
@@ -36,7 +39,7 @@ struct SampleResult
 template<typename T, std::size_t SamplePoints>
 SampleResult<T> run_sample_points_kernel()
 {
-  constexpr std::size_t CYCLE_SIZE = 1;
+  constexpr std::size_t SLOT_COUNT = 1;
   constexpr std::size_t N_VARS = 3;
   constexpr std::size_t N_REGIONS = 4;  // matches slot_fan_out[0] below
 
@@ -47,15 +50,17 @@ SampleResult<T> run_sample_points_kernel()
   };
   std::vector<VarKind> var_kinds_host = {
       VarKind::Continuous, VarKind::Integer, VarKind::Binary};
-  std::array<std::size_t, CYCLE_SIZE> slot_var_ids_host = {0};
-  std::array<std::uint32_t, CYCLE_SIZE> slot_fan_out_host = {4};
-  std::array<SlotKind, CYCLE_SIZE> slot_kind_host = {SlotKind::Continuous};
+  std::array<std::size_t, SLOT_COUNT> slot_var_ids_host = {0};
+  std::array<std::uint32_t, SLOT_COUNT> slot_fan_out_host = {4};
+  std::array<std::size_t, SLOT_COUNT> slot_prefix_host = {1};
+  std::array<SlotKind, SLOT_COUNT> slot_kind_host = {SlotKind::Continuous};
 
   auto* domain = cuminlp::detail::alloc_device<cu::interval<T>>(N_VARS);
   auto* var_kinds = cuminlp::detail::alloc_device<VarKind>(N_VARS);
-  auto* slot_var_ids = cuminlp::detail::alloc_device<std::size_t>(CYCLE_SIZE);
-  auto* slot_fan_out = cuminlp::detail::alloc_device<std::uint32_t>(CYCLE_SIZE);
-  auto* slot_kind = cuminlp::detail::alloc_device<SlotKind>(CYCLE_SIZE);
+  auto* slot_var_ids = cuminlp::detail::alloc_device<std::size_t>(SLOT_COUNT);
+  auto* slot_fan_out = cuminlp::detail::alloc_device<std::uint32_t>(SLOT_COUNT);
+  auto* slot_prefix = cuminlp::detail::alloc_device<std::size_t>(SLOT_COUNT);
+  auto* slot_kind = cuminlp::detail::alloc_device<SlotKind>(SLOT_COUNT);
 
   cuminlp::detail::check(cudaMemcpy(domain,
                                     domain_host.data(),
@@ -69,17 +74,22 @@ SampleResult<T> run_sample_points_kernel()
                          "cudaMemcpy");
   cuminlp::detail::check(cudaMemcpy(slot_var_ids,
                                     slot_var_ids_host.data(),
-                                    CYCLE_SIZE * sizeof(std::size_t),
+                                    SLOT_COUNT * sizeof(std::size_t),
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
   cuminlp::detail::check(cudaMemcpy(slot_fan_out,
                                     slot_fan_out_host.data(),
-                                    CYCLE_SIZE * sizeof(std::uint32_t),
+                                    SLOT_COUNT * sizeof(std::uint32_t),
+                                    cudaMemcpyHostToDevice),
+                         "cudaMemcpy");
+  cuminlp::detail::check(cudaMemcpy(slot_prefix,
+                                    slot_prefix_host.data(),
+                                    SLOT_COUNT * sizeof(std::size_t),
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
   cuminlp::detail::check(cudaMemcpy(slot_kind,
                                     slot_kind_host.data(),
-                                    CYCLE_SIZE * sizeof(SlotKind),
+                                    SLOT_COUNT * sizeof(SlotKind),
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
 
@@ -95,19 +105,30 @@ SampleResult<T> run_sample_points_kernel()
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
 
-  cuminlp::dag::sample_points_kernel<T, CYCLE_SIZE>
+  cuminlp::dag::broadcast_domain_sample_kernel<T>
       <<<1, 256>>>(domain,
-                   slot_var_ids,
-                   slot_fan_out,
-                   slot_kind,
                    var_kinds,
                    var_buffers,
                    N_VARS,
                    N_REGIONS,
-                   /*slot_count=*/CYCLE_SIZE,
                    SamplePoints,
                    /*salt=*/42);
-  cuminlp::detail::check(cudaGetLastError(), "sample_points_kernel launch");
+  cuminlp::detail::check(cudaGetLastError(),
+                         "broadcast_domain_sample_kernel launch");
+
+  cuminlp::dag::apply_slots_sample_kernel<T>
+      <<<1, 256>>>(domain,
+                   slot_var_ids,
+                   slot_fan_out,
+                   slot_prefix,
+                   slot_kind,
+                   var_kinds,
+                   var_buffers,
+                   N_REGIONS,
+                   SLOT_COUNT,
+                   SamplePoints,
+                   /*salt=*/42);
+  cuminlp::detail::check(cudaGetLastError(), "apply_slots_sample_kernel launch");
   cuminlp::detail::check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
   SampleResult<T> result;
@@ -134,6 +155,7 @@ SampleResult<T> run_sample_points_kernel()
   cudaFree(var_kinds);
   cudaFree(slot_var_ids);
   cudaFree(slot_fan_out);
+  cudaFree(slot_prefix);
   cudaFree(slot_kind);
   for (auto* buf : var_buffer_host) {
     cudaFree(buf);

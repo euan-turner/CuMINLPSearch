@@ -21,7 +21,7 @@ model's variable kinds and this device's free memory.
 ```
 nvs09.gms: 10 variables, 0 constraints, 123 DAG nodes
 policy: discrete (auto), partition_num: 7, enumerate_cap: 7, sample_points: 5,
-        max_cycle_size: 7 (rung 8)
+        max_cycle_size: 7
 ...
 ------------ Finished ------------
 -43.1343 <= min <= -43.1343
@@ -186,7 +186,7 @@ happens:
 
 ```
 policy: discrete (overridden), partition_num: 2, enumerate_cap: 2,
-        sample_points: 5, max_cycle_size: 10 (rung 16)
+        sample_points: 5, max_cycle_size: 10
   note: --partition-num also set enumerate_cap to 2, so 10 integer
         variable(s) -- the widest of domain 7 -- bisect
         instead of enumerating, and are never fathomed exactly.
@@ -199,21 +199,17 @@ cheaper per slot, so the auto-fitted cap usually widens to compensate — on
 the cap to 6 and stops it converging. Which way to turn the knob is a
 judgement about the model, not something the tool can settle.
 
-### `max_cycle_size` and the capacity ladder
+### `max_cycle_size`
 
-The per-thread slot context is register-resident, so its array bound has to
-be a compile-time constant. Rather than baking one in, a small ladder of
-capacities — **{8, 16, 32, 64}** — is compiled, and the cap in force is
-dispatched to the narrowest rung that holds it.
+The device-resident slot table (kind, fan-out and prefix product per slot)
+is sized to exactly the slots a node fills, so `max_cycle_size` is a plain
+search-shape cap rather than something that has to round up to a compiled
+capacity: a 4-slot assignment costs exactly 4 slots, never more.
 
-Rounding up is free: unused slots are padding with fan-out 1, so a capacity-8
-context running a 4-slot assignment produces exactly the children a
-capacity-4 one would. The status line reports both, e.g.
-`max_cycle_size: 20 (rung 32)`.
-
-Asking for more than 64 is an error, not a silent clamp — a wider rung would
-spill registers to local memory rather than merely cost more of them. Auto-fit
-never returns more than 64 for the same reason.
+Asking for more than 64 is an error, not a silent clamp — beyond ~64 slots a
+single composition's fan-out product is past anything a device can hold at
+any fan-out, so 64 is a guard against absurdity, not a hardware limit.
+Auto-fit never returns more than 64 for the same reason.
 
 ---
 
@@ -316,7 +312,7 @@ bound of exactly ±1e6 that never moves.
 |---|---|
 | `0` | Solved, hit the iteration limit, printed help, or `--list-policies`. |
 | `1` | Parse error in the `.gms` file. |
-| `2` | Bad flag value; an unknown `--policy` name (with the roster listed); a `--policy` that doesn't apply to this model's variable kinds (e.g. `--policy=discrete` on a model with a continuous variable); or a configuration the solver rejects (e.g. an overridden `--partition-num=1`, `--max-cycle-size` past the widest rung). |
+| `2` | Bad flag value; an unknown `--policy` name (with the roster listed); a `--policy` that doesn't apply to this model's variable kinds (e.g. `--policy=discrete` on a model with a continuous variable); or a configuration the solver rejects (e.g. an overridden `--partition-num=1`, `--max-cycle-size` above 64). |
 | `3` | Out of device memory. The run was well-formed; a larger GPU, or a smaller experimental override, may succeed. |
 
 `2` and `3` are deliberately distinct: `2` means you asked for something
@@ -361,7 +357,7 @@ $ ./build/dev/gams_solve --partition-num=60 --max-cycle-size=4 \
 
 out of device memory: point graph needs 40.7 GiB of device memory,
 but only 7.7 GiB is available.
-  composition: 4 live slot(s) of 8 compiled
+  composition: 4 live slot(s)
     4 x Continuous (fan-out 60 each)
   -> 12,960,000 regions x 10 sample points
   x 337 B per element (39 DAG-node buffers of 8 B, plus 25 B of
@@ -408,7 +404,7 @@ fit, and on this device it selects cap 7 — the same value
 ```
 test/data/gams/ex2_1_1.gms: 5 variables, 1 constraints, 55 DAG nodes
 policy: mixed-all-small (auto), partition_num: 10, enumerate_cap: 10,
-        sample_points: 10, max_cycle_size: 5 (rung 8)
+        sample_points: 10, max_cycle_size: 5
 PARAMS	policy=mixed-all-small	source=auto	partition_num=10	enumerate_cap=10	sample_points=10	max_cycle_size=5
 Host memory budget: 26416576512 bytes (measured)
 ...
@@ -436,8 +432,7 @@ RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
   resolver produced for this run specifically (after any experimental
   override), not a reproduction key on their own — see
   [Policy selection](#policy-selection). `tools/minlp_status.py` records the
-  policy cell (plus any overrides) beside the bound. The rung is not on the
-  `PARAMS` line: it follows from `max_cycle_size` and no flag sets it.
+  policy cell (plus any overrides) beside the bound.
 - **`Proven optimal`** appears when no pending region can beat the incumbent,
   and the bracket then collapses to a point. This is reported on three
   distinct endings: the frontier emptied, the search dequeued a region already

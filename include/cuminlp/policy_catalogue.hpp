@@ -8,7 +8,6 @@
 #include <optional>
 #include <string_view>
 
-#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
@@ -138,7 +137,7 @@ ProblemProfile profile_problem(const dag::Problem<T>& problem)
   return out;
 }
 
-/// The four resolved shape numbers plus the compiled rung they dispatch to.
+/// The four resolved shape numbers for one run.
 struct ResolvedShape
 {
   std::size_t partition_num = 0; ///< number of partitions to split
@@ -147,9 +146,8 @@ struct ResolvedShape
                                  // enumerate it
   std::size_t sample_points = 0; ///< number of points to sample from a variable
                                  // subdomain in a single evaluation
-  std::size_t max_cycle_size = 0; ///< max number of variables to 
+  std::size_t max_cycle_size = 0; ///< max number of variables to
                                   // partition/enumerate at once
-  std::size_t rung = 0;  ///< ladder_rung_for(max_cycle_size)
 };
 
 /// Fraction of free device memory the resolver's fit will spend on the
@@ -161,7 +159,7 @@ inline constexpr double auto_budget_fraction = 0.67;
 /// Ceiling on partition_num's own fit: a guard against absurdity, not
 /// a measured limit -- source/power_series.cu bisects one variable 10,000
 /// ways, so the machinery tolerates far more than this. Numerically equal to
-/// capacity_ladder's max_capacity() today, but a distinct constant: one
+/// kMaxSlots (composition_policy.hpp) today, but a distinct constant: one
 /// bounds a slot's fan-out, the other bounds how many slots exist.
 inline constexpr std::size_t partition_ceiling = 64;
 
@@ -213,10 +211,10 @@ inline std::size_t fit_at(const ProblemProfile& problem,
  * profile-specific fallback when there is no device budget to fit against at
  * all.
  *
- * Every value this produces still passes through FanOutSpec's and
- * ladder_rung_for's own constructors, so a profile that pins a nonsensical
- * number (partition_num < 2, enumerate_cap < 1, a cycle past the widest
- * rung) throws InvalidConfiguration exactly as a hand-typed flag would.
+ * Every value this produces still passes through FanOutSpec's own
+ * constructor, so a profile that pins a nonsensical number (partition_num
+ * < 2, enumerate_cap < 1) throws InvalidConfiguration exactly as a
+ * hand-typed flag would.
  */
 inline ResolvedShape resolve(const PolicyProfile& profile,
                              const ProblemProfile& problem,
@@ -224,7 +222,7 @@ inline ResolvedShape resolve(const PolicyProfile& profile,
 {
   std::size_t const target =
       std::min(problem.num_binary + problem.num_integer + problem.num_continuous,
-               max_capacity());
+               kMaxSlots);
 
   bool const ec_follows_partition =
       profile.enumerate.mode == EnumerateRule::Mode::FollowPartition;
@@ -314,7 +312,6 @@ inline ResolvedShape resolve(const PolicyProfile& profile,
   // loop above, so this is what catches e.g. a Pin below FanOutSpec's own
   // floors, the same way a hand-typed --partition-num/--enumerate-cap would.
   FanOutSpec {shape.partition_num, shape.enumerate_cap};
-  shape.rung = ladder_rung_for(shape.max_cycle_size);
   return shape;
 }
 
@@ -433,8 +430,8 @@ inline const PolicyProfile& select_policy(
   if (problem.num_binary > 0 && problem.num_integer == 0) {
     return policy_roster[2];  // mixed-binary
   }
-  return num_live <= max_capacity() ? policy_roster[3]   // mixed-all-small
-                                    : policy_roster[4];  // mixed-all-large
+  return num_live <= kMaxSlots ? policy_roster[3]   // mixed-all-small
+                               : policy_roster[4];  // mixed-all-large
 }
 
 /**
@@ -481,14 +478,13 @@ inline bool is_applicable(const PolicyProfile& policy, const ProblemProfile& pro
  * the switch, not an if, is deliberate: adding a second PolicyKind without a
  * matching case here is a compiler warning away from being caught.
  */
-template<typename T, std::size_t Capacity>
-std::unique_ptr<CompositionPolicy<T, Capacity>> make_policy(
+template<typename T>
+std::unique_ptr<CompositionPolicy<T>> make_policy(
     PolicyKind kind, FanOutSpec fan_out, SearchCalibration calibration)
 {
   switch (kind) {
     case PolicyKind::GreedyByKind:
-      return std::make_unique<GreedyCompositionPolicy<T, Capacity>>(fan_out,
-                                                                     calibration);
+      return std::make_unique<GreedyCompositionPolicy<T>>(fan_out, calibration);
   }
   throw InvalidConfiguration("unknown PolicyKind");
 }

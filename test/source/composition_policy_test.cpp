@@ -32,7 +32,7 @@ TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
       VarKind::Continuous, VarKind::Binary, VarKind::Integer};
 
   // PartitionNum = 4: the integer's domain size (4) is enumerable.
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
@@ -41,31 +41,32 @@ TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
   CHECK(assignment.composition[1] == SlotKind::IntegerEnumerate);
 }
 
-TEST_CASE("GreedyCompositionPolicy bisects integer domains above PartitionNum",
-          "[composition_policy]")
+TEST_CASE(
+    "GreedyCompositionPolicy partitions integer domains above PartitionNum",
+    "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 100.0}};
   std::vector<VarKind> kinds = {VarKind::Integer};
 
-  GreedyCompositionPolicy<double, 1> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 0);
-  CHECK(assignment.composition[0] == SlotKind::IntegerBisect);
+  CHECK(assignment.composition[0] == SlotKind::IntegerPartition);
 }
 
 TEST_CASE(
     "GreedyCompositionPolicy's enumerate_cap is independent of partition_num's "
-    "bisection width",
+    "partition width",
     "[composition_policy]")
 {
   // Domain size 40 -- not enumerable under PartitionNum (4) alone, but is
-  // under an EnumerateCap (50) that doesn't also force continuous/bisected
+  // under an EnumerateCap (50) that doesn't also force continuous/partitioned
   // slots to a width of 50.
   std::vector<cu::interval<double>> box = {{0.0, 39.0}, {0.0, 10.0}};
   std::vector<VarKind> kinds = {VarKind::Integer, VarKind::Continuous};
 
-  GreedyCompositionPolicy<double, 2> policy {
+  GreedyCompositionPolicy<double> policy {
       FanOutSpec {/*partition_num=*/4, /*enumerate_cap=*/50}};
   auto assignment = policy.choose(box, kinds);
 
@@ -74,7 +75,7 @@ TEST_CASE(
   CHECK(assignment.var_ids[1] == 1);
   CHECK(assignment.composition[1] == SlotKind::Continuous);
 
-  // The continuous slot still bisects at PartitionNum (4), not EnumerateCap.
+  // The continuous slot still partitions at PartitionNum (4), not EnumerateCap.
   CHECK(cuminlp::slot_fan_out(SlotKind::Continuous, FanOutSpec {4, 50}) == 4);
   CHECK(cuminlp::slot_fan_out(SlotKind::IntegerEnumerate, FanOutSpec {4, 50}) == 50);
 }
@@ -86,7 +87,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> box = {{0.0, 100.0}, {0.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Integer, VarKind::Integer};
 
-  GreedyCompositionPolicy<double, 1> policy {FanOutSpec {50}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {50}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
@@ -99,7 +100,7 @@ TEST_CASE("GreedyCompositionPolicy prefers the widest continuous variable",
   std::vector<cu::interval<double>> box = {{0.0, 2.0}, {0.0, 10.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous, VarKind::Continuous};
 
-  GreedyCompositionPolicy<double, 1> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
@@ -113,7 +114,7 @@ TEST_CASE("GreedyCompositionPolicy spills into the next kind once one runs out",
   std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 5.0}};
   std::vector<VarKind> kinds = {VarKind::Binary, VarKind::Integer};
 
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 0);
@@ -121,23 +122,20 @@ TEST_CASE("GreedyCompositionPolicy spills into the next kind once one runs out",
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy pads with Padding (fan-out 1) once every variable "
-    "is resolved",
+    "GreedyCompositionPolicy returns an empty composition once every "
+    "variable is resolved",
     "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{3.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous};
 
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
-  CHECK(assignment.var_ids[0] == 0);
-  CHECK(assignment.var_ids[1] == 0);
-  // Padding, not Continuous: a resolved box's Composition must stay fully
-  // enumerable so it can still be fathomed (TEST_EXTENSION.md).
-  CHECK(assignment.composition[0] == SlotKind::Padding);
-  CHECK(assignment.composition[1] == SlotKind::Padding);
-  CHECK(cuminlp::slot_fan_out(SlotKind::Padding, FanOutSpec {4}) == 1);
+  // A composition is exactly its live slots (design/MODULE_REFACTOR.md §4.6):
+  // nothing live means nothing to fill, not a padded-out compile-time width.
+  CHECK(assignment.composition.size() == 0);
+  CHECK(assignment.var_ids.empty());
 }
 
 TEST_CASE(
@@ -152,7 +150,7 @@ TEST_CASE(
   std::vector<VarKind> kinds = {
       VarKind::Continuous, VarKind::Binary, VarKind::Integer};
 
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto first = policy.choose(box, kinds);
   auto second = policy.choose(box, kinds);
 
@@ -172,7 +170,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> box;
   std::vector<VarKind> kinds;
 
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   REQUIRE_THROWS_AS(policy.choose(box, kinds), ShapeMismatch);
 }
 
@@ -180,13 +178,13 @@ TEST_CASE(
     "integer_domain_size does not underflow on a sub-box with no integer point",
     "[composition_policy][3b]")
 {
-  using Policy = GreedyCompositionPolicy<double, 1>;
+  using Policy = GreedyCompositionPolicy<double>;
 
   // A normal, lattice-aligned domain still counts correctly.
   CHECK(Policy::integer_domain_size({0.0, 3.0}) == 4);
 
-  // Reachable directly from an IntegerBisect child: ceil(lb) > floor(ub), no
-  // integer point at all. Must classify as 0 (empty), not wrap to a huge
+  // Reachable directly from an IntegerPartition child: ceil(lb) > floor(ub),
+  // no integer point at all. Must classify as 0 (empty), not wrap to a huge
   // size_t via an out-of-range double->size_t cast.
   CHECK(Policy::integer_domain_size({2.5, 2.9}) == 0);
   CHECK(Policy::integer_domain_size({2.5, 2.9}) < 1000);
@@ -194,17 +192,17 @@ TEST_CASE(
 
 TEST_CASE(
     "A sub-box with no integer point is still classified as enumerable rather "
-    "than " "bisected forever",
+    "than " "partitioned forever",
     "[composition_policy][3b]")
 {
   // Under the old integer_domain_size, {2.5, 2.9}'s domain size underflowed
-  // to a huge value, comparing as > EnumerateCap and driving another bisect
-  // forever. With the fix, its (empty) domain size of 0 is <= any
+  // to a huge value, comparing as > EnumerateCap and driving another
+  // partition forever. With the fix, its (empty) domain size of 0 is <= any
   // EnumerateCap, so it terminates as IntegerEnumerate instead.
   std::vector<cu::interval<double>> box = {{2.5, 2.9}};
   std::vector<VarKind> kinds = {VarKind::Integer};
 
-  GreedyCompositionPolicy<double, 1> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.composition[0] == SlotKind::IntegerEnumerate);
@@ -215,12 +213,9 @@ TEST_CASE(
 TEST_CASE("can_fathom_without_children at live_count == slot count",
           "[composition_policy][4b]")
 {
-  // `count` is what the predicate compares against, not the capacity: a
-  // hand-built Composition has to state it, exactly as choose() would.
-  Composition<3> comp {.kinds = {SlotKind::BinaryEnumerate,
-                                 SlotKind::BinaryEnumerate,
-                                 SlotKind::BinaryEnumerate},
-                       .count = 3};
+  Composition comp {.kinds = {SlotKind::BinaryEnumerate,
+                              SlotKind::BinaryEnumerate,
+                              SlotKind::BinaryEnumerate}};
   CHECK(can_fathom_without_children(3, comp));
 }
 
@@ -229,37 +224,13 @@ TEST_CASE(
     "slots the policy filled",
     "[composition_policy][4b]")
 {
-  // The case a capped policy on a wider rung creates, and the reason the
-  // bound is `count` rather than `Capacity`: three slots are compiled, the
-  // policy filled two, and a third variable is live with nowhere to go.
-  // Testing against the capacity would call this fathomable and discard a
-  // subtree that may hold the optimum.
-  Composition<3> comp {
-      .kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate,
-                SlotKind::Padding},
-      .count = 2};
+  // Two enumerable slots, but three live variables: testing against a wider
+  // bound than the policy actually filled would call this fathomable and
+  // discard a subtree that may hold the optimum.
+  Composition comp {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}};
   CHECK(is_fully_enumerable(comp));
   CHECK_FALSE(can_fathom_without_children(3, comp));
   CHECK(can_fathom_without_children(2, comp));
-}
-
-TEST_CASE(
-    "can_fathom_without_children at live_count == CycleSize - 1 (the padding "
-    "case)",
-    "[composition_policy][4b]")
-{
-  // 2 live binaries under CycleSize == 3: before the Padding fix, the
-  // trailing slot was blanket-Continuous, making is_fully_enumerable false
-  // and permanently denying this box the exact/fathom path despite being
-  // trivially enumerable.
-  std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 1.0}};
-  std::vector<VarKind> kinds = {VarKind::Binary, VarKind::Binary};
-
-  GreedyCompositionPolicy<double, 3> policy {FanOutSpec {4}};
-  auto assignment = policy.choose(box, kinds);
-
-  CHECK(assignment.composition[2] == SlotKind::Padding);
-  CHECK(can_fathom_without_children(2, assignment.composition));
 }
 
 TEST_CASE("can_fathom_without_children at live_count == 0 (fully resolved box)",
@@ -270,7 +241,7 @@ TEST_CASE("can_fathom_without_children at live_count == 0 (fully resolved box)",
   std::vector<cu::interval<double>> box = {{3.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous};
 
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(can_fathom_without_children(0, assignment.composition));
@@ -280,8 +251,7 @@ TEST_CASE(
     "can_fathom_without_children is false when a live Continuous slot remains",
     "[composition_policy][4b]")
 {
-  Composition<2> comp {.kinds = {SlotKind::BinaryEnumerate, SlotKind::Continuous},
-                       .count = 2};
+  Composition comp {.kinds = {SlotKind::BinaryEnumerate, SlotKind::Continuous}};
   CHECK_FALSE(can_fathom_without_children(2, comp));
 }
 
@@ -320,21 +290,39 @@ TEST_CASE("composition_fan_out saturates instead of wrapping",
   // the size_t ceiling. A wrapped product could land on a small number and
   // size every device buffer far too small; saturating makes the caller's
   // budget check reject it instead (see GraphReplay::build).
-  Composition<10> huge {};
-  huge.fill(SlotKind::Continuous);
+  Composition huge {.kinds = std::vector<SlotKind>(10, SlotKind::Continuous)};
   CHECK(cuminlp::composition_fan_out(huge, FanOutSpec {10000000})
         == std::numeric_limits<std::size_t>::max());
 
   // A product that does fit is still computed exactly.
-  Composition<3> small {};
-  small.fill(SlotKind::Continuous);
+  Composition small {.kinds = std::vector<SlotKind>(3, SlotKind::Continuous)};
   CHECK(cuminlp::composition_fan_out(small, FanOutSpec {4}) == 64);
+}
 
-  // Padding slots contribute a factor of 1, which is what lets a shorter
-  // assignment share a wider Composition's graph.
-  Composition<3> padded = {
-      SlotKind::Continuous, SlotKind::Padding, SlotKind::Padding};
-  CHECK(cuminlp::composition_fan_out(padded, FanOutSpec {4}) == 4);
+TEST_CASE("slot_prefixes agrees with repeated-division digits",
+          "[composition_policy][config]")
+{
+  // (r / prefix[j]) % fan_out[j] must reproduce the same digit a per-thread
+  // repeated-division loop would compute for every region r
+  // (design/MODULE_REFACTOR.md §4.2) -- the property the two-pass device
+  // kernels depend on for bit-identical results against the old scan.
+  Composition comp {.kinds = {SlotKind::BinaryEnumerate,
+                              SlotKind::IntegerEnumerate,
+                              SlotKind::Continuous}};
+  FanOutSpec const fan_out {4, 3};  // widths: 2, 3, 4
+  auto const prefix = cuminlp::slot_prefixes(comp, fan_out);
+  REQUIRE(prefix.size() == 3);
+
+  std::size_t const n_regions = cuminlp::composition_fan_out(comp, fan_out);
+  for (std::size_t r = 0; r < n_regions; ++r) {
+    std::size_t idx = r;
+    for (std::size_t j = 0; j < comp.size(); ++j) {
+      std::size_t const width = cuminlp::slot_fan_out(comp[j], fan_out);
+      std::size_t const expected_digit = idx % width;
+      idx /= width;
+      CHECK((r / prefix[j]) % width == expected_digit);
+    }
+  }
 }
 
 TEST_CASE("A policy's fan_out is what its callers decode against",
@@ -342,78 +330,49 @@ TEST_CASE("A policy's fan_out is what its callers decode against",
 {
   // The reason FanOutSpec lives on the policy: CompositionInterval::materialise
   // reads it off the same object it calls choose() on, so the widths used to
-  // encode a node's sidx and to decode it cannot come apart. Previously the
-  // driver and policy carried independent EnumerateCap template arguments.
-  GreedyCompositionPolicy<double, 2> policy {FanOutSpec {4, 50}};
+  // encode a node's sidx and to decode it cannot come apart.
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4, 50}};
   CHECK(policy.fan_out().partition_num() == 4);
   CHECK(policy.fan_out().enumerate_cap() == 50);
 }
 
-// --- Capacity vs count -----------------------------------------------------
-//
-// Capacity is a compile-time array bound (partition::SlotContext is
-// register-resident); count is how many slots a node actually fills. The
-// separation is what lets one compiled rung serve every narrower request, so
-// the properties that make rounding-up safe are worth pinning down.
+// --- max_cycle_size / kMaxSlots ---------------------------------------------
 
 TEST_CASE("choose reports the number of slots it filled, per box",
           "[composition_policy][capacity]")
 {
-  // Same policy, same capacity, different boxes -> different counts. This is
-  // the per-node variation the whole capacity/count split exists to allow.
+  // Same policy, different boxes -> different slot counts.
   std::vector<VarKind> kinds = {
       VarKind::Binary, VarKind::Binary, VarKind::Binary};
-  GreedyCompositionPolicy<double, 8> policy {FanOutSpec {4}};
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
   std::vector<cu::interval<double>> all_live = {
       {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}};
-  CHECK(policy.choose(all_live, kinds).composition.count == 3);
+  CHECK(policy.choose(all_live, kinds).composition.size() == 3);
 
   std::vector<cu::interval<double>> one_resolved = {
       {0.0, 1.0}, {1.0, 1.0}, {0.0, 1.0}};
-  CHECK(policy.choose(one_resolved, kinds).composition.count == 2);
+  CHECK(policy.choose(one_resolved, kinds).composition.size() == 2);
 
   std::vector<cu::interval<double>> all_resolved = {
       {0.0, 0.0}, {1.0, 1.0}, {0.0, 0.0}};
-  CHECK(policy.choose(all_resolved, kinds).composition.count == 0);
+  CHECK(policy.choose(all_resolved, kinds).composition.size() == 0);
 }
 
-TEST_CASE("A wider capacity produces the same children as a narrow one",
+TEST_CASE("max_cycle_size caps the slots a policy fills",
           "[composition_policy][capacity]")
 {
-  // The property that makes the ladder's round-up free: surplus slots are
-  // Padding, Padding has fan-out 1, so the region count is unchanged. If this
-  // failed, rounding capacity 4 up to rung 8 would silently change the search.
-  std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 1.0}};
-  std::vector<VarKind> kinds = {VarKind::Binary, VarKind::Binary};
-  FanOutSpec const fan_out {4};
-
-  GreedyCompositionPolicy<double, 2> narrow {fan_out};
-  GreedyCompositionPolicy<double, 8> wide {fan_out};
-
-  auto const narrow_comp = narrow.choose(box, kinds).composition;
-  auto const wide_comp = wide.choose(box, kinds).composition;
-
-  CHECK(narrow_comp.count == wide_comp.count);
-  CHECK(cuminlp::composition_fan_out(narrow_comp, fan_out)
-        == cuminlp::composition_fan_out(wide_comp, fan_out));
-}
-
-TEST_CASE("max_cycle_size caps the slots a policy fills below its capacity",
-          "[composition_policy][capacity]")
-{
-  // Five live variables, capacity 8, but the cap says use 3. Without the cap
-  // being honoured in fill_*, --max-cycle-size would do nothing at all.
+  // Five live variables, but the cap says use 3. Without the cap being
+  // honoured in fill_*, --max-cycle-size would do nothing at all.
   std::vector<cu::interval<double>> box = {
       {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}};
   std::vector<VarKind> kinds(5, VarKind::Binary);
 
-  GreedyCompositionPolicy<double, 8> policy {
+  GreedyCompositionPolicy<double> policy {
       FanOutSpec {4}, cuminlp::SearchCalibration {.max_cycle_size = 3}};
   auto const assignment = policy.choose(box, kinds);
 
-  CHECK(assignment.composition.count == 3);
-  CHECK(assignment.composition[3] == SlotKind::Padding);
+  CHECK(assignment.composition.size() == 3);
 
   // And the capped box is NOT fathomable: 5 live variables don't fit in 3
   // slots, even though every filled slot enumerates.
@@ -421,18 +380,63 @@ TEST_CASE("max_cycle_size caps the slots a policy fills below its capacity",
   CHECK_FALSE(can_fathom_without_children(5, assignment.composition));
 }
 
-TEST_CASE("A policy cannot be capped above the capacity it was compiled for",
+TEST_CASE("A policy cannot be capped above kMaxSlots",
           "[composition_policy][capacity]")
 {
-  // Asking for more slots than the instantiated SlotContext holds is a
-  // configuration error, not something to silently clamp: the fix is a wider
-  // ladder rung.
-  CHECK_THROWS_AS((GreedyCompositionPolicy<double, 8> {
-                      FanOutSpec {4},
-                      cuminlp::SearchCalibration {.max_cycle_size = 16}}),
-                  cuminlp::InvalidConfiguration);
+  // Asking for more slots than the search cap allows is a configuration
+  // error, not something to silently clamp.
+  CHECK_THROWS_AS(
+      (GreedyCompositionPolicy<double> {
+          FanOutSpec {4},
+          cuminlp::SearchCalibration {.max_cycle_size = cuminlp::kMaxSlots + 1}}),
+      cuminlp::InvalidConfiguration);
 
-  // Unset (0) means "the whole capacity".
-  GreedyCompositionPolicy<double, 8> policy {FanOutSpec {4}};
-  CHECK(policy.max_cycle_size() == 8);
+  // Unset (0) means "the full search cap".
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  CHECK(policy.max_cycle_size() == cuminlp::kMaxSlots);
+}
+
+// --- The var_ids contract (§4.5) --------------------------------------------
+//
+// choose() must return pairwise-distinct var_ids, each indexing a live
+// (lb < ub) dimension -- GreedyCompositionPolicy satisfies this by
+// construction; assignment_is_distinct_and_live is the debug assertion
+// GraphDriver checks it with.
+
+TEST_CASE("GreedyCompositionPolicy always satisfies the distinct-and-live "
+          "var_ids contract",
+          "[composition_policy][4.5]")
+{
+  std::vector<cu::interval<double>> box = {
+      {0.0, 10.0}, {0.0, 1.0}, {0.0, 3.0}, {5.0, 5.0}};
+  std::vector<VarKind> kinds = {
+      VarKind::Continuous, VarKind::Binary, VarKind::Integer, VarKind::Continuous};
+
+  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  auto const assignment = policy.choose(box, kinds);
+
+  CHECK(cuminlp::assignment_is_distinct_and_live<double>(assignment, box));
+}
+
+TEST_CASE("assignment_is_distinct_and_live rejects a duplicate var_id",
+          "[composition_policy][4.5]")
+{
+  std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 1.0}};
+  cuminlp::SlotAssignment bad {
+      .composition = {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}},
+      .var_ids = {0, 0}};
+
+  CHECK_FALSE(cuminlp::assignment_is_distinct_and_live<double>(bad, box));
+}
+
+TEST_CASE("assignment_is_distinct_and_live rejects a resolved (non-live) "
+          "var_id",
+          "[composition_policy][4.5]")
+{
+  std::vector<cu::interval<double>> box = {{0.0, 1.0}, {5.0, 5.0}};
+  cuminlp::SlotAssignment bad {
+      .composition = {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}},
+      .var_ids = {0, 1}};
+
+  CHECK_FALSE(cuminlp::assignment_is_distinct_and_live<double>(bad, box));
 }

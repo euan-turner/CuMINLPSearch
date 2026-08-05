@@ -4,7 +4,6 @@
 #include <string>
 
 #include "autocorr_bern20_03_problem.hpp"
-#include "cuminlp/capacity_ladder.hpp"
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_driver.cuh"
@@ -18,12 +17,10 @@ auto main(int argc, char* argv[]) -> int
       {
         int iters = argc > 1 ? std::stoi(argv[1]) : 10;
 
-        auto policy = std::make_shared<
-            cuminlp::GreedyCompositionPolicy<double, CAPACITY>>(
+        auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
             cuminlp::FanOutSpec {PARTITION_NUM},
             cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
-        cuminlp::GraphDriver<double, CAPACITY> drv(
-            policy, iters, 1e-6, SAMPLE_POINTS);
+        cuminlp::GraphDriver<double> drv(policy, iters, 1e-6, SAMPLE_POINTS);
         drv.solve(make_autocorr_bern20_03());
       });
 }

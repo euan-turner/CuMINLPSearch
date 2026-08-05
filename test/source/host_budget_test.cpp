@@ -41,8 +41,7 @@ bool feq(double a, double b)
   return !(a < b) && !(b < a);
 }
 
-constexpr std::size_t kCapacity = 4;
-using Node = CompositionInterval<double, kCapacity>;
+using Node = CompositionInterval<double>;
 using Queue = IntervalPQueue<double, Node>;
 
 Node node(double lb, std::size_t depth = 1, std::size_t pidx = 1)
