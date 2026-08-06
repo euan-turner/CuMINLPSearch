@@ -5,7 +5,7 @@
 
 // The expression IR: an SSA-numbered DAG of scalar operations. `model/
 // problem.hpp` builds `Expr`/`Problem` on top of this; nothing here knows
-// what a "variable" or "constraint" is (design/MODULE_REFACTOR.md §11).
+// what a "variable" or "constraint" is.
 namespace cuminlp::model
 {
 

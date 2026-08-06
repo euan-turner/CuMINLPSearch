@@ -10,7 +10,6 @@
 #include "cuminlp/model/dag.hpp"
 
 // The MINLP problem wrapper built on model/dag.hpp's expression IR
-// (design/MODULE_REFACTOR.md §11).
 namespace cuminlp::model
 {
 

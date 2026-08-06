@@ -32,7 +32,7 @@ enum class PolicyKind
 // both off one object makes them impossible to disagree.
 //
 // `choose()` must return an assignment whose `var_ids` are pairwise distinct
-// and each index a live (lb < ub) dimension (design/MODULE_REFACTOR.md §4.5)
+// and each index a live (lb < ub) dimension
 // -- GreedyCompositionPolicy satisfies this by construction (fill_binary/
 // fill_integer/fill_continuous each visit distinct vids and partition by
 // VarKind), and SearchDriver asserts it in debug builds.

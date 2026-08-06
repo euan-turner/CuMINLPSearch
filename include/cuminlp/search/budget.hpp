@@ -11,11 +11,7 @@
 // on the two unbounded host structures a search grows (the pending frontier
 // and the interval history), the arithmetic that decides how far to compact
 // the frontier when it is reached, and the accounting that keeps discarding
-// regions *sound*. See design/BOUNDED_FRONTIER.md.
-//
-// Deliberately device-free, for the same reason config/footprint.hpp is: every
-// decision here is arithmetic on counts and bounds, and none of it needs a GPU
-// to test. search/driver.hpp is where they are wired to an actual search.
+// regions *sound*.
 namespace cuminlp::search
 {
 
@@ -60,7 +56,7 @@ inline const char* to_string(StopReason reason)
  * would have reported anyway, and the only difference from an unbudgeted run
  * is that this one ends with a result instead of an OOM kill. `Compact` trades
  * regions for a longer run, and a region traded away is one the search will
- * not look in -- sound (§4's floor sees to that) but a different search. That
+ * not look in -- sound but a different search. That
  * makes it opt-in: `--bounded-frontier`.
  */
 enum class FrontierPolicy

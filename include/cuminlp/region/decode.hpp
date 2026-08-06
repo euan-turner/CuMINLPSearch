@@ -7,12 +7,6 @@
 
 #include "cuminlp/region/slot.hpp"
 
-// __host__ __device__ only mean anything to nvcc; on a plain host compiler
-// (e.g. building the host-only test targets without CUDA) they'd be
-// undefined identifiers, so they're no-ops outside __CUDACC__. This lets the
-// exact same function be called from backend::graph's __device__ kernels and
-// from search::Node::materialise, which is what makes host/device agreement
-// structural rather than something to prove by test (see TEST_EXTENSION.md).
 #if defined(__CUDACC__)
 #  define CUMINLP_HD __host__ __device__
 #else

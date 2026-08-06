@@ -11,7 +11,7 @@
 #include "cuminlp/region/fan_out.hpp"
 
 // The single decode `search::Node::materialise` and the device's
-// apply_slots_kernel both go through (design/MODULE_REFACTOR.md §9): given a
+// apply_slots_kernel both go through: given a
 // parent box and the SlotAssignment/sidx that produced a child, reconstruct
 // the child's box. Knows nothing about a policy, a device or search state --
 // the caller (search::Node::materialise) is what re-derives `assignment` by

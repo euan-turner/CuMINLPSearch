@@ -34,7 +34,7 @@ namespace cuminlp::search
 
 /// What one solve() found, and what it proved. Everything a caller used to
 /// reach for through accessors on a shared base class, plus the counters the
-/// run's summary quotes (design/MODULE_REFACTOR.md §6.1).
+/// run's summary quotes.
 struct SearchCounters
 {
   std::uint32_t iterations = 0;
@@ -62,7 +62,7 @@ struct SolveOutcome
   }
 };
 
-// Branch-and-bound over an arbitrary model::Problem. Each iteration, the
+// Search over an arbitrary model::Problem. Each iteration, the
 // CompositionPolicy picks a SlotAssignment for the current node's box, and
 // the backend supplies the roles that act on it: a sampler for GUB
 // candidates and a bounder for sound lower bounds / pruning. BackendCache
@@ -94,6 +94,9 @@ public:
    * @param observer where solve()'s progress narration goes; the base
    *        class's every override is a no-op, so the default is a silent
    *        driver (design/MODULE_REFACTOR.md §8)
+   * @param known_primal_bound if set, seeds GUB_ instead of starting from
+   *        +inf; must already be sound in the minimising sense (a caller
+   *        solving max negates before passing it in)
    */
   explicit SearchDriver(
       std::shared_ptr<const policy::CompositionPolicy<T>> policy,
@@ -105,7 +108,8 @@ public:
       std::size_t host_budget_bytes = 0,
       FrontierPolicy frontier_policy = FrontierPolicy::StopAtBudget,
       std::shared_ptr<report::SearchObserver> observer =
-          std::make_shared<report::SearchObserver>())
+          std::make_shared<report::SearchObserver>(),
+      std::optional<double> known_primal_bound = std::nullopt)
       : policy_(std::move(policy))
       , backend_(std::move(backend))
       , tolerance_(tolerance)
@@ -128,12 +132,13 @@ public:
       throw cuminlp::InvalidConfiguration(
           "SearchDriver requires a non-null SearchObserver");
     }
+    known_primal_bound_ = known_primal_bound;
   }
 
   // the driver loop
   auto solve(const model::Problem<T>& problem) -> SolveOutcome<T>
   {
-    GUB_ = std::numeric_limits<double>::max();
+    GUB_ = known_primal_bound_.value_or(std::numeric_limits<double>::max());
     GLB_ = std::numeric_limits<double>::lowest();
     iter_idx_ = 0;
     best_point_.clear();
@@ -469,6 +474,7 @@ private:
   std::size_t host_budget_bytes_;
   FrontierPolicy frontier_policy_;
   std::shared_ptr<report::SearchObserver> observer_;
+  std::optional<double> known_primal_bound_;
 
   // The bracket the loop maintains: GLB_ <= min <= GUB_ at every iteration.
   // Members rather than locals only so gap_closed() can close over them;

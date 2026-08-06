@@ -75,7 +75,8 @@ struct Solution
  * @return Solution
  */
 auto solve_with(cuminlp::model::Problem<double> const& problem,
-                cuminlp::config::RunSpec const& spec) -> Solution
+                cuminlp::config::RunSpec const& spec,
+                std::optional<double> known_primal_bound) -> Solution
 {
   std::shared_ptr<const cuminlp::policy::CompositionPolicy<double>> policy =
       cuminlp::policy::make_policy<double>(
@@ -92,7 +93,8 @@ auto solve_with(cuminlp::model::Problem<double> const& problem,
                                                spec.budgets.device_bytes,
                                                spec.budgets.host_bytes,
                                                spec.frontier,
-                                               reporter);
+                                               reporter,
+                                               known_primal_bound);
   cuminlp::search::SolveOutcome<double> const outcome = driver.solve(problem);
   return Solution {outcome.upper_bound,
                    outcome.lower_bound,
@@ -183,10 +185,11 @@ void warn_on_implied_enumerate_cap(
  * from today's `probe_calibration` split).
  */
 auto solve(cuminlp::model::Problem<double> const& problem,
-           cuminlp::config::RunSpec spec) -> Solution
+           cuminlp::config::RunSpec spec,
+           std::optional<double> known_primal_bound) -> Solution
 {
   spec.calibration = probe_calibration(spec.max_slots);
-  return solve_with(problem, spec);
+  return solve_with(problem, spec, known_primal_bound);
 }
 
 /// One line per roster row: name, rules, evidence, provisional marker.
@@ -247,6 +250,7 @@ auto main(int argc, char* argv[]) -> int
     out << "usage: " << argv[0] << " [--policy=<name>] [--list-policies]"
         << " [--host-budget-bytes=<n>] [--bounded-frontier]"
         << " [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
+        << " [--known-primal-bound=<n> ]"
         << " <model.gms> <iterations>\n";
   };
 
@@ -320,6 +324,9 @@ auto main(int argc, char* argv[]) -> int
            "one release.\n"
            "  A run using any of these reports source=overridden instead of "
            "auto/named.\n"
+           "  --known-primal-bound=N    initialised the search with a known "
+           "primal bound on the objective (upper bound for `min`, lower bound for `max`). "
+           "This bound must be sound for correctness of the search. "
            "\n"
            "Exit codes: 0 solved or hit the iteration limit (and --help, "
            "--list-policies),\n"
@@ -339,6 +346,7 @@ auto main(int argc, char* argv[]) -> int
   std::optional<std::size_t> enumerate_cap;
   std::optional<std::size_t> sample_points;
   std::optional<std::size_t> max_slots;
+  std::optional<double> known_primal_bound;
   std::size_t host_budget_bytes = 0;
   bool bounded_frontier = false;
   std::vector<std::string> positional;
@@ -360,6 +368,25 @@ auto main(int argc, char* argv[]) -> int
     } catch (std::exception const&) {
       std::cerr << flag << " expects a non-negative integer, got '" << value
                 << "'\n";
+      return std::nullopt;
+    }
+  };
+
+  // Rejects anything std::stod wouldn't consume in full, matching parse_count
+  // above. Signed and fractional: an objective bound is not restricted to
+  // non-negative integers the way the fan-out shape parameters are.
+  auto parse_double = [&](std::string const& value,
+                          char const* flag) -> std::optional<double>
+  {
+    try {
+      std::size_t consumed = 0;
+      double const n = std::stod(value, &consumed);
+      if (consumed != value.size()) {
+        throw std::invalid_argument("trailing characters");
+      }
+      return n;
+    } catch (std::exception const&) {
+      std::cerr << flag << " expects a number, got '" << value << "'\n";
       return std::nullopt;
     }
   };
@@ -421,6 +448,14 @@ auto main(int argc, char* argv[]) -> int
         return 2;
       }
       host_budget_bytes = *parsed_budget;
+      continue;
+    }
+    if (arg.rfind("--known-primal-bound=", 0) == 0) {
+      known_primal_bound =
+          parse_double(arg.substr(21), "--known-primal-bound");
+      if (!known_primal_bound) {
+        return 2;
+      }
       continue;
     }
     if (arg == "--bounded-frontier") {
@@ -621,10 +656,13 @@ auto main(int argc, char* argv[]) -> int
       warn_on_implied_enumerate_cap(parsed.problem, spec.fan_out);
     }
 
-    Solution const solution = solve(parsed.problem, spec);
+    bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;
+    if (maximise && known_primal_bound) {
+      known_primal_bound = std::optional(-*known_primal_bound);
+    }
+    Solution const solution = solve(parsed.problem, spec, known_primal_bound);
 
     // The solver only minimises; a maximisation was negated on the way in.
-    bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;
     std::cout << "objective (" << (maximise ? "maximise" : "minimise")
               << "): " << (maximise ? -solution.bound : solution.bound) << '\n';
 

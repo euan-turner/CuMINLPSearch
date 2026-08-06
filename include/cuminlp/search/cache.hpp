@@ -14,13 +14,9 @@
 #include "cuminlp/report/observer.hpp"
 
 // The driver's backend roles, kept between iterations
-// (design/MODULE_REFACTOR.md §6.2).
 //
 // In the search layer, not the backend's: the eviction policy is a memory
-// decision the *driver's* budget owns, and RUNTIME_SHAPE.md §6.5's soundness
-// argument for it is stated in terms of the driver's sizing rather than any
-// backend's internals. Entries are pure caches -- evicting one costs the
-// rebuild and changes no result (invariant 13).
+// decision the *driver's* budget owns.
 namespace cuminlp::search
 {
 
