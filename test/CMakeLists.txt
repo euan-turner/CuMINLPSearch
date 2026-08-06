@@ -131,6 +131,25 @@ target_include_directories(
 
 catch_discover_tests(cuminlp_policy_catalogue_test)
 
+# Host-only: config/run_spec.hpp (RunSpec/OverrideSet/Provenance/resolve) is
+# plain templated C++ over the same policy_catalogue.hpp types the resolver
+# test above already builds host-only, plus backend/graph/cost.hpp, which is
+# host-only for the same reason (see that header's top comment). Includes
+# source/ for nvs09_problem.hpp, same as cuminlp_policy_catalogue_test.
+add_executable(cuminlp_run_spec_test source/run_spec_test.cpp)
+target_link_libraries(
+    cuminlp_run_spec_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_run_spec_test PRIVATE cxx_std_20)
+target_include_directories(
+    cuminlp_run_spec_test
+    PRIVATE "${PROJECT_SOURCE_DIR}/source/fixed_examples"
+)
+
+catch_discover_tests(cuminlp_run_spec_test)
+
 # Launches graph_replay.cuh's sample_points_kernel directly (bypassing
 # GraphBuilder/GraphReplay) to check Integer/Binary variables are always
 # sampled on the integer lattice, even when they aren't the slot being

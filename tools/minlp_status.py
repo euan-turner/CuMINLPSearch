@@ -821,6 +821,7 @@ OVERRIDE_FLAGS = {
     "enumerate_cap": "--enumerate-cap",
     "sample_points": "--sample-points",
     "max_cycle_size": "--max-cycle-size",
+    "max_slots": "--max-slots",
 }
 
 

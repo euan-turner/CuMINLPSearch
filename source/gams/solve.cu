@@ -37,6 +37,7 @@
 
 #include "cuminlp/backend/graph/cost.hpp"
 #include "cuminlp/composition_policy.hpp"
+#include "cuminlp/config/run_spec.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/dag_print.hpp"
 #include "cuminlp/gams.hpp"
@@ -62,31 +63,23 @@ struct Solution {
   * @brief Construct a concrete CompositionPolicy and SearchDriver, then solve
   *
   * @param problem
-  * @param iters
-  * @param kind
-  * @param fan_out
-  * @param sample_points
-  * @param host_budget_bytes
-  * @param frontier_policy
-  * @param calibration
+  * @param spec the run's hyperparameters, fully resolved (design/
+  *             MODULE_REFACTOR.md §7.1) -- `spec.calibration` is the one the
+  *             policy is actually built against, distinct from the lighter
+  *             calibration `config::resolve` fits the shape against
   * @return Solution
   */
 auto solve_with(cuminlp::dag::Problem<double> const& problem,
-                int iters,
-                cuminlp::PolicyKind kind,
-                cuminlp::FanOutSpec fan_out,
-                std::size_t sample_points,
-                std::size_t host_budget_bytes,
-                cuminlp::FrontierPolicy frontier_policy,
-                cuminlp::SearchCalibration calibration) -> Solution
+                cuminlp::config::RunSpec const& spec) -> Solution
 {
   std::shared_ptr<const cuminlp::CompositionPolicy<double>> policy =
-      cuminlp::make_policy<double>(kind, fan_out, calibration);
+      cuminlp::make_policy<double>(spec.policy_kind, spec.fan_out,
+                                   spec.calibration);
   auto backend =
       std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
   cuminlp::SearchDriver<double> driver(
-      policy, backend, iters, 1e-6, sample_points, /*budget_bytes=*/0,
-      host_budget_bytes, frontier_policy);
+      policy, backend, spec.iter_limit, spec.tolerance, spec.sample_points,
+      spec.budgets.device_bytes, spec.budgets.host_bytes, spec.frontier);
   cuminlp::SolveOutcome<double> const outcome = driver.solve(problem);
   return Solution{outcome.upper_bound, outcome.lower_bound,
                   outcome.upper_bound, outcome.best_point};
@@ -106,10 +99,10 @@ auto free_device_bytes() -> std::size_t
   return free_bytes;
 }
 
-auto probe_calibration(std::size_t max_cycle_size) -> cuminlp::SearchCalibration
+auto probe_calibration(std::size_t max_slots) -> cuminlp::SearchCalibration
 {
   cuminlp::SearchCalibration calibration;
-  calibration.max_cycle_size = max_cycle_size;
+  calibration.max_cycle_size = max_slots;
 
   calibration.free_device_bytes = free_device_bytes();
   int device = 0;
@@ -162,24 +155,21 @@ void warn_on_implied_enumerate_cap(cuminlp::dag::Problem<double> const& problem,
             << "        decouples the two if that was not intended.\n";
 }
 
+/**
+ * @brief Fill in the policy-construction calibration a RunSpec doesn't carry
+ *        on its own, then solve.
+ *
+ * `spec.max_slots` (already resolved, possibly overridden) is what the
+ * built policy is actually capped at; probing it here rather than inside
+ * `config::resolve` keeps that resolver a pure function of problem/device/
+ * policy/overrides, with no device-property probe of its own (unchanged
+ * from today's `probe_calibration` split).
+ */
 auto solve(cuminlp::dag::Problem<double> const& problem,
-           int iters,
-           cuminlp::PolicyKind kind,
-           cuminlp::FanOutSpec fan_out,
-           std::size_t sample_points,
-           std::size_t max_cycle_size,
-           std::size_t host_budget_bytes,
-           cuminlp::FrontierPolicy frontier_policy) -> Solution
+           cuminlp::config::RunSpec spec) -> Solution
 {
-  auto const calibration = probe_calibration(max_cycle_size);
-  return solve_with(problem,
-                    iters,
-                    kind,
-                    fan_out,
-                    sample_points,
-                    host_budget_bytes,
-                    frontier_policy,
-                    calibration);
+  spec.calibration = probe_calibration(spec.max_slots);
+  return solve_with(problem, spec);
 }
 
 /// One line per roster row: name, rules, evidence, provisional marker.
@@ -303,8 +293,10 @@ auto main(int argc, char* argv[]) -> int
            "                      it instead of staying at what the policy "
            "resolved.\n"
            "  --sample-points=N   overrides the resolved sample_points.\n"
-           "  --max-cycle-size=N  overrides the resolved max_cycle_size; <= "
-           "64.\n"
+           "  --max-slots=N       overrides the resolved max_slots; <= 64. "
+           "--max-cycle-size=N\n"
+           "                      is a deprecated alias for this, kept for "
+           "one release.\n"
            "  A run using any of these reports source=overridden instead of "
            "auto/named.\n"
            "\n"
@@ -325,12 +317,12 @@ auto main(int argc, char* argv[]) -> int
   std::optional<std::size_t> partition_num;
   std::optional<std::size_t> enumerate_cap;
   std::optional<std::size_t> sample_points;
-  std::optional<std::size_t> max_cycle_size;
+  std::optional<std::size_t> max_slots;
   std::size_t host_budget_bytes = 0;
   bool bounded_frontier = false;
   std::vector<std::string> positional;
 
-  // Shared by --partition-num/--enumerate-cap/--sample-points/
+  // Shared by --partition-num/--enumerate-cap/--sample-points/--max-slots/
   // --max-cycle-size. Rejects anything std::stoull wouldn't consume in full,
   // so `--partition-num=8x` is an error rather than a silent 8. Range
   // checking beyond "is a number" is FanOutSpec's/CompositionPolicy's job.
@@ -376,9 +368,19 @@ auto main(int argc, char* argv[]) -> int
       if (!sample_points) return 2;
       continue;
     }
+    if (arg.rfind("--max-slots=", 0) == 0) {
+      max_slots = parse_count(arg.substr(12), "--max-slots");
+      if (!max_slots) return 2;
+      continue;
+    }
     if (arg.rfind("--max-cycle-size=", 0) == 0) {
-      max_cycle_size = parse_count(arg.substr(17), "--max-cycle-size");
-      if (!max_cycle_size) return 2;
+      // Deprecated alias for --max-slots (design/MODULE_REFACTOR.md §7.4).
+      // To stderr, not stdout: stdout is the data channel
+      // tools/minlp_status.py scrapes, and this notice isn't part of it.
+      std::cerr << "note: --max-cycle-size is deprecated; use --max-slots "
+                   "instead\n";
+      max_slots = parse_count(arg.substr(17), "--max-cycle-size");
+      if (!max_slots) return 2;
       continue;
     }
     if (arg.rfind("--host-budget-bytes=", 0) == 0) {
@@ -489,7 +491,7 @@ auto main(int argc, char* argv[]) -> int
     selection_calibration.free_device_bytes = free_device_bytes();
 
     cuminlp::PolicyProfile policy {};
-    std::string source;
+    cuminlp::config::Provenance base_source;
     if (policy_name) {
       auto found = cuminlp::lookup_policy(*policy_name);
       if (!found) {
@@ -514,57 +516,49 @@ auto main(int argc, char* argv[]) -> int
                      "--list-policies.\n";
         return 2;
       }
-      source = "named";
+      base_source = cuminlp::config::Provenance::Named;
     } else {
       policy = cuminlp::select_policy(problem_profile, selection_calibration);
-      source = "auto";
+      base_source = cuminlp::config::Provenance::Auto;
     }
+
+    cuminlp::config::OverrideSet overrides;
+    overrides.partition_num = partition_num;
+    overrides.enumerate_cap = enumerate_cap;
+    overrides.sample_points = sample_points;
+    overrides.max_slots = max_slots;
 
     // The backend's four cost coefficients, so the fit can be run before any
     // graph exists (design/MODULE_REFACTOR.md §5.5).
-    cuminlp::ResolvedShape const resolved = cuminlp::resolve(
+    cuminlp::config::RunSpec spec = cuminlp::config::resolve(
         policy,
         problem_profile,
         selection_calibration,
-        cuminlp::backend::graph::cost_model_for<double>(parsed.problem));
+        cuminlp::backend::graph::cost_model_for<double>(parsed.problem),
+        base_source,
+        overrides);
+    spec.budgets.host_bytes = host_budget_bytes;
+    spec.frontier = bounded_frontier ? cuminlp::FrontierPolicy::Compact
+                                     : cuminlp::FrontierPolicy::StopAtBudget;
+    spec.iter_limit = static_cast<std::uint32_t>(std::stoi(positional[1]));
 
-    bool const any_override =
-        partition_num || enumerate_cap || sample_points || max_cycle_size;
-    if (any_override) {
-      source = "overridden";
-    }
-
-    std::size_t const chosen_partition_num =
-        partition_num.value_or(resolved.partition_num);
-    // Given --partition-num without --enumerate-cap, enumerate_cap follows
-    // it (the old single-arg-FanOutSpec shorthand) rather than staying at
-    // whatever the policy resolved -- see warn_on_implied_enumerate_cap.
-    std::size_t const chosen_enumerate_cap = enumerate_cap
-        ? *enumerate_cap
-        : (partition_num ? chosen_partition_num : resolved.enumerate_cap);
-    std::size_t const chosen_sample_points =
-        sample_points.value_or(resolved.sample_points);
-    std::size_t const chosen_max_cycle_size =
-        max_cycle_size.value_or(resolved.max_cycle_size);
-
-    cuminlp::FanOutSpec const fan_out {chosen_partition_num,
-                                       chosen_enumerate_cap};
-
-    std::cout << "policy: " << policy.name << " (" << source
-              << "), partition_num: " << chosen_partition_num
-              << ", enumerate_cap: " << chosen_enumerate_cap
-              << ", sample_points: " << chosen_sample_points
-              << ", max_cycle_size: " << chosen_max_cycle_size << "\n";
+    std::cout << "policy: " << spec.policy_name << " ("
+              << cuminlp::config::to_string(spec.source)
+              << "), partition_num: " << spec.fan_out.partition_num()
+              << ", enumerate_cap: " << spec.fan_out.enumerate_cap()
+              << ", sample_points: " << spec.sample_points
+              << ", max_slots: " << spec.max_slots << "\n";
 
     // The machine-readable twin, for tools/minlp_status.py. `overrides=`
     // only appears on the overridden path, and lists only the flags actually
     // given.
-    std::cout << "PARAMS\tpolicy=" << policy.name << "\tsource=" << source
-              << "\tpartition_num=" << chosen_partition_num
-              << "\tenumerate_cap=" << chosen_enumerate_cap
-              << "\tsample_points=" << chosen_sample_points
-              << "\tmax_cycle_size=" << chosen_max_cycle_size;
-    if (any_override) {
+    std::cout << "PARAMS\tpolicy=" << spec.policy_name
+              << "\tsource=" << cuminlp::config::to_string(spec.source)
+              << "\tpartition_num=" << spec.fan_out.partition_num()
+              << "\tenumerate_cap=" << spec.fan_out.enumerate_cap()
+              << "\tsample_points=" << spec.sample_points
+              << "\tmax_slots=" << spec.max_slots;
+    if (overrides.any()) {
       std::cout << "\toverrides=";
       bool first = true;
       auto emit_override = [&](char const* name,
@@ -575,27 +569,18 @@ auto main(int argc, char* argv[]) -> int
         std::cout << name << "=" << *value;
         first = false;
       };
-      emit_override("partition_num", partition_num);
-      emit_override("enumerate_cap", enumerate_cap);
-      emit_override("sample_points", sample_points);
-      emit_override("max_cycle_size", max_cycle_size);
+      emit_override("partition_num", overrides.partition_num);
+      emit_override("enumerate_cap", overrides.enumerate_cap);
+      emit_override("sample_points", overrides.sample_points);
+      emit_override("max_slots", overrides.max_slots);
     }
     std::cout << '\n';
 
     if (partition_num && !enumerate_cap) {
-      warn_on_implied_enumerate_cap(parsed.problem, fan_out);
+      warn_on_implied_enumerate_cap(parsed.problem, spec.fan_out);
     }
 
-    Solution const solution = solve(parsed.problem,
-                                    std::stoi(positional[1]),
-                                    policy.kind,
-                                    fan_out,
-                                    chosen_sample_points,
-                                    chosen_max_cycle_size,
-                                    host_budget_bytes,
-                                    bounded_frontier
-                                        ? cuminlp::FrontierPolicy::Compact
-                                        : cuminlp::FrontierPolicy::StopAtBudget);
+    Solution const solution = solve(parsed.problem, spec);
 
     // The solver only minimises; a maximisation was negated on the way in.
     bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;
