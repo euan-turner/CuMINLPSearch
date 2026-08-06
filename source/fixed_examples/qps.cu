@@ -67,6 +67,32 @@ Problem<double> problem_219()
   problem.add_constraint(c1, Cmp::EQ, 1);
   return problem;
 }
+
+Problem<double> problem_219_rewritten()
+{
+  Problem<double> problem;
+  auto x1 = problem.var(0, 1);
+  auto x2 = problem.var(0, 1);
+  auto x3 = problem.var(0, 1);
+  auto x4 = problem.var(0, 1);
+  auto x5 = problem.var(0, 1);
+  auto x6 = problem.var(0, 1);
+  auto x7 = problem.var(0, 1);
+  auto x8 = problem.var(0, 1);
+  auto x9 = problem.var(0, 1);
+  auto x10 = problem.var(0, 1);
+
+  Expr<double> obj = x1 * x2 + x2 * x3 + x3 * x4 + x4 * x5 + x5 * x6 + x6 * x7
+      + x7 * x8 + x8 * x9 + x9 * (1 - x1 - x2 - x3 - x4 - x5 - x6 - x7 - x8 - x9) + x1 * x3 + x2 * x4 + x3 * x5 + x4 * x6
+      + x5 * x7 + x6 * x8 + x7 * x9 + x8 * (1 - x1 - x2 - x3 - x4 - x5 - x6 - x7 - x8 - x9) + x1 * x9 + x1 * (1 - x1 - x2 - x3 - x4 - x5 - x6 - x7 - x8 - x9) + x2 * (1 - x1 - x2 - x3 - x4 - x5 - x6 - x7 - x8 - x9)
+      + x1 * x5 + x4 * x7;
+  problem.set_objective(-obj);
+
+  Expr<double> c1 = (1 - x1 - x2 - x3 - x4 - x5 - x6 - x7 - x8 - x9);
+  problem.add_constraint(-c1, Cmp::LE, 0);
+  return problem;
+}
+
 }  // namespace
 
 auto main(int argc, char* argv[]) -> int
@@ -113,6 +139,21 @@ auto main(int argc, char* argv[]) -> int
               0,
               cuminlp::search::FrontierPolicy::StopAtBudget,
               reporter);
+          drv_219.solve(p219);
+        } else if (problem == 220) {
+          auto p219 = problem_219_rewritten();
+          auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+            cuminlp::config::profile_problem(p219));
+          cuminlp::search::SearchDriver<double> drv_219(
+            policy,
+            backend,
+            iters,
+            1e-6,
+            100,
+            0,
+            0,
+            cuminlp::search::FrontierPolicy::StopAtBudget,
+            reporter);
           drv_219.solve(p219);
         }
       });

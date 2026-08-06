@@ -26,7 +26,7 @@ struct ParseOptions
    * search driver would partition it forever, so free variables must be given
    * some box. Every substitution is reported as a warning.
    */
-  double default_bound = 1e6;
+  double default_bound = 1e6; // TODO: this may be too tight in some edge problems
 
   /**
    * Replace `x.fx = v` variables by the literal `v` before lowering, so they
