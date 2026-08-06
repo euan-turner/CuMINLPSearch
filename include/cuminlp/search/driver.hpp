@@ -11,6 +11,7 @@
 #include <new>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "cuminlp/errors.hpp"
 #include "cuminlp/host_budget.hpp"
 #include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search.hpp"
 #include "cuminlp/search/cache.hpp"
 
@@ -83,6 +85,9 @@ public:
    * @param budget_bytes caps device memory per build
    * @param host_budget_bytes caps the pending frontier and live interval history
    * @param frontier_policy policy for handling frontier growth
+   * @param observer where solve()'s progress narration goes; the base
+   *        class's every override is a no-op, so the default is a silent
+   *        driver (design/MODULE_REFACTOR.md §8)
    */
   explicit SearchDriver(
       std::shared_ptr<const CompositionPolicy<T>> policy,
@@ -92,7 +97,9 @@ public:
       std::size_t sample_points = 1,
       std::size_t budget_bytes = 0,
       std::size_t host_budget_bytes = 0,
-      FrontierPolicy frontier_policy = FrontierPolicy::StopAtBudget)
+      FrontierPolicy frontier_policy = FrontierPolicy::StopAtBudget,
+      std::shared_ptr<report::SearchObserver> observer =
+          std::make_shared<report::SearchObserver>())
       : policy_(std::move(policy))
       , backend_(std::move(backend))
       , tolerance_(tolerance)
@@ -101,6 +108,7 @@ public:
       , budget_bytes_(budget_bytes)
       , host_budget_bytes_(host_budget_bytes)
       , frontier_policy_(frontier_policy)
+      , observer_(std::move(observer))
   {
     if (policy_ == nullptr) {
       throw cuminlp::InvalidConfiguration(
@@ -109,6 +117,10 @@ public:
     if (backend_ == nullptr) {
       throw cuminlp::InvalidConfiguration(
           "SearchDriver requires a non-null RegionBackendFactory");
+    }
+    if (observer_ == nullptr) {
+      throw cuminlp::InvalidConfiguration(
+          "SearchDriver requires a non-null SearchObserver");
     }
   }
 
@@ -133,7 +145,7 @@ public:
     // -- see search/cache.hpp for why that is the search layer's decision
     // and not the backend's.
     search::BackendCache<T> cache(
-        backend_, problem, fan_out, budget_bytes_, sample_points_);
+        backend_, problem, fan_out, budget_bytes_, sample_points_, *observer_);
 
     IntervalPQueue<T> pending(10000);
     IntervalHistory<T> history;
@@ -149,17 +161,7 @@ public:
     // property of the machine at solve() start, not of the command line.
     std::size_t const host_budget = resolve_host_budget(host_budget_bytes_);
     bool const compacting = frontier_policy_ == FrontierPolicy::Compact;
-    if (host_budget == 0) {
-      std::cout << "Host memory budget: none (nothing requested, and "
-                   "MemAvailable could not be read from /proc/meminfo)\n";
-    } else {
-      std::cout << "Host memory budget: " << host_budget << " bytes ("
-                << (host_budget_bytes_ == 0 ? "measured" : "requested")
-                << "), on reaching it: "
-                << (compacting ? "compact the frontier and continue"
-                               : "stop with the frontier intact")
-                << '\n';
-    }
+    observer_->on_start(host_budget, host_budget_bytes_ != 0, compacting);
 
     pending.enqueue(Node<T> {
         .sidx = 0,
@@ -202,8 +204,7 @@ public:
           stopped_early = true;
           break;
         }
-        std::cout << "Least pending lb (selected for sample+partition): "
-                  << cur.lb << '\n';
+        observer_->on_dequeue(iter_idx_, static_cast<double>(cur.lb));
         GLB_ = cur.lb;
 
         std::vector<cu::interval<T>> box;
@@ -238,11 +239,10 @@ public:
             if (val < GUB_) {
               GUB_ = val;
               best_point_.assign(exact.point.begin(), exact.point.end());
+              observer_->on_incumbent(GUB_);
             }
           }
-          std::cout << "iter " << iter_idx_ << ": fully enumerated and fathomed ("
-                    << enumerator->n_points() << " points), GUB = " << GUB_
-                    << '\n';
+          observer_->on_fathom(enumerator->n_points(), GUB_);
           continue;
         }
 
@@ -257,6 +257,7 @@ public:
         if (cand < GUB_) {
           GUB_ = cand;
           best_point_.assign(drawn.point.begin(), drawn.point.end());
+          observer_->on_incumbent(GUB_);
         }
 
         // Interval analysis of sub-domains, then feasibility and GUB pruning
@@ -290,8 +291,8 @@ public:
 
         history.release(box_idx);
 
-        std::cout << "iter " << iter_idx_ << ": GUB = " << GUB_
-                  << ", Candidate: " << cand << '\n';
+        observer_->on_iteration(report::IterationEvent {.gub = GUB_,
+                                                        .candidate = cand});
 
         // Once per iteration, after the children are in: a per-enqueue check
         // would put a branch in the hot loop to catch an overshoot that is
@@ -303,13 +304,10 @@ public:
             // The default. Nothing is discarded, so the bracket below is the
             // one this search had already earned -- the run simply ends here
             // instead of growing into the OOM killer.
-            std::cout
-                << "Host budget of " << host_budget << " bytes reached ("
-                << pending.size()
-                << " regions pending); stopping the search here with the "
-                   "frontier intact. The bracket below is valid. Pass "
-                   "--bounded-frontier to discard the worst-bounded regions "
-                   "and keep searching instead.\n";
+            observer_->on_budget_stop(
+                report::BudgetStopEvent {.after_compaction = false,
+                                         .host_budget = host_budget,
+                                         .pending_size = pending.size()});
             stop_reason = StopReason::HostMemory;
             stopped_early = true;
             break;
@@ -326,19 +324,21 @@ public:
                           });
           std::size_t const live =
               pending.capacity_bytes() + history.live_bytes();
-          std::cout << "Host budget reached: compacted the frontier from "
-                    << before << " to " << pending.size() << " regions ("
-                    << live << " of " << host_budget << " bytes live)\n";
+          observer_->on_compaction(
+              report::CompactionEvent {.before = before,
+                                       .after = pending.size(),
+                                       .live_bytes = live,
+                                       .host_budget = host_budget});
 
           if (over_host_budget(live, host_budget)) {
             // Live history alone crowds out the frontier, or one box is simply
             // too big to hold. Either way there is nothing left to give back, so
             // stop -- with the bracket, the frontier and the dropped floor all
             // intact -- rather than grow into the OOM killer.
-            std::cout << "Host budget still exceeded with the frontier "
-                         "compacted; stopping the search here. The bracket "
-                         "below is valid, and the regions dropped to get under "
-                         "the budget are accounted for in it.\n";
+            observer_->on_budget_stop(
+                report::BudgetStopEvent {.after_compaction = true,
+                                         .host_budget = host_budget,
+                                         .pending_size = pending.size()});
             stop_reason = StopReason::HostMemory;
             stopped_early = true;
             break;
@@ -348,18 +348,20 @@ public:
     } catch (const backend::OverBudgetError& e) {
       // A Composition first reached mid-run needs graphs that do not fit. The
       // backend threw the facts; the costed advice is the resolver's to write
-      // (design/MODULE_REFACTOR.md §5.6), and is printed rather than swallowed.
-      std::cout << "Out of device memory mid-search: "
-                << explain_over_budget(e.facts(), profile_problem(problem))
-                << '\n';
+      // (design/MODULE_REFACTOR.md §5.6), and is reported rather than
+      // swallowed -- ConsoleReporter's on_backend_error costs it against the
+      // ProblemProfile it was constructed with.
+      observer_->on_backend_error(e.facts());
       stop_reason = StopReason::DeviceMemory;
       stopped_early = true;
     } catch (const cuminlp::ResourceExhausted& e) {
-      std::cout << "Out of device memory mid-search: " << e.what() << '\n';
+      observer_->on_mid_search_error(
+          std::string("Out of device memory mid-search: ") + e.what());
       stop_reason = StopReason::DeviceMemory;
       stopped_early = true;
     } catch (const std::bad_alloc& e) {
-      std::cout << "Host allocation failed mid-search: " << e.what() << '\n';
+      observer_->on_mid_search_error(
+          std::string("Host allocation failed mid-search: ") + e.what());
       stop_reason = StopReason::AllocationFailure;
       stopped_early = true;
     }
@@ -409,65 +411,31 @@ public:
     bool const proven_optimal = outcome.proven_optimal;
     GLB_ = outcome.glb;
 
-    if (outcome.infeasible) {
-      // Frontier emptied by feasibility pruning without ever sampling a
-      // feasible point -- not convergence, so GLB_ is left where the loop had
-      // it rather than collapsed onto GUB_.
-      //
-      // This is the infeasible case, and it is worth saying so outright: it
-      // cannot be reached by a sampler that merely kept missing. A region is
-      // discarded only when interval analysis proves no point in it satisfies
-      // some constraint, or when every one of its points was enumerated and
-      // none was feasible, so a feasible instance always leaves something
-      // pending. Sampling that never lands on a feasible point -- the ordinary
-      // fate of an equality, whose feasible set has measure zero -- instead
-      // keeps partitioning until the iteration limit stops it, and ends with a
-      // nonzero pending size.
-      //
-      // Eviction is the third way to empty a frontier, and it proves nothing
-      // at all, so finalise_bounds withholds this branch entirely once
-      // anything viable has been dropped: those regions are unexplored places,
-      // not excluded ones.
-      //
-      // "as far as interval analysis can tell" is the whole of the hedge: the
-      // pruning is conservative, but it is arithmetic on rounded bounds and
-      // not a certificate.
-      std::cout << "Search space exhausted: every region was proven to hold no "
-                   "feasible point, so the problem is infeasible as far as "
-                   "interval analysis can tell. Sampling that merely never "
-                   "landed on a feasible point would have left regions pending "
-                   "here instead.\n";
-    }
-
-    std::cout << "------------ Finished ------------" << '\n'
-              << GLB_ << " <= min <= " << GUB_ << '\n';
-    if (proven_optimal) {
-      std::cout << "Proven optimal: no pending region can beat the incumbent"
-                << (iter_idx_ >= iter_limit_
-                        ? " (the iteration limit was reached, but every"
-                          " remaining region is already dominated)"
-                        : "")
-                << ".\n";
-    }
-    // An interface, not just a trace line: tools/minlp_status.py reads these to
-    // tell an infeasible instance (zero pending, no drops, no incumbent) from a
-    // run that stopped with places left to look, and records the two
-    // differently. Printed unconditionally, so an absent line means an old
-    // build rather than a zero.
-    std::cout << "Stop reason: " << to_string(stop_reason) << '\n';
-    std::cout << "Pending size: " << pending.size() << '\n';
-    std::cout << "Viable regions: " << viable << '\n';
-    std::cout << "Pruned as interval-infeasible: " << pruned_infeasible << '\n';
-    std::cout << "Dropped viable regions: " << dropped.viable << '\n';
-    std::cout << "Dropped dominated regions: " << dropped.dominated << '\n';
-    // `none` rather than `inf`: the only meaning of an absent floor is
-    // "absent", and minlp_status.py's parse_number already reads that word.
-    std::cout << "Dropped lb floor: ";
-    if (dropped.lost_nothing()) {
-      std::cout << "none\n";
-    } else {
-      std::cout << dropped.lb_min << '\n';
-    }
+    // outcome.infeasible: frontier emptied by feasibility pruning without
+    // ever sampling a feasible point -- not convergence, so GLB_ is left
+    // where the loop had it rather than collapsed onto GUB_. Eviction is the
+    // third way to empty a frontier and proves nothing, so finalise_bounds
+    // withholds this branch entirely once anything viable has been dropped.
+    //
+    // stop_reason/pending/viable/pruned/dropped: not just a trace, an
+    // interface -- tools/minlp_status.py reads these to tell an infeasible
+    // instance (zero pending, no drops, no incumbent) from a run that
+    // stopped with places left to look, and records the two differently.
+    // ConsoleReporter prints them unconditionally, so an absent line means
+    // an old build rather than a zero.
+    observer_->on_finish(report::FinalReport {
+        .glb = GLB_,
+        .gub = GUB_,
+        .proven_optimal = proven_optimal,
+        .infeasible = outcome.infeasible,
+        .stop_reason = stop_reason,
+        .pending_size = pending.size(),
+        .viable = viable,
+        .pruned_infeasible = pruned_infeasible,
+        .dropped = dropped,
+        .iter_idx = iter_idx_,
+        .iter_limit = iter_limit_,
+    });
     std::cout.precision(prev_precision);
 
     return SolveOutcome<T> {
@@ -498,6 +466,7 @@ private:
   std::size_t budget_bytes_;
   std::size_t host_budget_bytes_;
   FrontierPolicy frontier_policy_;
+  std::shared_ptr<report::SearchObserver> observer_;
 
   // The bracket the loop maintains: GLB_ <= min <= GUB_ at every iteration.
   // Members rather than locals only so gap_closed() can close over them;

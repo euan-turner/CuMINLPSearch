@@ -43,6 +43,7 @@
 #include "cuminlp/gams.hpp"
 #include "cuminlp/graph_replay.cuh"
 #include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 
 namespace
@@ -77,9 +78,12 @@ auto solve_with(cuminlp::dag::Problem<double> const& problem,
                                    spec.calibration);
   auto backend =
       std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
+  auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+      cuminlp::profile_problem(problem));
   cuminlp::SearchDriver<double> driver(
       policy, backend, spec.iter_limit, spec.tolerance, spec.sample_points,
-      spec.budgets.device_bytes, spec.budgets.host_bytes, spec.frontier);
+      spec.budgets.device_bytes, spec.budgets.host_bytes, spec.frontier,
+      reporter);
   cuminlp::SolveOutcome<double> const outcome = driver.solve(problem);
   return Solution{outcome.upper_bound, outcome.lower_bound,
                   outcome.upper_bound, outcome.best_point};

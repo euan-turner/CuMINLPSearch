@@ -8,6 +8,8 @@
 #include "cuminlp/dag.hpp"
 #include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_replay.cuh"
+#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 
 using cuminlp::dag::Expr;
@@ -58,7 +60,12 @@ auto main() -> int
             cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
         auto backend =
             std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
-        cuminlp::SearchDriver<double> drv(policy, backend, 1000000, 1e-6, SAMPLE_POINTS);
+        auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+            cuminlp::profile_problem(problem));
+        cuminlp::SearchDriver<double> drv(policy, backend, 1000000, 1e-6,
+                                          SAMPLE_POINTS, 0, 0,
+                                          cuminlp::FrontierPolicy::StopAtBudget,
+                                          reporter);
         drv.solve(problem);
       });
 }

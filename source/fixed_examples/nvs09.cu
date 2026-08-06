@@ -6,6 +6,8 @@
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_replay.cuh"
+#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 #include "nvs09_problem.hpp"
 
@@ -18,12 +20,19 @@ auto main(int argc, char* argv[]) -> int
       {
         int iters = argc > 1 ? std::stoi(argv[1]) : 2000;
 
+        auto problem = make_nvs09();
+
         auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
             cuminlp::FanOutSpec {PARTITION_NUM},
             cuminlp::SearchCalibration {.max_cycle_size = CYCLE_SIZE});
         auto backend =
             std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
-        cuminlp::SearchDriver<double> drv(policy, backend, iters, 1e-6, SAMPLE_POINTS);
-        drv.solve(make_nvs09());
+        auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+            cuminlp::profile_problem(problem));
+        cuminlp::SearchDriver<double> drv(policy, backend, iters, 1e-6,
+                                          SAMPLE_POINTS, 0, 0,
+                                          cuminlp::FrontierPolicy::StopAtBudget,
+                                          reporter);
+        drv.solve(problem);
       });
 }

@@ -150,6 +150,22 @@ target_include_directories(
 
 catch_discover_tests(cuminlp_run_spec_test)
 
+# Host-only: report/observer.hpp (SearchObserver/ConsoleReporter) writes to
+# std::cout directly, with no CUDA type in reach -- see that header's own
+# includes. Redirects std::cout to a string for the duration of each check
+# (same technique as dag_test.cpp's print_problem tests) to assert
+# ConsoleReporter's exact spellings, which tools/minlp_status.py and
+# BOUNDED_FRONTIER.md §7 both depend on (design/MODULE_REFACTOR.md §8).
+add_executable(cuminlp_report_test source/report_test.cpp)
+target_link_libraries(
+    cuminlp_report_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_report_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_report_test)
+
 # Launches graph_replay.cuh's sample_points_kernel directly (bypassing
 # GraphBuilder/GraphReplay) to check Integer/Binary variables are always
 # sampled on the integer lattice, even when they aren't the slot being

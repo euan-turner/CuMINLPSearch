@@ -6,6 +6,8 @@
 #include "cuminlp/dag.hpp"
 #include "cuminlp/example_main.hpp"
 #include "cuminlp/graph_replay.cuh"
+#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 
 using cuminlp::dag::Cmp;
@@ -79,12 +81,22 @@ auto main(int argc, char* argv[]) -> int
             std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
         if (problem == 212) {
           std::cout << "Ex. 2.1.2" << '\n';
-          cuminlp::SearchDriver<double> drv_212(policy, backend, iters, 1e-6, 100);
-          drv_212.solve(problem_212());
+          auto p212 = problem_212();
+          auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+              cuminlp::profile_problem(p212));
+          cuminlp::SearchDriver<double> drv_212(
+              policy, backend, iters, 1e-6, 100, 0, 0,
+              cuminlp::FrontierPolicy::StopAtBudget, reporter);
+          drv_212.solve(p212);
         } else if (problem == 219) {
           std::cout << "Ex. 2.1.9" << '\n';
-          cuminlp::SearchDriver<double> drv_219(policy, backend, iters, 1e-6, 100);
-          drv_219.solve(problem_219());
+          auto p219 = problem_219();
+          auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
+              cuminlp::profile_problem(p219));
+          cuminlp::SearchDriver<double> drv_219(
+              policy, backend, iters, 1e-6, 100, 0, 0,
+              cuminlp::FrontierPolicy::StopAtBudget, reporter);
+          drv_219.solve(p219);
         }
       });
 }

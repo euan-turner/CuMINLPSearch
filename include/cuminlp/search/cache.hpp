@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <iostream>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -11,6 +10,7 @@
 #include "cuminlp/composition_policy.hpp"
 #include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
+#include "cuminlp/report/observer.hpp"
 
 // The driver's backend roles, kept between iterations
 // (design/MODULE_REFACTOR.md §6.2).
@@ -46,11 +46,13 @@ public:
                const dag::Problem<T>& problem,
                FanOutSpec fan_out,
                std::size_t budget_bytes,
-               std::size_t samples_per_region)
+               std::size_t samples_per_region,
+               report::SearchObserver& observer)
       : factory_(std::move(factory))
       , problem_(problem)
       , fan_out_(fan_out)
       , budget_ {budget_bytes, samples_per_region}
+      , observer_(observer)
   {
     if (factory_ == nullptr) {
       throw cuminlp::InvalidConfiguration(
@@ -149,13 +151,10 @@ private:
       return false;
     }
     from->erase(from->begin() + static_cast<std::ptrdiff_t>(idx));
-    if (evictions_++ == 0) {
-      // Becomes an observer event in §8; printed here for now so the line
-      // reads exactly as it did when the driver owned the cache.
-      std::cout << "Device graph cache full: evicting the least recently "
-                   "used composition's graphs and rebuilding as the search "
-                   "revisits them.\n";
-    }
+    ++evictions_;
+    // ConsoleReporter prints only the first of these; the counter above
+    // still tallies every eviction (design/MODULE_REFACTOR.md §8).
+    observer_.on_cache_eviction();
     return true;
   }
 
@@ -163,6 +162,7 @@ private:
   const dag::Problem<T>& problem_;
   FanOutSpec fan_out_;
   backend::BuildBudget budget_;
+  report::SearchObserver& observer_;
 
   // Two rosters, one clock: eviction is least-recently-used across every
   // role the cache holds, not within each kind separately.
