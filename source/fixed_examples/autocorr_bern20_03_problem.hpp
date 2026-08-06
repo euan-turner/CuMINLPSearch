@@ -3,13 +3,13 @@
 /**
  * @brief The autocorr_bern20-03 MINLPLib instance
  * (https://www.minlplib.org/autocorr_bern20-03.html) as a hand-built
- * `dag::Problem`.
+ * `model::Problem`.
  */
 
 #include <cstddef>
 #include <vector>
 
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/problem.hpp"
 
 namespace cuminlp::examples::autocorr_bern20_03
 {
@@ -17,14 +17,15 @@ namespace cuminlp::examples::autocorr_bern20_03
 constexpr std::size_t NUM_VARS = 20;
 constexpr std::size_t CYCLE_SIZE = 20;
 constexpr std::size_t PARTITION_NUM = 2;  // every variable is binary
-constexpr std::size_t SAMPLE_POINTS = 1;  // binary domain has no interior to sample
+constexpr std::size_t SAMPLE_POINTS =
+    1;  // binary domain has no interior to sample
 
 /// @brief Build autocorr_bern20-03: 20 binaries minimising a quadratic
 /// autocorrelation objective. See the module comment above for provenance.
-inline auto make_autocorr_bern20_03() -> dag::Problem<double>
+inline auto make_autocorr_bern20_03() -> model::Problem<double>
 {
-  using dag::Expr;
-  dag::Problem<double> problem;
+  using model::Expr;
+  model::Problem<double> problem;
   std::vector<Expr<double>> b;
   b.reserve(NUM_VARS);
   for (std::size_t j = 0; j < NUM_VARS; ++j) {

@@ -3,8 +3,8 @@
 #include <cstddef>
 #include <limits>
 
-// Split out of cuda_utils.cuh so host-only code (e.g. search_sizing.hpp,
-// policy_catalogue.hpp) can size a search shape without pulling in
+// Split out of cuda_utils.cuh so host-only code (e.g. config/footprint.hpp,
+// config/resolve.hpp) can size a search shape without pulling in
 // <cuda_runtime.h> or anything else CUDA-specific. These three functions
 // never touched CUDA to begin with; the split is pure code motion.
 namespace cuminlp::detail

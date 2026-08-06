@@ -75,9 +75,9 @@ target_compile_features(cuminlp_dag_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_dag_test)
 
-# Host-only: cuminlp::decode::slot_bounds (slot_decode.hpp) is a CUMINLP_HD
-# function that's a no-op host function outside __CUDACC__, and
-# search::Node::materialise (search.hpp) has no CUDA dependency, so
+# Host-only: cuminlp::region::decode::slot_bounds (region/decode.hpp) is a
+# CUMINLP_HD function that's a no-op host function outside __CUDACC__, and
+# search::Node::materialise (search/frontier.hpp) has no CUDA dependency, so
 # §3a/§3b/§4a's decode invariants don't need a CUDA device either.
 add_executable(cuminlp_decode_test source/decode_test.cpp)
 target_link_libraries(
@@ -89,9 +89,10 @@ target_compile_features(cuminlp_decode_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_decode_test)
 
-# Host-only: the bounded frontier (design/BOUNDED_FRONTIER.md). search.hpp's
-# IntervalPQueue/IntervalHistory have no CUDA dependency, and host_budget.hpp
-# is deliberately device-free for exactly this reason -- the budget
+# Host-only: the bounded frontier (design/BOUNDED_FRONTIER.md).
+# search/frontier.hpp's IntervalPQueue and search/history.hpp's
+# IntervalHistory have no CUDA dependency, and search/budget.hpp is
+# deliberately device-free for exactly this reason -- the budget
 # arithmetic, the eviction order, the refcounted history GC and the
 # dropped-floor gating of the epilogue's claims are all decidable without a
 # GPU. Only their wiring into search/driver.hpp is not.
@@ -105,9 +106,10 @@ target_compile_features(cuminlp_host_budget_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_host_budget_test)
 
-# Host-only: policy_catalogue.hpp (PolicyProfile/ProblemProfile/resolve/
-# select_policy) is plain templated C++ over Problem<T>/FanOutSpec, with no
-# CUDA type among them -- see that header's top comment and
+# Host-only: config/catalogue.hpp + config/problem_profile.hpp + config/
+# resolve.hpp (PolicyProfile/ProblemProfile/resolve_shape/select_policy) are
+# plain templated C++ over Problem<T>/FanOutSpec, with no
+# CUDA type among them -- see those headers' top comments and
 # design/POLICY_SELECTION.md §3. Links cuminlp::gams (not just cuminlp::lib)
 # to parse the autocorr_bern20-03.gms/ex8_6_2.gms fixtures its evidence tests
 # use, and includes source/ for nvs09_problem.hpp, the hand-built Problem
@@ -132,7 +134,7 @@ target_include_directories(
 catch_discover_tests(cuminlp_policy_catalogue_test)
 
 # Host-only: config/run_spec.hpp (RunSpec/OverrideSet/Provenance/resolve) is
-# plain templated C++ over the same policy_catalogue.hpp types the resolver
+# plain templated C++ over the same config/catalogue.hpp types the resolver
 # test above already builds host-only, plus backend/graph/cost.hpp, which is
 # host-only for the same reason (see that header's top comment). Includes
 # source/ for nvs09_problem.hpp, same as cuminlp_policy_catalogue_test.
@@ -166,7 +168,7 @@ target_compile_features(cuminlp_report_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_report_test)
 
-# Launches graph_replay.cuh's sample_points_kernel directly (bypassing
+# Launches backend/graph/subregion_sampler.cuh's sample_points_kernel directly (bypassing
 # GraphBuilder/GraphReplay) to check Integer/Binary variables are always
 # sampled on the integer lattice, even when they aren't the slot being
 # cycled this iteration. Requires an actual CUDA device.

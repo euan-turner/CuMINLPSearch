@@ -7,9 +7,10 @@
 #include <vector>
 
 #include "cuminlp/backend/backend.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
 
 // The driver's backend roles, kept between iterations
@@ -43,8 +44,8 @@ class BackendCache
 {
 public:
   BackendCache(std::shared_ptr<const backend::RegionBackendFactory<T>> factory,
-               const dag::Problem<T>& problem,
-               FanOutSpec fan_out,
+               const model::Problem<T>& problem,
+               region::FanOutSpec fan_out,
                std::size_t budget_bytes,
                std::size_t samples_per_region,
                report::SearchObserver& observer)
@@ -61,7 +62,8 @@ public:
   }
 
   /// Sampler and bounder for `composition`: what the subdividing path needs.
-  backend::SubdivisionBundle<T>& subdivision(const Composition& composition)
+  backend::SubdivisionBundle<T>& subdivision(
+      const region::Composition& composition)
   {
     return find_or_build(
         subdivisions_, composition, backend::RoleRequest::subdividing());
@@ -75,9 +77,10 @@ public:
    * driver simply does not take the fathom branch, which changes performance
    * rather than answers.
    */
-  backend::RegionEnumerator<T>* enumerator(const Composition& composition)
+  backend::RegionEnumerator<T>* enumerator(
+      const region::Composition& composition)
   {
-    if (!is_fully_enumerable(composition)
+    if (!region::is_fully_enumerable(composition)
         || !factory_->capabilities().exact_enumeration)
     {
       return nullptr;
@@ -93,14 +96,15 @@ public:
 private:
   struct Entry
   {
-    Composition composition;
+    region::Composition composition;
     backend::SubdivisionBundle<T> bundle;
     std::size_t stamp = 0;  ///< use_clock_ at the last hit
   };
 
-  backend::SubdivisionBundle<T>& find_or_build(std::vector<Entry>& entries,
-                                               const Composition& composition,
-                                               backend::RoleRequest roles)
+  backend::SubdivisionBundle<T>& find_or_build(
+      std::vector<Entry>& entries,
+      const region::Composition& composition,
+      backend::RoleRequest roles)
   {
     for (Entry& e : entries) {
       if (e.composition == composition) {
@@ -116,8 +120,7 @@ private:
       try {
         backend::SubdivisionBundle<T> built = factory_->build_subdivision(
             problem_, composition, fan_out_, budget_, roles);
-        entries.push_back(
-            Entry {composition, std::move(built), ++use_clock_});
+        entries.push_back(Entry {composition, std::move(built), ++use_clock_});
         return entries.back().bundle;
       } catch (const cuminlp::ResourceExhausted&) {
         if (budget_.bytes != 0 || !evict_lru()) {
@@ -159,8 +162,8 @@ private:
   }
 
   std::shared_ptr<const backend::RegionBackendFactory<T>> factory_;
-  const dag::Problem<T>& problem_;
-  FanOutSpec fan_out_;
+  const model::Problem<T>& problem_;
+  region::FanOutSpec fan_out_;
   backend::BuildBudget budget_;
   report::SearchObserver& observer_;
 

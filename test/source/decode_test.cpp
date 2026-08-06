@@ -1,29 +1,33 @@
-// Host-only tests for cuminlp::decode::slot_bounds (slot_decode.hpp) and
-// search::Node::materialise (search.hpp). Both are pure
+// Host-only tests for cuminlp::region::decode::slot_bounds (region/decode.hpp)
+// and search::Node::materialise (search/frontier.hpp). Both are pure
 // functions of a box/composition/index, with no CUDA dependency despite
-// slot_bounds also being the exact function partition.cuh's __device__
-// get_slot_bounds calls -- see TEST_EXTENSION.md: host/device agreement
-// is structural (one shared function), not something proven by a separate
-// device-side test.
+// slot_bounds also being the exact function backend/graph/kernels.cuh's
+// __device__ apply_slots_kernel calls -- see TEST_EXTENSION.md: host/device
+// agreement is structural (one shared function), not something proven by a
+// separate device-side test.
 #include <memory>
 #include <vector>
+
+#include "cuminlp/region/decode.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
-#include "cuminlp/search.hpp"
-#include "cuminlp/slot_decode.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
+#include "cuminlp/search/frontier.hpp"
+#include "cuminlp/search/history.hpp"
 
-using cuminlp::Composition;
-using cuminlp::FanOutSpec;
-using cuminlp::GreedyCompositionPolicy;
-using cuminlp::SlotKind;
-using cuminlp::dag::VarKind;
-using cuminlp::decode::slot_bounds;
-using cuminlp::search::Node;
+using cuminlp::model::VarKind;
+using cuminlp::policy::GreedyCompositionPolicy;
+using cuminlp::region::Composition;
+using cuminlp::region::FanOutSpec;
+using cuminlp::region::SlotKind;
+using cuminlp::region::decode::slot_bounds;
 using cuminlp::search::IntervalHistory;
+using cuminlp::search::Node;
 
 namespace
 {
@@ -153,9 +157,8 @@ TEST_CASE("BinaryEnumerate decodes 0 and 1 exactly", "[decode][3b]")
 
 // materialise() at pidx == 0 uses the Problem's actual root box, not an
 // unbounded-domain fallback disconnected from the real problem.
-TEST_CASE(
-    "Node::materialise at pidx == 0 returns the given root box",
-    "[decode][4a]")
+TEST_CASE("Node::materialise at pidx == 0 returns the given root box",
+          "[decode][4a]")
 {
   std::vector<VarKind> kinds = {VarKind::Continuous};
   std::vector<cu::interval<double>> root_box = {{-1.0, 1.0}};
@@ -163,8 +166,7 @@ TEST_CASE(
   IntervalHistory<double> history;
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
-  Node<double> node {
-      .sidx = 0, .pidx = 0, .depth = 0, .lb = 0.0};
+  Node<double> node {.sidx = 0, .pidx = 0, .depth = 0, .lb = 0.0};
 
   std::vector<cu::interval<double>> out;
   node.materialise(history, out, policy, kinds, root_box);
@@ -183,7 +185,8 @@ TEST_CASE(
   std::vector<cu::interval<double>> root_box = {{0.0, 8.0}};
 
   IntervalHistory<double> history;
-  history.enqueue({});  // index 0: unused sentinel, mirrors SearchDriver's usage
+  history.enqueue(
+      {});  // index 0: unused sentinel, mirrors SearchDriver's usage
   std::size_t parent_idx =
       history.enqueue({{0.0, 8.0}});  // index 1: the real parent box
 
@@ -195,11 +198,8 @@ TEST_CASE(
   // continuous variable, so one slot); materialise() checks it before
   // decoding, since a disagreement means sidx would be decoded against the
   // wrong radix vector.
-  Node<double> node {.sidx = 2,
-                                    .pidx = parent_idx,
-                                    .depth = 1,
-                                    .lb = 0.0,
-                                    .slot_count = 1};
+  Node<double> node {
+      .sidx = 2, .pidx = parent_idx, .depth = 1, .lb = 0.0, .slot_count = 1};
 
   std::vector<cu::interval<double>> out;
   node.materialise(history, out, policy, kinds, root_box);
@@ -229,14 +229,10 @@ TEST_CASE(
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
 
   // The policy fills 2 slots for this box; claim 1.
-  Node<double> node {.sidx = 2,
-                                    .pidx = parent_idx,
-                                    .depth = 1,
-                                    .lb = 0.0,
-                                    .slot_count = 1};
+  Node<double> node {
+      .sidx = 2, .pidx = parent_idx, .depth = 1, .lb = 0.0, .slot_count = 1};
 
   std::vector<cu::interval<double>> out;
-  CHECK_THROWS_AS(
-      node.materialise(history, out, policy, kinds, root_box),
-      cuminlp::InvalidConfiguration);
+  CHECK_THROWS_AS(node.materialise(history, out, policy, kinds, root_box),
+                  cuminlp::InvalidConfiguration);
 }

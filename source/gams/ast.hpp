@@ -10,16 +10,42 @@
 #include <unordered_map>
 #include <vector>
 
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/dag.hpp"
+#include "cuminlp/model/problem.hpp"
 
 namespace cuminlp::gams::detail
 {
 
-enum class Kind { Num, Var, Add, Sub, Mul, Div, Neg, Call };
+enum class Kind
+{
+  Num,
+  Var,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Neg,
+  Call
+};
 
 /// Functions the frontend can lower. Names GAMS has that are absent here are
 /// rejected by name at parse time (see kUnsupported in frontend.cpp).
-enum class Func { Sqr, Sqrt, Exp, Log, Log10, Log2, Abs, Sin, Cos, Tanh, Min, Max, Power };
+enum class Func
+{
+  Sqr,
+  Sqrt,
+  Exp,
+  Log,
+  Log10,
+  Log2,
+  Abs,
+  Sin,
+  Cos,
+  Tanh,
+  Min,
+  Max,
+  Power
+};
 
 /// Exact floating-point equality without tripping -Wfloat-equal (the `dev`
 /// preset builds this as an error). Used only where exact equality really is
@@ -30,10 +56,11 @@ constexpr bool feq(double a, double b)
   return !(a < b) && !(b < a);
 }
 
-struct Node {
+struct Node
+{
   Kind kind = Kind::Num;
   double value = 0.0;  // Kind::Num
-  int sym = -1;        // Kind::Var: index into Model::symbols
+  int sym = -1;  // Kind::Var: index into Model::symbols
   Func func = Func::Sqr;  // Kind::Call
   std::vector<int> args;  // child node indices; every child index < this index
   int line = 0;
@@ -61,6 +88,7 @@ class Ast
 {
 public:
   auto operator[](int i) const -> Node const& { return nodes_[i]; }
+
   auto size() const -> std::size_t { return nodes_.size(); }
 
   auto num(double v, int line = 0) -> int
@@ -93,56 +121,92 @@ public:
 
   auto neg(int a) -> int
   {
-    if (auto v = as_num(a)) return num(-*v, nodes_[a].line);
-    if (nodes_[a].kind == Kind::Neg) return nodes_[a].args[0];  // Neg(Neg(x)) -> x
+    if (auto v = as_num(a)) {
+      return num(-*v, nodes_[a].line);
+    }
+    if (nodes_[a].kind == Kind::Neg) {
+      return nodes_[a].args[0];  // Neg(Neg(x)) -> x
+    }
     return binary_node(Kind::Neg, {a}, nodes_[a].line);
   }
 
   auto add(int a, int b) -> int
   {
     auto va = as_num(a), vb = as_num(b);
-    if (va && vb) return num(*va + *vb, nodes_[a].line);
-    if (vb && feq(*vb, 0.0)) return a;
-    if (va && feq(*va, 0.0)) return b;
+    if (va && vb) {
+      return num(*va + *vb, nodes_[a].line);
+    }
+    if (vb && feq(*vb, 0.0)) {
+      return a;
+    }
+    if (va && feq(*va, 0.0)) {
+      return b;
+    }
     return binary_node(Kind::Add, {a, b}, nodes_[a].line);
   }
 
   auto sub(int a, int b) -> int
   {
     auto va = as_num(a), vb = as_num(b);
-    if (va && vb) return num(*va - *vb, nodes_[a].line);
-    if (vb && feq(*vb, 0.0)) return a;
-    if (va && feq(*va, 0.0)) return neg(b);  // 0 - x -> Neg(x)
+    if (va && vb) {
+      return num(*va - *vb, nodes_[a].line);
+    }
+    if (vb && feq(*vb, 0.0)) {
+      return a;
+    }
+    if (va && feq(*va, 0.0)) {
+      return neg(b);  // 0 - x -> Neg(x)
+    }
     // a - (-b) -> a + b. Hit by the canonical objective form, whose rearranged
     // remainder is a Neg: `-45 - Neg(sum)` becomes `-45 + sum`.
-    if (nodes_[b].kind == Kind::Neg) return add(a, nodes_[b].args[0]);
+    if (nodes_[b].kind == Kind::Neg) {
+      return add(a, nodes_[b].args[0]);
+    }
     return binary_node(Kind::Sub, {a, b}, nodes_[a].line);
   }
 
   auto mul(int a, int b) -> int
   {
     auto va = as_num(a), vb = as_num(b);
-    if (va && vb) return num(*va * *vb, nodes_[a].line);
-    if (vb && feq(*vb, 1.0)) return a;
-    if (va && feq(*va, 1.0)) return b;
-    if (vb && feq(*vb, -1.0)) return neg(a);
-    if (va && feq(*va, -1.0)) return neg(b);
+    if (va && vb) {
+      return num(*va * *vb, nodes_[a].line);
+    }
+    if (vb && feq(*vb, 1.0)) {
+      return a;
+    }
+    if (va && feq(*va, 1.0)) {
+      return b;
+    }
+    if (vb && feq(*vb, -1.0)) {
+      return neg(a);
+    }
+    if (va && feq(*va, -1.0)) {
+      return neg(b);
+    }
     return binary_node(Kind::Mul, {a, b}, nodes_[a].line);
   }
 
   auto div(int a, int b) -> int
   {
     auto va = as_num(a), vb = as_num(b);
-    if (va && vb && !feq(*vb, 0.0)) return num(*va / *vb, nodes_[a].line);
-    if (vb && feq(*vb, 1.0)) return a;
-    if (vb && feq(*vb, -1.0)) return neg(a);
+    if (va && vb && !feq(*vb, 0.0)) {
+      return num(*va / *vb, nodes_[a].line);
+    }
+    if (vb && feq(*vb, 1.0)) {
+      return a;
+    }
+    if (vb && feq(*vb, -1.0)) {
+      return neg(a);
+    }
     return binary_node(Kind::Div, {a, b}, nodes_[a].line);
   }
 
   /// Literal value of node `i`, if it is one.
   auto as_num(int i) const -> std::optional<double>
   {
-    if (nodes_[i].kind == Kind::Num) return nodes_[i].value;
+    if (nodes_[i].kind == Kind::Num) {
+      return nodes_[i].value;
+    }
     return std::nullopt;
   }
 
@@ -160,10 +224,16 @@ public:
   void substitute_literals(std::vector<std::optional<double>> const& literal)
   {
     for (auto& n : nodes_) {
-      if (n.kind != Kind::Var) continue;
-      if (static_cast<std::size_t>(n.sym) >= literal.size()) continue;
+      if (n.kind != Kind::Var) {
+        continue;
+      }
+      if (static_cast<std::size_t>(n.sym) >= literal.size()) {
+        continue;
+      }
       auto const& v = literal[static_cast<std::size_t>(n.sym)];
-      if (!v) continue;
+      if (!v) {
+        continue;
+      }
       n.kind = Kind::Num;
       n.value = *v;
       n.sym = -1;
@@ -190,7 +260,10 @@ public:
       Node const& n = nodes_[i];
       char found = (n.kind == Kind::Var && n.sym == sym) ? 1 : 0;
       for (int a : n.args) {
-        if (contains_[static_cast<std::size_t>(a)] != 0) { found = 1; break; }
+        if (contains_[static_cast<std::size_t>(a)] != 0) {
+          found = 1;
+          break;
+        }
       }
       contains_.push_back(found);
     }
@@ -245,49 +318,77 @@ private:
   auto compute_fold(int i) const -> std::optional<double>
   {
     Node const& n = nodes_[i];
-    if (n.kind == Kind::Num) return n.value;
-    if (n.kind == Kind::Var) return std::nullopt;
+    if (n.kind == Kind::Num) {
+      return n.value;
+    }
+    if (n.kind == Kind::Var) {
+      return std::nullopt;
+    }
 
     std::vector<double> a;
     a.reserve(n.args.size());
     for (int c : n.args) {
       auto const& v = fold_[static_cast<std::size_t>(c)];
-      if (!v) return std::nullopt;
+      if (!v) {
+        return std::nullopt;
+      }
       a.push_back(*v);
     }
 
     switch (n.kind) {
-      case Kind::Add: return a[0] + a[1];
-      case Kind::Sub: return a[0] - a[1];
-      case Kind::Mul: return a[0] * a[1];
-      case Kind::Div: return feq(a[1], 0.0) ? std::nullopt : std::optional{a[0] / a[1]};
-      case Kind::Neg: return -a[0];
-      case Kind::Call: return fold_call(n.func, a);
-      default: return std::nullopt;
+      case Kind::Add:
+        return a[0] + a[1];
+      case Kind::Sub:
+        return a[0] - a[1];
+      case Kind::Mul:
+        return a[0] * a[1];
+      case Kind::Div:
+        return feq(a[1], 0.0) ? std::nullopt : std::optional {a[0] / a[1]};
+      case Kind::Neg:
+        return -a[0];
+      case Kind::Call:
+        return fold_call(n.func, a);
+      default:
+        return std::nullopt;
     }
   }
 
-  static auto fold_call(Func f, std::vector<double> const& a)
-      -> std::optional<double>
+  static auto fold_call(Func f,
+                        std::vector<double> const& a) -> std::optional<double>
   {
     switch (f) {
-      case Func::Sqr:   return a[0] * a[0];
-      case Func::Sqrt:  return a[0] < 0.0 ? std::nullopt : std::optional{std::sqrt(a[0])};
-      case Func::Exp:   return std::exp(a[0]);
-      case Func::Log:   return a[0] <= 0.0 ? std::nullopt : std::optional{std::log(a[0])};
-      case Func::Log10: return a[0] <= 0.0 ? std::nullopt : std::optional{std::log10(a[0])};
-      case Func::Log2:  return a[0] <= 0.0 ? std::nullopt : std::optional{std::log2(a[0])};
-      case Func::Abs:   return std::fabs(a[0]);
-      case Func::Sin:   return std::sin(a[0]);
-      case Func::Cos:   return std::cos(a[0]);
-      case Func::Tanh:  return std::tanh(a[0]);
-      case Func::Min:   return std::fmin(a[0], a[1]);
-      case Func::Max:   return std::fmax(a[0], a[1]);
+      case Func::Sqr:
+        return a[0] * a[0];
+      case Func::Sqrt:
+        return a[0] < 0.0 ? std::nullopt : std::optional {std::sqrt(a[0])};
+      case Func::Exp:
+        return std::exp(a[0]);
+      case Func::Log:
+        return a[0] <= 0.0 ? std::nullopt : std::optional {std::log(a[0])};
+      case Func::Log10:
+        return a[0] <= 0.0 ? std::nullopt : std::optional {std::log10(a[0])};
+      case Func::Log2:
+        return a[0] <= 0.0 ? std::nullopt : std::optional {std::log2(a[0])};
+      case Func::Abs:
+        return std::fabs(a[0]);
+      case Func::Sin:
+        return std::sin(a[0]);
+      case Func::Cos:
+        return std::cos(a[0]);
+      case Func::Tanh:
+        return std::tanh(a[0]);
+      case Func::Min:
+        return std::fmin(a[0], a[1]);
+      case Func::Max:
+        return std::fmax(a[0], a[1]);
       case Func::Power: {
         double e = a[1];
         // floor(e) < e (rather than !=) is "e is not already integer-valued" --
-        // sidesteps -Wfloat-equal, same idiom as Problem::validate() in dag.hpp.
-        if (std::floor(e) < e && a[0] <= 0.0) return std::nullopt;
+        // sidesteps -Wfloat-equal, same idiom as Problem::validate() in
+        // dag.hpp.
+        if (std::floor(e) < e && a[0] <= 0.0) {
+          return std::nullopt;
+        }
         return std::pow(a[0], e);
       }
     }
@@ -302,9 +403,16 @@ private:
 
 // ---------------------------------------------------------------------------
 
-enum class Rel { E, L, G, N };
+enum class Rel
+{
+  E,
+  L,
+  G,
+  N
+};
 
-struct Symbol {
+struct Symbol
+{
   std::string name;  // original spelling, for reporting
   int decl_line = 0;
   double lo = -std::numeric_limits<double>::infinity();
@@ -313,7 +421,7 @@ struct Symbol {
   double fx = 0.0;
   bool has_level = false;
   double level = 0.0;
-  cuminlp::dag::VarKind kind = cuminlp::dag::VarKind::Continuous;
+  cuminlp::model::VarKind kind = cuminlp::model::VarKind::Continuous;
   int integral_line = 0;  // where kind was last set away from Continuous,
                           // which is often a later re-declaration than
                           // decl_line; meaningless while kind == Continuous
@@ -321,7 +429,8 @@ struct Symbol {
   bool eliminated = false;  // objective variable, substituted away
 };
 
-struct Equation {
+struct Equation
+{
   std::string name;
   int line = 0;
   Rel rel = Rel::E;
@@ -330,7 +439,8 @@ struct Equation {
   bool consumed = false;  // used as the objective's defining equation
 };
 
-struct Model {
+struct Model
+{
   Ast ast;
   std::vector<Symbol> symbols;
   std::unordered_map<std::string, int> symbol_index;  // folded name -> index
@@ -340,4 +450,4 @@ struct Model {
   bool have_solve = false;
 };
 
-}
+}  // namespace cuminlp::gams::detail

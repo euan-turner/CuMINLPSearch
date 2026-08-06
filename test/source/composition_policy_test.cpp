@@ -2,22 +2,26 @@
 #include <limits>
 #include <vector>
 
-#include "cuminlp/composition_policy.hpp"
+#include "cuminlp/region/composition.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
-#include "cuminlp/dag.hpp"
+#include "cuminlp/config/calibration.hpp"
 #include "cuminlp/errors.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/policy.hpp"
+#include "cuminlp/region/fan_out.hpp"
 
-using cuminlp::can_fathom_without_children;
-using cuminlp::Composition;
-using cuminlp::FanOutSpec;
-using cuminlp::GreedyCompositionPolicy;
-using cuminlp::is_fully_enumerable;
 using cuminlp::ShapeMismatch;
-using cuminlp::SlotKind;
-using cuminlp::dag::VarKind;
+using cuminlp::model::VarKind;
+using cuminlp::policy::GreedyCompositionPolicy;
+using cuminlp::region::can_fathom_without_children;
+using cuminlp::region::Composition;
+using cuminlp::region::FanOutSpec;
+using cuminlp::region::is_fully_enumerable;
+using cuminlp::region::SlotKind;
 
 TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
           "[composition_policy]")
@@ -76,8 +80,11 @@ TEST_CASE(
   CHECK(assignment.composition[1] == SlotKind::Continuous);
 
   // The continuous slot still partitions at PartitionNum (4), not EnumerateCap.
-  CHECK(cuminlp::slot_fan_out(SlotKind::Continuous, FanOutSpec {4, 50}) == 4);
-  CHECK(cuminlp::slot_fan_out(SlotKind::IntegerEnumerate, FanOutSpec {4, 50}) == 50);
+  CHECK(cuminlp::region::slot_fan_out(SlotKind::Continuous, FanOutSpec {4, 50})
+        == 4);
+  CHECK(cuminlp::region::slot_fan_out(SlotKind::IntegerEnumerate,
+                                      FanOutSpec {4, 50})
+        == 50);
 }
 
 TEST_CASE(
@@ -227,7 +234,8 @@ TEST_CASE(
   // Two enumerable slots, but three live variables: testing against a wider
   // bound than the policy actually filled would call this fathomable and
   // discard a subtree that may hold the optimum.
-  Composition comp {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}};
+  Composition comp {
+      .kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}};
   CHECK(is_fully_enumerable(comp));
   CHECK_FALSE(can_fathom_without_children(3, comp));
   CHECK(can_fathom_without_children(2, comp));
@@ -291,12 +299,12 @@ TEST_CASE("composition_fan_out saturates instead of wrapping",
   // size every device buffer far too small; saturating makes the caller's
   // budget check reject it instead (see GraphReplay::build).
   Composition huge {.kinds = std::vector<SlotKind>(10, SlotKind::Continuous)};
-  CHECK(cuminlp::composition_fan_out(huge, FanOutSpec {10000000})
+  CHECK(cuminlp::region::composition_fan_out(huge, FanOutSpec {10000000})
         == std::numeric_limits<std::size_t>::max());
 
   // A product that does fit is still computed exactly.
   Composition small {.kinds = std::vector<SlotKind>(3, SlotKind::Continuous)};
-  CHECK(cuminlp::composition_fan_out(small, FanOutSpec {4}) == 64);
+  CHECK(cuminlp::region::composition_fan_out(small, FanOutSpec {4}) == 64);
 }
 
 TEST_CASE("slot_prefixes agrees with repeated-division digits",
@@ -310,14 +318,15 @@ TEST_CASE("slot_prefixes agrees with repeated-division digits",
                               SlotKind::IntegerEnumerate,
                               SlotKind::Continuous}};
   FanOutSpec const fan_out {4, 3};  // widths: 2, 3, 4
-  auto const prefix = cuminlp::slot_prefixes(comp, fan_out);
+  auto const prefix = cuminlp::region::slot_prefixes(comp, fan_out);
   REQUIRE(prefix.size() == 3);
 
-  std::size_t const n_regions = cuminlp::composition_fan_out(comp, fan_out);
+  std::size_t const n_regions =
+      cuminlp::region::composition_fan_out(comp, fan_out);
   for (std::size_t r = 0; r < n_regions; ++r) {
     std::size_t idx = r;
     for (std::size_t j = 0; j < comp.size(); ++j) {
-      std::size_t const width = cuminlp::slot_fan_out(comp[j], fan_out);
+      std::size_t const width = cuminlp::region::slot_fan_out(comp[j], fan_out);
       std::size_t const expected_digit = idx % width;
       idx /= width;
       CHECK((r / prefix[j]) % width == expected_digit);
@@ -369,7 +378,7 @@ TEST_CASE("max_cycle_size caps the slots a policy fills",
   std::vector<VarKind> kinds(5, VarKind::Binary);
 
   GreedyCompositionPolicy<double> policy {
-      FanOutSpec {4}, cuminlp::SearchCalibration {.max_cycle_size = 3}};
+      FanOutSpec {4}, cuminlp::config::SearchCalibration {.max_cycle_size = 3}};
   auto const assignment = policy.choose(box, kinds);
 
   CHECK(assignment.composition.size() == 3);
@@ -385,15 +394,15 @@ TEST_CASE("A policy cannot be capped above kMaxSlots",
 {
   // Asking for more slots than the search cap allows is a configuration
   // error, not something to silently clamp.
-  CHECK_THROWS_AS(
-      (GreedyCompositionPolicy<double> {
-          FanOutSpec {4},
-          cuminlp::SearchCalibration {.max_cycle_size = cuminlp::kMaxSlots + 1}}),
-      cuminlp::InvalidConfiguration);
+  CHECK_THROWS_AS((GreedyCompositionPolicy<double> {
+                      FanOutSpec {4},
+                      cuminlp::config::SearchCalibration {
+                          .max_cycle_size = cuminlp::config::kMaxSlots + 1}}),
+                  cuminlp::InvalidConfiguration);
 
   // Unset (0) means "the full search cap".
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
-  CHECK(policy.max_cycle_size() == cuminlp::kMaxSlots);
+  CHECK(policy.max_cycle_size() == cuminlp::config::kMaxSlots);
 }
 
 // --- The var_ids contract (§4.5) --------------------------------------------
@@ -409,34 +418,41 @@ TEST_CASE("GreedyCompositionPolicy always satisfies the distinct-and-live "
 {
   std::vector<cu::interval<double>> box = {
       {0.0, 10.0}, {0.0, 1.0}, {0.0, 3.0}, {5.0, 5.0}};
-  std::vector<VarKind> kinds = {
-      VarKind::Continuous, VarKind::Binary, VarKind::Integer, VarKind::Continuous};
+  std::vector<VarKind> kinds = {VarKind::Continuous,
+                                VarKind::Binary,
+                                VarKind::Integer,
+                                VarKind::Continuous};
 
   GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
   auto const assignment = policy.choose(box, kinds);
 
-  CHECK(cuminlp::assignment_is_distinct_and_live<double>(assignment, box));
+  CHECK(cuminlp::policy::assignment_is_distinct_and_live<double>(assignment,
+                                                                 box));
 }
 
 TEST_CASE("assignment_is_distinct_and_live rejects a duplicate var_id",
           "[composition_policy][4.5]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 1.0}};
-  cuminlp::SlotAssignment bad {
-      .composition = {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}},
+  cuminlp::region::SlotAssignment bad {
+      .composition = {.kinds = {SlotKind::BinaryEnumerate,
+                                SlotKind::BinaryEnumerate}},
       .var_ids = {0, 0}};
 
-  CHECK_FALSE(cuminlp::assignment_is_distinct_and_live<double>(bad, box));
+  CHECK_FALSE(
+      cuminlp::policy::assignment_is_distinct_and_live<double>(bad, box));
 }
 
-TEST_CASE("assignment_is_distinct_and_live rejects a resolved (non-live) "
-          "var_id",
-          "[composition_policy][4.5]")
+TEST_CASE(
+    "assignment_is_distinct_and_live rejects a resolved (non-live) " "var_id",
+    "[composition_policy][4.5]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 1.0}, {5.0, 5.0}};
-  cuminlp::SlotAssignment bad {
-      .composition = {.kinds = {SlotKind::BinaryEnumerate, SlotKind::BinaryEnumerate}},
+  cuminlp::region::SlotAssignment bad {
+      .composition = {.kinds = {SlotKind::BinaryEnumerate,
+                                SlotKind::BinaryEnumerate}},
       .var_ids = {0, 1}};
 
-  CHECK_FALSE(cuminlp::assignment_is_distinct_and_live<double>(bad, box));
+  CHECK_FALSE(
+      cuminlp::policy::assignment_is_distinct_and_live<double>(bad, box));
 }

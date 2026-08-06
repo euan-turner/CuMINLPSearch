@@ -1,22 +1,71 @@
 #pragma once
 
 #include <cstddef>
+#include <vector>
 
 #include <cuinterval/interval.h>
 
 #include "cuminlp/backend/cost_model.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/dag.hpp"
+#include "cuminlp/model/problem.hpp"
 #include "cuminlp/saturating_arith.hpp"
-#include "cuminlp/search_sizing.hpp"
 
 // What the CUDA-graph backend costs, expressed as a backend::RegionCostModel
 // (design/MODULE_REFACTOR.md §5.5).
 //
 // Host-only on purpose, and the reason it is a separate header from
-// graph_replay.cuh: the resolver's shape fit runs against these coefficients
-// in a test target with no GPU and no CUDA toolchain.
+// backend/graph/replay.cuh: the resolver's shape fit runs against these
+// coefficients in a test target with no GPU and no CUDA toolchain.
 namespace cuminlp::backend::graph
 {
+
+/**
+ * @brief Number of DAG nodes that will actually get a device buffer.
+ *
+ * Not simply "every non-Const node": GraphBuilder allocates lazily from the
+ * objective and constraint roots (add_expression -> ensure_node), so a node
+ * no root reaches never allocates. Const nodes never allocate either -- their
+ * payload is consumed by value at the use site (see wire_binary).
+ *
+ * Counting all non-Const nodes instead would *over*-estimate, and an
+ * over-estimate is not the safe direction here: it would make build() refuse
+ * configurations that would in fact have fit. A parsed Problem can carry dead
+ * nodes that a hand-built one would not.
+ *
+ * DAGNode ids are topologically ordered (every id in `.in` is < the node's own
+ * id), so one reverse sweep suffices -- no recursion or worklist.
+ */
+template<typename T>
+std::size_t buffer_node_count(const model::Problem<T>& problem)
+{
+  std::size_t const n = problem.graph.nodes.size();
+  std::vector<bool> reachable(n, false);
+
+  auto mark = [&](std::size_t id)
+  {
+    if (id < n) {
+      reachable[id] = true;
+    }
+  };
+  mark(problem.objective_root);
+  for (const auto& c : problem.constraints) {
+    mark(c.root_id);
+  }
+
+  std::size_t count = 0;
+  for (std::size_t i = n; i-- > 0;) {
+    if (!reachable[i]) {
+      continue;
+    }
+    for (std::size_t in_id : problem.graph.nodes[i].in) {
+      mark(in_id);
+    }
+    if (problem.graph.nodes[i].op != model::Op::Const) {
+      ++count;
+    }
+  }
+  return count;
+}
 
 /// Bytes one element of a V-valued graph costs: one V per buffer-bearing
 /// node, plus feasible[] (1 byte) and obj_lb/obj_ub/masked_ub (T each). The
@@ -44,9 +93,9 @@ RegionCostModel cost_model_for(std::size_t n_buffers)
 
 /// @copydoc cost_model_for(std::size_t)
 template<typename T>
-RegionCostModel cost_model_for(const dag::Problem<T>& problem)
+RegionCostModel cost_model_for(const model::Problem<T>& problem)
 {
-  return cost_model_for<T>(dag::buffer_node_count(problem));
+  return cost_model_for<T>(buffer_node_count(problem));
 }
 
 }  // namespace cuminlp::backend::graph

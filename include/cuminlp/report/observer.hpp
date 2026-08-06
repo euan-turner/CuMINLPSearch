@@ -6,8 +6,9 @@
 #include <string_view>
 
 #include "cuminlp/backend/backend.hpp"
-#include "cuminlp/host_budget.hpp"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/config/problem_profile.hpp"
+#include "cuminlp/config/resolve.hpp"
+#include "cuminlp/search/budget.hpp"
 
 // SearchDriver's progress narration, pulled out from behind std::cout
 // (design/MODULE_REFACTOR.md §8). A driver holds one SearchObserver and
@@ -56,11 +57,11 @@ struct FinalReport
   double gub = 0;
   bool proven_optimal = false;
   bool infeasible = false;
-  StopReason stop_reason = StopReason::IterationLimit;
+  search::StopReason stop_reason = search::StopReason::IterationLimit;
   std::size_t pending_size = 0;
   std::size_t viable = 0;
   std::size_t pruned_infeasible = 0;
-  DropAccounting dropped;
+  search::DropAccounting dropped;
   std::uint32_t iter_idx = 0;
   std::uint32_t iter_limit = 0;
 };
@@ -75,26 +76,37 @@ struct FinalReport
 struct SearchObserver
 {
   virtual ~SearchObserver() = default;
+
   virtual void on_start([[maybe_unused]] std::size_t host_budget,
                         [[maybe_unused]] bool host_budget_requested,
                         [[maybe_unused]] bool compacting)
   {
   }
+
   virtual void on_dequeue([[maybe_unused]] std::uint32_t iter,
                           [[maybe_unused]] double lb)
   {
   }
+
   virtual void on_incumbent([[maybe_unused]] double gub) {}
+
   virtual void on_iteration(const IterationEvent&) {}
+
   virtual void on_fathom([[maybe_unused]] std::size_t n_points,
                          [[maybe_unused]] double gub)
   {
   }
+
   virtual void on_cache_eviction() {}
+
   virtual void on_compaction(const CompactionEvent&) {}
+
   virtual void on_budget_stop(const BudgetStopEvent&) {}
+
   virtual void on_backend_error(const backend::OverBudget&) {}
+
   virtual void on_mid_search_error([[maybe_unused]] std::string_view message) {}
+
   virtual void on_finish(const FinalReport&) {}
 };
 
@@ -109,14 +121,14 @@ public:
   /// error it explains carries none) -- the same profile solve.cu already
   /// computes once per parsed model, passed through here instead of
   /// recomputed.
-  explicit ConsoleReporter(ProblemProfile problem)
+  explicit ConsoleReporter(config::ProblemProfile problem)
       : problem_(problem)
   {
   }
 
   void on_start(std::size_t host_budget,
-               bool host_budget_requested,
-               bool compacting) override
+                bool host_budget_requested,
+                bool compacting) override
   {
     if (host_budget == 0) {
       std::cout << "Host memory budget: none (nothing requested, and "
@@ -192,7 +204,7 @@ public:
   void on_backend_error(const backend::OverBudget& over) override
   {
     std::cout << "Out of device memory mid-search: "
-              << explain_over_budget(over, problem_) << '\n';
+              << config::explain_over_budget(over, problem_) << '\n';
   }
 
   void on_mid_search_error(std::string_view message) override
@@ -220,7 +232,8 @@ public:
                         : "")
                 << ".\n";
     }
-    std::cout << "Stop reason: " << to_string(report.stop_reason) << '\n';
+    std::cout << "Stop reason: " << search::to_string(report.stop_reason)
+              << '\n';
     std::cout << "Pending size: " << report.pending_size << '\n';
     std::cout << "Viable regions: " << report.viable << '\n';
     std::cout << "Pruned as interval-infeasible: " << report.pruned_infeasible
@@ -237,7 +250,7 @@ public:
   }
 
 private:
-  ProblemProfile problem_;
+  config::ProblemProfile problem_;
   std::uint32_t last_iter_ = 0;
   bool printed_cache_eviction_ = false;
 };

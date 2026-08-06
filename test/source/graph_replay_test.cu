@@ -1,5 +1,5 @@
-// GPU tests for GraphReplay (graph_replay.cuh) -- see TEST_EXTENSION.md.
-// Requires an actual CUDA device.
+// GPU tests for GraphReplay (backend/graph/replay.cuh) -- see
+// TEST_EXTENSION.md. Requires an actual CUDA device.
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -10,22 +10,26 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/backend/graph/factory.cuh"
+#include "cuminlp/backend/graph/replay.cuh"
+#include "cuminlp/config/footprint.hpp"
+#include "cuminlp/config/problem_profile.hpp"
+#include "cuminlp/config/resolve.hpp"
 #include "cuminlp/errors.hpp"
-#include "cuminlp/graph_replay.cuh"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 
-using cuminlp::Composition;
-using cuminlp::composition_fan_out;
-using cuminlp::FanOutSpec;
 using cuminlp::ShapeMismatch;
-using cuminlp::SlotKind;
-using cuminlp::dag::Expr;
-using cuminlp::dag::IntervalGraphReplay;
-using cuminlp::dag::PointGraphReplay;
-using cuminlp::dag::Problem;
-using cuminlp::dag::VarKind;
+using cuminlp::backend::graph::IntervalGraphReplay;
+using cuminlp::backend::graph::PointGraphReplay;
+using cuminlp::model::Expr;
+using cuminlp::model::Problem;
+using cuminlp::model::VarKind;
+using cuminlp::region::Composition;
+using cuminlp::region::composition_fan_out;
+using cuminlp::region::FanOutSpec;
+using cuminlp::region::SlotKind;
 
 namespace
 {
@@ -37,7 +41,7 @@ Problem<double> make_problem()
   Problem<double> p;
   auto x = p.var(0.0, 10.0);
   p.set_objective(x * x);
-  p.add_constraint(x, cuminlp::dag::Cmp::LE, 5.0);
+  p.add_constraint(x, cuminlp::model::Cmp::LE, 5.0);
   return p;
 }
 
@@ -47,14 +51,17 @@ Problem<double> make_infeasible_problem()
   Problem<double> p;
   auto x = p.var(0.0, 10.0);
   p.set_objective(x * x);
-  p.add_constraint(x, cuminlp::dag::Cmp::LE, -100.0);
+  p.add_constraint(x, cuminlp::model::Cmp::LE, -100.0);
   return p;
 }
 
 // x, y both variables (not constants), objective pow(x, y) -- exercises
 // Op::Pow's general a^b, wired via wire_binary<PowOp> onto
 // cu::pow(interval, interval).
-Problem<double> make_pow_problem(double x_lb, double x_ub, double y_lb, double y_ub)
+Problem<double> make_pow_problem(double x_lb,
+                                 double x_ub,
+                                 double y_lb,
+                                 double y_ub)
 {
   Problem<double> p;
   auto x = p.var(x_lb, x_ub);
@@ -129,7 +136,8 @@ TEST_CASE(
   SECTION("a domain with a feasible point has a non-NaN candidate")
   {
     Problem<double> p = make_problem();
-    auto replay = PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 16);
+    auto replay =
+        PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 16);
 
     std::vector<cu::interval<double>> domain = {
         {0.0, 5.0}};  // entirely feasible (x <= 5)
@@ -148,7 +156,8 @@ TEST_CASE(
       "all-NaN")
   {
     Problem<double> p = make_infeasible_problem();
-    auto replay = PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 16);
+    auto replay =
+        PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 16);
 
     std::vector<cu::interval<double>> domain = {{0.0, 10.0}};
     replay.set_domain(domain, var_ids, /*salt=*/1);
@@ -257,7 +266,8 @@ TEST_CASE("Op::Pow: pow(x, y) on a degenerate box matches std::pow exactly",
   std::vector<std::size_t> var_ids = {0, 1};
   std::vector<cu::interval<double>> domain = {{2.0, 2.0}, {3.0, 3.0}};
 
-  auto point_replay = PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 8);
+  auto point_replay =
+      PointGraphReplay<double>::build(p, comp, FanOutSpec {4}, 0, 8);
   point_replay.set_domain(domain, var_ids);
   point_replay.launch(0);
   REQUIRE(point_replay.has_candidate());
@@ -266,7 +276,8 @@ TEST_CASE("Op::Pow: pow(x, y) on a degenerate box matches std::pow exactly",
   // The interval graph's directed-rounding enclosure may be a few ulps wide
   // even on a degenerate box (cu::pow rounds its result outward), so this
   // one needs a tolerance rather than bitwise equality.
-  auto interval_replay = IntervalGraphReplay<double>::build(p, comp, FanOutSpec {4});
+  auto interval_replay =
+      IntervalGraphReplay<double>::build(p, comp, FanOutSpec {4});
   interval_replay.set_domain(domain, var_ids);
   interval_replay.launch(0);
   REQUIRE(interval_replay.has_candidate());
@@ -335,7 +346,7 @@ TEST_CASE("build rejects a saturated fan-out before allocating",
   // wrapping to something that looks affordable.
   Composition huge {.kinds = std::vector<SlotKind>(8, SlotKind::Continuous)};
 
-  CHECK(cuminlp::composition_fan_out(huge, FanOutSpec {10000000})
+  CHECK(cuminlp::region::composition_fan_out(huge, FanOutSpec {10000000})
         == std::numeric_limits<std::size_t>::max());
   CHECK(IntervalGraphReplay<double>::estimate_bytes(
             p, std::numeric_limits<std::size_t>::max())
@@ -353,8 +364,8 @@ TEST_CASE("estimate_bytes counts only DAG nodes a root actually reaches",
   // would over-estimate, and over-estimating is the dangerous direction: the
   // budget guard would refuse configurations that would in fact have fit.
   Problem<double> p = make_problem();
-  std::size_t const reachable = IntervalGraphReplay<double>::
-      count_buffer_nodes(p);
+  std::size_t const reachable =
+      IntervalGraphReplay<double>::count_buffer_nodes(p);
 
   // Add an expression no root refers to.
   auto dead = p.var(0.0, 1.0) * p.var(0.0, 1.0);
@@ -385,7 +396,8 @@ TEST_CASE("An over-budget build reports the cause and a cap that would fit",
     IntervalGraphReplay<double>::build(p, comp, fan_out, /*budget=*/100000);
     FAIL("expected OverBudgetError");
   } catch (const cuminlp::backend::OverBudgetError& e) {
-    what = cuminlp::explain_over_budget(e.facts(), cuminlp::profile_problem(p));
+    what = cuminlp::config::explain_over_budget(
+        e.facts(), cuminlp::config::profile_problem(p));
     summary = e.what();
   }
 
@@ -428,7 +440,8 @@ TEST_CASE("The suggested cap is one the budget actually admits",
         p, comp, fan_out, budget, solve_sample_points);
     FAIL("expected OverBudgetError");
   } catch (const cuminlp::backend::OverBudgetError& e) {
-    what = cuminlp::explain_over_budget(e.facts(), cuminlp::profile_problem(p));
+    what = cuminlp::config::explain_over_budget(
+        e.facts(), cuminlp::config::profile_problem(p));
   }
 
   auto const pos = what.find("--max-cycle-size=");
@@ -441,7 +454,8 @@ TEST_CASE("The suggested cap is one the budget actually admits",
   // Same composition truncated to the suggested number of live slots -- a
   // composition is exactly its live slots now, so "truncated" just means
   // fewer entries, not a padded-out tail.
-  Composition narrowed {.kinds = std::vector<SlotKind>(suggested, SlotKind::Continuous)};
+  Composition narrowed {
+      .kinds = std::vector<SlotKind>(suggested, SlotKind::Continuous)};
 
   INFO(what);
   CHECK_NOTHROW((IntervalGraphReplay<double>::build(
@@ -454,7 +468,7 @@ TEST_CASE("The suggested cap is one the budget actually admits",
   CHECK(cuminlp::backend::graph::cost_model_for<double>(p).bundle_bytes(
             composition_fan_out(narrowed, fan_out),
             solve_sample_points,
-            cuminlp::is_fully_enumerable(narrowed))
+            cuminlp::region::is_fully_enumerable(narrowed))
         <= budget);
 }
 
@@ -478,9 +492,15 @@ TEST_CASE("auto_max_cycle_size picks a cap whose whole graph set fits",
   std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
   auto const cost = cuminlp::backend::graph::cost_model_for<double>(p);
 
-  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
-      /*n_binary=*/0, /*n_integer=*/10, /*n_continuous=*/0, cost, fan_out,
-      sample_points, budget, cuminlp::kMaxSlots);
+  std::size_t const cap = cuminlp::config::auto_max_cycle_size(
+      /*n_binary=*/0,
+      /*n_integer=*/10,
+      /*n_continuous=*/0,
+      cost,
+      fan_out,
+      sample_points,
+      budget,
+      cuminlp::config::kMaxSlots);
   REQUIRE(cap >= 1);
   REQUIRE(cap <= 10);  // never more slots than the problem has variables
 
@@ -526,9 +546,15 @@ TEST_CASE("auto_max_cycle_size charges the widest composition the search can "
   std::size_t const budget = 512u * 1024 * 1024;  // 512 MiB
   auto const cost = cuminlp::backend::graph::cost_model_for<double>(p);
 
-  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
-      /*n_binary=*/24, /*n_integer=*/0, /*n_continuous=*/22, cost, fan_out,
-      sample_points, budget, cuminlp::kMaxSlots);
+  std::size_t const cap = cuminlp::config::auto_max_cycle_size(
+      /*n_binary=*/24,
+      /*n_integer=*/0,
+      /*n_continuous=*/22,
+      cost,
+      fan_out,
+      sample_points,
+      budget,
+      cuminlp::config::kMaxSlots);
   REQUIRE(cap >= 1);
 
   // The all-continuous composition of `cap` slots is reachable -- every
@@ -569,7 +595,7 @@ TEST_CASE("auto_max_cycle_size never exceeds kMaxSlots",
   }
   p.set_objective(sum);
 
-  std::size_t const cap = cuminlp::dag::auto_max_cycle_size(
+  std::size_t const cap = cuminlp::config::auto_max_cycle_size(
       /*n_binary=*/0,
       /*n_integer=*/0,
       /*n_continuous=*/200,
@@ -577,6 +603,6 @@ TEST_CASE("auto_max_cycle_size never exceeds kMaxSlots",
       FanOutSpec {2},
       /*sample_points=*/1,
       std::numeric_limits<std::size_t>::max(),
-      cuminlp::kMaxSlots);
-  CHECK(cap == cuminlp::kMaxSlots);
+      cuminlp::config::kMaxSlots);
+  CHECK(cap == cuminlp::config::kMaxSlots);
 }

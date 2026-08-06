@@ -16,16 +16,20 @@
 #include <vector>
 
 #include "cuminlp/backend/backend.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
-#include "cuminlp/host_budget.hpp"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/policy.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
-#include "cuminlp/search.hpp"
+#include "cuminlp/search/budget.hpp"
 #include "cuminlp/search/cache.hpp"
+#include "cuminlp/search/epilogue.hpp"
+#include "cuminlp/search/frontier.hpp"
+#include "cuminlp/search/history.hpp"
 
-namespace cuminlp
+namespace cuminlp::search
 {
 
 /// What one solve() found, and what it proved. Everything a caller used to
@@ -58,7 +62,7 @@ struct SolveOutcome
   }
 };
 
-// Branch-and-bound over an arbitrary dag::Problem. Each iteration, the
+// Branch-and-bound over an arbitrary model::Problem. Each iteration, the
 // CompositionPolicy picks a SlotAssignment for the current node's box, and
 // the backend supplies the roles that act on it: a sampler for GUB
 // candidates and a bounder for sound lower bounds / pruning. BackendCache
@@ -77,20 +81,22 @@ public:
   /**
    * @brief Construct a new search driver
    *
-   * @param policy determines the order and partitioning/enumeration of variables
+   * @param policy determines the order and partitioning/enumeration of
+   * variables
    * @param backend supplies the sampler/bounder/enumerator roles
    * @param iter_limit iteration limit (number of domains)
    * @param tolerance tolerance for primal/dual convergence check
    * @param sample_points number of points to sample per subdomain
    * @param budget_bytes caps device memory per build
-   * @param host_budget_bytes caps the pending frontier and live interval history
+   * @param host_budget_bytes caps the pending frontier and live interval
+   * history
    * @param frontier_policy policy for handling frontier growth
    * @param observer where solve()'s progress narration goes; the base
    *        class's every override is a no-op, so the default is a silent
    *        driver (design/MODULE_REFACTOR.md §8)
    */
   explicit SearchDriver(
-      std::shared_ptr<const CompositionPolicy<T>> policy,
+      std::shared_ptr<const policy::CompositionPolicy<T>> policy,
       std::shared_ptr<const backend::RegionBackendFactory<T>> backend,
       uint32_t iter_limit = 1000000,
       double tolerance = 1e-6,
@@ -125,12 +131,8 @@ public:
   }
 
   // the driver loop
-  auto solve(const dag::Problem<T>& problem) -> SolveOutcome<T>
+  auto solve(const model::Problem<T>& problem) -> SolveOutcome<T>
   {
-    using search::IntervalHistory;
-    using search::IntervalPQueue;
-    using search::Node;
-
     GUB_ = std::numeric_limits<double>::max();
     GLB_ = std::numeric_limits<double>::lowest();
     iter_idx_ = 0;
@@ -138,8 +140,8 @@ public:
 
     std::streamsize const prev_precision = std::cout.precision(17);
 
-    std::span<const dag::VarKind> const var_kinds = problem.var_kinds;
-    FanOutSpec const& fan_out = policy_->fan_out();
+    std::span<const model::VarKind> const var_kinds = problem.var_kinds;
+    region::FanOutSpec const& fan_out = policy_->fan_out();
 
     // Roles per Composition, built on first use and evicted under pressure
     // -- see search/cache.hpp for why that is the search layer's decision
@@ -184,9 +186,8 @@ public:
     StopReason stop_reason = StopReason::IterationLimit;
     bool stopped_early = false;
 
-    auto const gap_closed = [this](double bound) {
-      return cuminlp::gap_closed(GUB_, bound, tolerance_);
-    };
+    auto const gap_closed = [this](double bound)
+    { return cuminlp::search::gap_closed(GUB_, bound, tolerance_); };
 
     // The loop is wrapped so a failed allocation ends the run through the same
     // epilogue as a spent iteration budget: the bracket GLB_ <= min <= GUB_ is
@@ -212,7 +213,7 @@ public:
         history.release(cur.pidx);
 
         auto const assignment = policy_->choose(box, var_kinds);
-        assert(assignment_is_distinct_and_live<T>(assignment, box)
+        assert(policy::assignment_is_distinct_and_live<T>(assignment, box)
                && "CompositionPolicy::choose returned duplicate or "
                   "non-live var_ids (design/MODULE_REFACTOR.md §4.5)");
 
@@ -223,7 +224,8 @@ public:
           }
         }
         backend::RegionEnumerator<T>* const enumerator =
-            can_fathom_without_children(live_count, assignment.composition)
+            region::can_fathom_without_children(live_count,
+                                                assignment.composition)
             ? cache.enumerator(assignment.composition)
             : nullptr;
 
@@ -291,8 +293,8 @@ public:
 
         history.release(box_idx);
 
-        observer_->on_iteration(report::IterationEvent {.gub = GUB_,
-                                                        .candidate = cand});
+        observer_->on_iteration(
+            report::IterationEvent {.gub = GUB_, .candidate = cand});
 
         // Once per iteration, after the children are in: a per-enqueue check
         // would put a branch in the hot loop to catch an overshoot that is
@@ -332,9 +334,9 @@ public:
 
           if (over_host_budget(live, host_budget)) {
             // Live history alone crowds out the frontier, or one box is simply
-            // too big to hold. Either way there is nothing left to give back, so
-            // stop -- with the bracket, the frontier and the dropped floor all
-            // intact -- rather than grow into the OOM killer.
+            // too big to hold. Either way there is nothing left to give back,
+            // so stop -- with the bracket, the frontier and the dropped floor
+            // all intact -- rather than grow into the OOM killer.
             observer_->on_budget_stop(
                 report::BudgetStopEvent {.after_compaction = true,
                                          .host_budget = host_budget,
@@ -368,8 +370,8 @@ public:
 
     if (!stopped_early) {
       stop_reason = pending.empty() ? StopReason::Exhausted
-          : gap_closed(GLB_)       ? StopReason::Converged
-                                   : StopReason::IterationLimit;
+          : gap_closed(GLB_)        ? StopReason::Converged
+                                    : StopReason::IterationLimit;
     }
 
     bool const found_incumbent = GUB_ < std::numeric_limits<double>::max();
@@ -395,19 +397,19 @@ public:
     // nothing viable was ever evicted the floor is +inf and all three claims
     // read exactly as they did before this existed -- including for a
     // memory-capped run whose evictions were all dominated, which is
-    // deliberately still proven optimal. See host_budget.hpp's
+    // deliberately still proven optimal. See search/epilogue.hpp's
     // finalise_bounds.
-    FinalBounds const outcome =
-        finalise_bounds(GLB_,
-                        GUB_,
-                        tolerance_,
-                        found_incumbent,
-                        converged,
-                        pending.empty(),
-                        pending.empty() ? std::numeric_limits<double>::max()
-                                        : static_cast<double>(pending.peek().lb),
-                        viable,
-                        dropped);
+    FinalBounds const outcome = finalise_bounds(
+        GLB_,
+        GUB_,
+        tolerance_,
+        found_incumbent,
+        converged,
+        pending.empty(),
+        pending.empty() ? std::numeric_limits<double>::max()
+                        : static_cast<double>(pending.peek().lb),
+        viable,
+        dropped);
     bool const proven_optimal = outcome.proven_optimal;
     GLB_ = outcome.glb;
 
@@ -458,7 +460,7 @@ public:
   }
 
 private:
-  std::shared_ptr<const CompositionPolicy<T>> policy_;
+  std::shared_ptr<const policy::CompositionPolicy<T>> policy_;
   std::shared_ptr<const backend::RegionBackendFactory<T>> backend_;
   double tolerance_;
   std::uint32_t iter_limit_;
@@ -477,4 +479,4 @@ private:
   std::vector<T> best_point_;
 };
 
-}  // namespace cuminlp
+}  // namespace cuminlp::search

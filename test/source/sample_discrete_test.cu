@@ -8,18 +8,20 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
+#include "cuminlp/backend/graph/subregion_sampler.cuh"
 #include "cuminlp/cuda_utils.cuh"
-#include "cuminlp/dag.hpp"
-#include "cuminlp/graph_replay.cuh"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/slot.hpp"
 
-using cuminlp::SlotKind;
-using cuminlp::dag::VarKind;
+using cuminlp::model::VarKind;
+using cuminlp::region::SlotKind;
 
 namespace
 {
 
 // Directly launches broadcast_domain_sample_kernel then
-// apply_slots_sample_kernel (graph_replay.cuh) -- bypassing GraphBuilder/
+// apply_slots_sample_kernel (backend/graph/subregion_sampler.cuh) --
+// bypassing GraphBuilder/
 // GraphReplay entirely -- against a 3-variable synthetic domain: var 0
 // continuous [0,10], var 1 integer [3,9], var 2 binary [0,1]. Only var 0 has
 // a slot (partitioned into 4 slices); vars 1 and 2 keep their parent bounds
@@ -105,7 +107,7 @@ SampleResult<T> run_sample_points_kernel()
                                     cudaMemcpyHostToDevice),
                          "cudaMemcpy");
 
-  cuminlp::dag::broadcast_domain_sample_kernel<T>
+  cuminlp::backend::graph::broadcast_domain_sample_kernel<T>
       <<<1, 256>>>(domain,
                    var_kinds,
                    var_buffers,
@@ -116,7 +118,7 @@ SampleResult<T> run_sample_points_kernel()
   cuminlp::detail::check(cudaGetLastError(),
                          "broadcast_domain_sample_kernel launch");
 
-  cuminlp::dag::apply_slots_sample_kernel<T>
+  cuminlp::backend::graph::apply_slots_sample_kernel<T>
       <<<1, 256>>>(domain,
                    slot_var_ids,
                    slot_fan_out,
@@ -128,7 +130,8 @@ SampleResult<T> run_sample_points_kernel()
                    SLOT_COUNT,
                    SamplePoints,
                    /*salt=*/42);
-  cuminlp::detail::check(cudaGetLastError(), "apply_slots_sample_kernel launch");
+  cuminlp::detail::check(cudaGetLastError(),
+                         "apply_slots_sample_kernel launch");
   cuminlp::detail::check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
   SampleResult<T> result;

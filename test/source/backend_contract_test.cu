@@ -10,18 +10,18 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
-#include "cuminlp/graph_replay.cuh"
-
 #include "backend_contract.hpp"
+#include "cuminlp/backend/graph/factory.cuh"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 
-using cuminlp::Composition;
-using cuminlp::FanOutSpec;
-using cuminlp::SlotAssignment;
-using cuminlp::SlotKind;
-using cuminlp::dag::Expr;
-using cuminlp::dag::Problem;
+using cuminlp::model::Expr;
+using cuminlp::model::Problem;
+using cuminlp::region::Composition;
+using cuminlp::region::FanOutSpec;
+using cuminlp::region::SlotAssignment;
+using cuminlp::region::SlotKind;
 
 namespace
 {
@@ -45,7 +45,7 @@ Problem<double> make_model()
     obj = obj + (v[i] - 1.0) * (v[i] - 1.0);
   }
   p.set_objective(obj);
-  p.add_constraint(v[0] + v[1], cuminlp::dag::Cmp::LE, 1.0);
+  p.add_constraint(v[0] + v[1], cuminlp::model::Cmp::LE, 1.0);
   return p;
 }
 
@@ -93,8 +93,11 @@ TEST_CASE("The CUDA-graph backend satisfies the region-role contract",
       {4, 5},
   };
 
-  cuminlp::dag::GraphBackendFactory<double> const factory;
-  cuminlp::test::check_backend_contract(
-      factory, model, enumerable, subdividing, fan_out,
-      /*samples_per_region=*/4);
+  cuminlp::backend::graph::GraphBackendFactory<double> const factory;
+  cuminlp::test::check_backend_contract(factory,
+                                        model,
+                                        enumerable,
+                                        subdividing,
+                                        fan_out,
+                                        /*samples_per_region=*/4);
 }

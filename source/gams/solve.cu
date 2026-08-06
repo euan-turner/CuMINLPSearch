@@ -36,24 +36,28 @@
 #include <vector>
 
 #include "cuminlp/backend/graph/cost.hpp"
-#include "cuminlp/composition_policy.hpp"
+#include "cuminlp/backend/graph/factory.cuh"
+#include "cuminlp/config/catalogue.hpp"
+#include "cuminlp/config/problem_profile.hpp"
+#include "cuminlp/config/resolve.hpp"
 #include "cuminlp/config/run_spec.hpp"
-#include "cuminlp/dag.hpp"
-#include "cuminlp/dag_print.hpp"
 #include "cuminlp/gams.hpp"
-#include "cuminlp/graph_replay.cuh"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/model/print.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/policy.hpp"
+#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 
 namespace
 {
 
-
 /**
  * @brief The result of a solve run in the minimising sense
  */
-struct Solution {
+struct Solution
+{
   double bound;  ///< the incumbent, == upper
   double lower;  ///< dual bound: lower bound over all pending intervals
   double upper;  ///< primal bound: best feasible value actually attained
@@ -61,32 +65,39 @@ struct Solution {
 };
 
 /**
-  * @brief Construct a concrete CompositionPolicy and SearchDriver, then solve
-  *
-  * @param problem
-  * @param spec the run's hyperparameters, fully resolved (design/
-  *             MODULE_REFACTOR.md §7.1) -- `spec.calibration` is the one the
-  *             policy is actually built against, distinct from the lighter
-  *             calibration `config::resolve` fits the shape against
-  * @return Solution
-  */
-auto solve_with(cuminlp::dag::Problem<double> const& problem,
+ * @brief Construct a concrete CompositionPolicy and SearchDriver, then solve
+ *
+ * @param problem
+ * @param spec the run's hyperparameters, fully resolved (design/
+ *             MODULE_REFACTOR.md §7.1) -- `spec.calibration` is the one the
+ *             policy is actually built against, distinct from the lighter
+ *             calibration `config::resolve` fits the shape against
+ * @return Solution
+ */
+auto solve_with(cuminlp::model::Problem<double> const& problem,
                 cuminlp::config::RunSpec const& spec) -> Solution
 {
-  std::shared_ptr<const cuminlp::CompositionPolicy<double>> policy =
-      cuminlp::make_policy<double>(spec.policy_kind, spec.fan_out,
-                                   spec.calibration);
-  auto backend =
-      std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
+  std::shared_ptr<const cuminlp::policy::CompositionPolicy<double>> policy =
+      cuminlp::policy::make_policy<double>(
+          spec.policy_kind, spec.fan_out, spec.calibration);
+  auto backend = std::make_shared<
+      const cuminlp::backend::graph::GraphBackendFactory<double>>();
   auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
-      cuminlp::profile_problem(problem));
-  cuminlp::SearchDriver<double> driver(
-      policy, backend, spec.iter_limit, spec.tolerance, spec.sample_points,
-      spec.budgets.device_bytes, spec.budgets.host_bytes, spec.frontier,
-      reporter);
-  cuminlp::SolveOutcome<double> const outcome = driver.solve(problem);
-  return Solution{outcome.upper_bound, outcome.lower_bound,
-                  outcome.upper_bound, outcome.best_point};
+      cuminlp::config::profile_problem(problem));
+  cuminlp::search::SearchDriver<double> driver(policy,
+                                               backend,
+                                               spec.iter_limit,
+                                               spec.tolerance,
+                                               spec.sample_points,
+                                               spec.budgets.device_bytes,
+                                               spec.budgets.host_bytes,
+                                               spec.frontier,
+                                               reporter);
+  cuminlp::search::SolveOutcome<double> const outcome = driver.solve(problem);
+  return Solution {outcome.upper_bound,
+                   outcome.lower_bound,
+                   outcome.upper_bound,
+                   outcome.best_point};
 }
 
 /**
@@ -103,9 +114,10 @@ auto free_device_bytes() -> std::size_t
   return free_bytes;
 }
 
-auto probe_calibration(std::size_t max_slots) -> cuminlp::SearchCalibration
+auto probe_calibration(std::size_t max_slots)
+    -> cuminlp::config::SearchCalibration
 {
-  cuminlp::SearchCalibration calibration;
+  cuminlp::config::SearchCalibration calibration;
   calibration.max_cycle_size = max_slots;
 
   calibration.free_device_bytes = free_device_bytes();
@@ -125,13 +137,14 @@ auto probe_calibration(std::size_t max_slots) -> cuminlp::SearchCalibration
  *        integer slots do.
  *
  */
-void warn_on_implied_enumerate_cap(cuminlp::dag::Problem<double> const& problem,
-                                   cuminlp::FanOutSpec const& fan_out)
+void warn_on_implied_enumerate_cap(
+    cuminlp::model::Problem<double> const& problem,
+    cuminlp::region::FanOutSpec const& fan_out)
 {
   std::size_t bisecting = 0;
   std::size_t largest = 0;
   for (std::size_t i = 0; i < problem.var_kinds.size(); ++i) {
-    if (problem.var_kinds[i] != cuminlp::dag::VarKind::Integer) {
+    if (problem.var_kinds[i] != cuminlp::model::VarKind::Integer) {
       continue;
     }
     auto const& b = problem.box_bounds[i];
@@ -169,7 +182,7 @@ void warn_on_implied_enumerate_cap(cuminlp::dag::Problem<double> const& problem,
  * policy/overrides, with no device-property probe of its own (unchanged
  * from today's `probe_calibration` split).
  */
-auto solve(cuminlp::dag::Problem<double> const& problem,
+auto solve(cuminlp::model::Problem<double> const& problem,
            cuminlp::config::RunSpec spec) -> Solution
 {
   spec.calibration = probe_calibration(spec.max_slots);
@@ -177,39 +190,42 @@ auto solve(cuminlp::dag::Problem<double> const& problem,
 }
 
 /// One line per roster row: name, rules, evidence, provisional marker.
-/// Needs no GPU and no model -- it is pure data (policy_catalogue.hpp's
+/// Needs no GPU and no model -- it is pure data (config/catalogue.hpp's
 /// policy_roster). Shared by --list-policies and an unknown --policy name's
 /// error path, which exits 2 with the roster listed.
 void print_roster(std::ostream& out)
 {
-  auto describe_partition = [](cuminlp::PartitionRule const& r) -> std::string
+  auto describe_partition =
+      [](cuminlp::config::PartitionRule const& r) -> std::string
   {
-    if (r.mode == cuminlp::PartitionRule::Mode::Pin) {
+    if (r.mode == cuminlp::config::PartitionRule::Mode::Pin) {
       return "pin(" + std::to_string(r.pinned) + ")";
     }
     return "fit";
   };
-  auto describe_enumerate = [](cuminlp::EnumerateRule const& r) -> std::string
+  auto describe_enumerate =
+      [](cuminlp::config::EnumerateRule const& r) -> std::string
   {
     switch (r.mode) {
-      case cuminlp::EnumerateRule::Mode::CoverDomains:
+      case cuminlp::config::EnumerateRule::Mode::CoverDomains:
         return "cover-domains(" + std::to_string(r.ceiling) + ")";
-      case cuminlp::EnumerateRule::Mode::FollowPartition:
+      case cuminlp::config::EnumerateRule::Mode::FollowPartition:
         return "follow-partition";
-      case cuminlp::EnumerateRule::Mode::Pin:
+      case cuminlp::config::EnumerateRule::Mode::Pin:
         return "pin(" + std::to_string(r.pinned) + ")";
     }
     return "?";
   };
-  auto describe_cycle = [](cuminlp::CycleRule const& r) -> std::string
+  auto describe_cycle = [](cuminlp::config::CycleRule const& r) -> std::string
   {
-    if (r.mode == cuminlp::CycleRule::Mode::Pin) {
+    if (r.mode == cuminlp::config::CycleRule::Mode::Pin) {
       return "pin(" + std::to_string(r.pinned) + ")";
     }
     return "fit (fallback " + std::to_string(r.pinned) + ")";
   };
 
-  for (cuminlp::PolicyProfile const& p : cuminlp::policy_roster) {
+  for (cuminlp::config::PolicyProfile const& p : cuminlp::config::policy_roster)
+  {
     out << "  " << p.name << "\n"
         << "      partition=" << describe_partition(p.partition)
         << " enumerate=" << describe_enumerate(p.enumerate)
@@ -226,16 +242,17 @@ void print_roster(std::ostream& out)
 
 auto main(int argc, char* argv[]) -> int
 {
-  auto usage = [&](std::ostream& out) {
-    out << "usage: " << argv[0]
-        << " [--policy=<name>] [--list-policies]"
+  auto usage = [&](std::ostream& out)
+  {
+    out << "usage: " << argv[0] << " [--policy=<name>] [--list-policies]"
         << " [--host-budget-bytes=<n>] [--bounded-frontier]"
         << " [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
         << " <model.gms> <iterations>\n";
   };
 
   // Printed on request to stdout at exit 0, never as part of an error.
-  auto help = [&] {
+  auto help = [&]
+  {
     usage(std::cout);
     // Adjacent literals rather than a raw string: nvcc's preprocessor does
     // not accept R"(...)" here.
@@ -316,7 +333,7 @@ auto main(int argc, char* argv[]) -> int
   bool dump = false;
   bool dump_only = false;
   bool list_policies = false;
-  auto style = cuminlp::dag::PrintStyle::Infix;
+  auto style = cuminlp::model::PrintStyle::Infix;
   std::optional<std::string> policy_name;
   std::optional<std::size_t> partition_num;
   std::optional<std::size_t> enumerate_cap;
@@ -359,22 +376,30 @@ auto main(int argc, char* argv[]) -> int
     }
     if (arg.rfind("--partition-num=", 0) == 0) {
       partition_num = parse_count(arg.substr(16), "--partition-num");
-      if (!partition_num) return 2;
+      if (!partition_num) {
+        return 2;
+      }
       continue;
     }
     if (arg.rfind("--enumerate-cap=", 0) == 0) {
       enumerate_cap = parse_count(arg.substr(16), "--enumerate-cap");
-      if (!enumerate_cap) return 2;
+      if (!enumerate_cap) {
+        return 2;
+      }
       continue;
     }
     if (arg.rfind("--sample-points=", 0) == 0) {
       sample_points = parse_count(arg.substr(16), "--sample-points");
-      if (!sample_points) return 2;
+      if (!sample_points) {
+        return 2;
+      }
       continue;
     }
     if (arg.rfind("--max-slots=", 0) == 0) {
       max_slots = parse_count(arg.substr(12), "--max-slots");
-      if (!max_slots) return 2;
+      if (!max_slots) {
+        return 2;
+      }
       continue;
     }
     if (arg.rfind("--max-cycle-size=", 0) == 0) {
@@ -384,13 +409,17 @@ auto main(int argc, char* argv[]) -> int
       std::cerr << "note: --max-cycle-size is deprecated; use --max-slots "
                    "instead\n";
       max_slots = parse_count(arg.substr(17), "--max-cycle-size");
-      if (!max_slots) return 2;
+      if (!max_slots) {
+        return 2;
+      }
       continue;
     }
     if (arg.rfind("--host-budget-bytes=", 0) == 0) {
       auto const parsed_budget =
           parse_count(arg.substr(20), "--host-budget-bytes");
-      if (!parsed_budget) return 2;
+      if (!parsed_budget) {
+        return 2;
+      }
       host_budget_bytes = *parsed_budget;
       continue;
     }
@@ -403,9 +432,9 @@ auto main(int argc, char* argv[]) -> int
       if (arg.size() > 11) {
         std::string const value = arg.substr(11);
         if (value == "nodes") {
-          style = cuminlp::dag::PrintStyle::Nodes;
+          style = cuminlp::model::PrintStyle::Nodes;
         } else if (value == "infix") {
-          style = cuminlp::dag::PrintStyle::Infix;
+          style = cuminlp::model::PrintStyle::Infix;
         } else {
           std::cerr << "unknown dump style '" << value
                     << "'; expected infix|nodes\n";
@@ -457,7 +486,7 @@ auto main(int argc, char* argv[]) -> int
 
   // Hoisted out of the try only so the over-budget handler below can cost its
   // advice against this model; empty if the failure predates profiling.
-  std::optional<cuminlp::ProblemProfile> profile_for_report;
+  std::optional<cuminlp::config::ProblemProfile> profile_for_report;
 
   try {
     auto parsed = cuminlp::gams::parse_file<double>(positional[0]);
@@ -471,11 +500,11 @@ auto main(int argc, char* argv[]) -> int
     }
 
     if (dump) {
-      cuminlp::dag::PrintOptions print_options;
+      cuminlp::model::PrintOptions print_options;
       print_options.style = style;
       print_options.var_names = parsed.var_names;
       std::cout << '\n';
-      cuminlp::dag::print_problem(std::cout, parsed.problem, print_options);
+      cuminlp::model::print_problem(std::cout, parsed.problem, print_options);
       // The frontend negates a Maximise objective on the way in, so what is
       // printed above is what the solver minimises, not what the file wrote.
       if (parsed.sense == cuminlp::gams::Sense::Maximise) {
@@ -483,29 +512,31 @@ auto main(int argc, char* argv[]) -> int
                      "been negated for the minimising solver)\n";
       }
       std::cout << '\n';
-      if (dump_only) return 0;
+      if (dump_only) {
+        return 0;
+      }
     }
 
-    cuminlp::ProblemProfile problem_profile =
-        cuminlp::profile_problem(parsed.problem);
+    cuminlp::config::ProblemProfile problem_profile =
+        cuminlp::config::profile_problem(parsed.problem);
     problem_profile.objvar_kept = parsed.objvar_kept;
     profile_for_report = problem_profile;
 
-    cuminlp::SearchCalibration selection_calibration;
+    cuminlp::config::SearchCalibration selection_calibration;
     selection_calibration.free_device_bytes = free_device_bytes();
 
-    cuminlp::PolicyProfile policy {};
+    cuminlp::config::PolicyProfile policy {};
     cuminlp::config::Provenance base_source;
     if (policy_name) {
-      auto found = cuminlp::lookup_policy(*policy_name);
+      auto found = cuminlp::config::lookup_policy(*policy_name);
       if (!found) {
-        std::cerr << "unknown policy '" << *policy_name << "'; available "
-                     "policies:\n";
+        std::cerr << "unknown policy '" << *policy_name
+                  << "'; available " "policies:\n";
         print_roster(std::cerr);
         return 2;
       }
       policy = *found;
-      if (!cuminlp::is_applicable(policy, problem_profile)) {
+      if (!cuminlp::config::is_applicable(policy, problem_profile)) {
         std::cerr << "policy '" << *policy_name
                   << "' is not applicable to this model: "
                   << problem_profile.num_binary << " binary, "
@@ -522,7 +553,8 @@ auto main(int argc, char* argv[]) -> int
       }
       base_source = cuminlp::config::Provenance::Named;
     } else {
-      policy = cuminlp::select_policy(problem_profile, selection_calibration);
+      policy = cuminlp::config::select_policy(problem_profile,
+                                              selection_calibration);
       base_source = cuminlp::config::Provenance::Auto;
     }
 
@@ -542,8 +574,9 @@ auto main(int argc, char* argv[]) -> int
         base_source,
         overrides);
     spec.budgets.host_bytes = host_budget_bytes;
-    spec.frontier = bounded_frontier ? cuminlp::FrontierPolicy::Compact
-                                     : cuminlp::FrontierPolicy::StopAtBudget;
+    spec.frontier = bounded_frontier
+        ? cuminlp::search::FrontierPolicy::Compact
+        : cuminlp::search::FrontierPolicy::StopAtBudget;
     spec.iter_limit = static_cast<std::uint32_t>(std::stoi(positional[1]));
 
     std::cout << "policy: " << spec.policy_name << " ("
@@ -565,11 +598,15 @@ auto main(int argc, char* argv[]) -> int
     if (overrides.any()) {
       std::cout << "\toverrides=";
       bool first = true;
-      auto emit_override = [&](char const* name,
-                               std::optional<std::size_t> const& value)
+      auto emit_override =
+          [&](char const* name, std::optional<std::size_t> const& value)
       {
-        if (!value) return;
-        if (!first) std::cout << ",";
+        if (!value) {
+          return;
+        }
+        if (!first) {
+          std::cout << ",";
+        }
         std::cout << name << "=" << *value;
         first = false;
       };
@@ -588,8 +625,8 @@ auto main(int argc, char* argv[]) -> int
 
     // The solver only minimises; a maximisation was negated on the way in.
     bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;
-    std::cout << "objective (" << (maximise ? "maximise" : "minimise") << "): "
-              << (maximise ? -solution.bound : solution.bound) << '\n';
+    std::cout << "objective (" << (maximise ? "maximise" : "minimise")
+              << "): " << (maximise ? -solution.bound : solution.bound) << '\n';
 
     // One grep-able line carrying both bounds in the file's own sense, for
     // MINLP_STATUS.md's record step. Negating swaps which is which: the
@@ -604,21 +641,30 @@ auto main(int argc, char* argv[]) -> int
     // A dual bound still at its initial sentinel means the search never
     // dequeued anything, so there is no bound to record -- distinct from one
     // that is merely weak, and the tracker must not conflate them.
-    bool const found_dual = solution.lower > std::numeric_limits<double>::lowest();
+    bool const found_dual =
+        solution.lower > std::numeric_limits<double>::lowest();
     std::cout << "RESULT\tsense=" << (maximise ? "max" : "min") << "\tprimal=";
-    if (found_incumbent) std::cout << primal;
-    else std::cout << "none";
+    if (found_incumbent) {
+      std::cout << primal;
+    } else {
+      std::cout << "none";
+    }
     std::cout << "\tdual=";
-    if (found_dual) std::cout << dual;
-    else std::cout << "none";
+    if (found_dual) {
+      std::cout << dual;
+    } else {
+      std::cout << "none";
+    }
     std::cout << '\n';
     std::cout.precision(prev_precision);
     if (solution.point.size() == parsed.var_names.size()) {
       for (std::size_t i = 0; i < parsed.var_names.size(); ++i) {
-        std::cout << "  " << parsed.var_names[i] << " = " << solution.point[i] << '\n';
+        std::cout << "  " << parsed.var_names[i] << " = " << solution.point[i]
+                  << '\n';
       }
     } else {
-      std::cout << "  (no feasible sample was found; no solution point to report)\n";
+      std::cout
+          << "  (no feasible sample was found; no solution point to report)\n";
     }
     return 0;
   } catch (cuminlp::gams::ParseError const& e) {
@@ -633,10 +679,9 @@ auto main(int argc, char* argv[]) -> int
     // facts; the report is written here, where the problem profile the advice
     // is costed against is in hand (design/MODULE_REFACTOR.md §5.6).
     std::cerr << "out of device memory: "
-              << (profile_for_report
-                      ? cuminlp::explain_over_budget(e.facts(),
-                                                     *profile_for_report)
-                      : std::string(e.what()))
+              << (profile_for_report ? cuminlp::config::explain_over_budget(
+                                           e.facts(), *profile_for_report)
+                                     : std::string(e.what()))
               << '\n';
     return 3;
   } catch (cuminlp::ResourceExhausted const& e) {

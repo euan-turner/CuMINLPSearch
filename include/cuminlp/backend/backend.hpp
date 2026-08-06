@@ -9,10 +9,11 @@
 #include <cuinterval/interval.h>
 
 #include "cuminlp/backend/cost_model.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/format.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 
 // The three roles a backend plays, named for what they do rather than for how
 // they are built (design/MODULE_REFACTOR.md §5.1).
@@ -38,7 +39,7 @@ template<typename T>
 struct Region
 {
   std::span<const cu::interval<T>> box;  ///< n_vars entries
-  const SlotAssignment& assignment;
+  const region::SlotAssignment& assignment;
 };
 
 /**
@@ -194,15 +195,16 @@ public:
   virtual ~RegionBackendFactory() = default;
 
   virtual BackendCapabilities capabilities() const = 0;
-  virtual RegionCostModel cost_model(const dag::Problem<T>& problem) const = 0;
+  virtual RegionCostModel cost_model(
+      const model::Problem<T>& problem) const = 0;
 
   /// Once per distinct Composition, for the roles `roles` asks for. Roles it
   /// does not ask for come back null; so does `enumerator` for a composition
   /// that is not fully enumerable, or from a backend that cannot enumerate.
   virtual SubdivisionBundle<T> build_subdivision(
-      const dag::Problem<T>& problem,
-      const Composition& composition,
-      const FanOutSpec& fan_out,
+      const model::Problem<T>& problem,
+      const region::Composition& composition,
+      const region::FanOutSpec& fan_out,
       const BuildBudget& budget,
       RoleRequest roles) const = 0;
 };
@@ -233,8 +235,8 @@ struct OverBudget
   std::string element_breakdown;  ///< what those bytes buy, itemised
   std::string element_inventory;  ///< what the per-element cost scales with
   RegionCostModel cost;
-  Composition composition;
-  FanOutSpec fan_out;
+  region::Composition composition;
+  region::FanOutSpec fan_out;
   std::size_t solve_samples_per_region = 1;  ///< the solve-wide setting
   std::size_t sampler_bytes = 0;  ///< already spent; 0 until §5.2
 };

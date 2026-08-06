@@ -2,17 +2,19 @@
 #include <memory>
 #include <string>
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/backend/graph/factory.cuh"
+#include "cuminlp/config/calibration.hpp"
+#include "cuminlp/config/problem_profile.hpp"
 #include "cuminlp/example_main.hpp"
-#include "cuminlp/graph_replay.cuh"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
 
-using cuminlp::dag::Cmp;
-using cuminlp::dag::Expr;
-using cuminlp::dag::Problem;
+using cuminlp::model::Cmp;
+using cuminlp::model::Expr;
+using cuminlp::model::Problem;
 
 namespace
 {
@@ -74,28 +76,43 @@ auto main(int argc, char* argv[]) -> int
       {
         int problem = std::stoi(argv[1]);
         int iters = std::stoi(argv[2]);
-        auto policy = std::make_shared<cuminlp::GreedyCompositionPolicy<double>>(
-            cuminlp::FanOutSpec {20},
-            cuminlp::SearchCalibration {.max_cycle_size = 2});
-        auto backend =
-            std::make_shared<const cuminlp::dag::GraphBackendFactory<double>>();
+        auto policy =
+            std::make_shared<cuminlp::policy::GreedyCompositionPolicy<double>>(
+                cuminlp::region::FanOutSpec {20},
+                cuminlp::config::SearchCalibration {.max_cycle_size = 2});
+        auto backend = std::make_shared<
+            const cuminlp::backend::graph::GraphBackendFactory<double>>();
         if (problem == 212) {
           std::cout << "Ex. 2.1.2" << '\n';
           auto p212 = problem_212();
           auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
-              cuminlp::profile_problem(p212));
-          cuminlp::SearchDriver<double> drv_212(
-              policy, backend, iters, 1e-6, 100, 0, 0,
-              cuminlp::FrontierPolicy::StopAtBudget, reporter);
+              cuminlp::config::profile_problem(p212));
+          cuminlp::search::SearchDriver<double> drv_212(
+              policy,
+              backend,
+              iters,
+              1e-6,
+              100,
+              0,
+              0,
+              cuminlp::search::FrontierPolicy::StopAtBudget,
+              reporter);
           drv_212.solve(p212);
         } else if (problem == 219) {
           std::cout << "Ex. 2.1.9" << '\n';
           auto p219 = problem_219();
           auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
-              cuminlp::profile_problem(p219));
-          cuminlp::SearchDriver<double> drv_219(
-              policy, backend, iters, 1e-6, 100, 0, 0,
-              cuminlp::FrontierPolicy::StopAtBudget, reporter);
+              cuminlp::config::profile_problem(p219));
+          cuminlp::search::SearchDriver<double> drv_219(
+              policy,
+              backend,
+              iters,
+              1e-6,
+              100,
+              0,
+              0,
+              cuminlp::search::FrontierPolicy::StopAtBudget,
+              reporter);
           drv_219.solve(p219);
         }
       });

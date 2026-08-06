@@ -2,13 +2,13 @@
 
 /**
  * @brief The nvs09 MINLPLib instance (https://www.minlplib.org/nvs09.html) as
- * a hand-built `dag::Problem`.
+ * a hand-built `model::Problem`.
  */
 
 #include <cstddef>
 #include <vector>
 
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/problem.hpp"
 
 namespace cuminlp::examples::nvs09
 {
@@ -27,10 +27,10 @@ constexpr std::size_t SAMPLE_POINTS = 5;
 
 /// @brief Build nvs09: 10 integers in [3, 9], minimising a log/product
 /// objective. See the module comment above for the instance's provenance.
-inline auto make_nvs09() -> dag::Problem<double>
+inline auto make_nvs09() -> model::Problem<double>
 {
-  using dag::Expr;
-  dag::Problem<double> problem;
+  using model::Expr;
+  model::Problem<double> problem;
   std::vector<Expr<double>> i;
   i.reserve(NUM_VARS);
   for (std::size_t j = 0; j < NUM_VARS; ++j) {

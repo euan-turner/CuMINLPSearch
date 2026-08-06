@@ -1,19 +1,19 @@
-#include <catch2/catch_test_macros.hpp>
-
 #include <cmath>
 #include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
 
-#include "cuminlp/dag.hpp"
 #include "cuminlp/gams.hpp"
 
+#include <catch2/catch_test_macros.hpp>
+
 #include "autocorr_bern20_03_problem.hpp"
+#include "cuminlp/model/problem.hpp"
 #include "dag_eval.hpp"
 
-using cuminlp::dag::Expr;
-using cuminlp::dag::Problem;
+using cuminlp::model::Expr;
+using cuminlp::model::Problem;
 using cuminlp::testing::evaluate_objective;
 namespace gams = cuminlp::gams;
 
@@ -41,7 +41,9 @@ auto model_with(std::string const& expression) -> std::string
  * deliberately does not fold `0 * x` (that identity is unsound for intervals),
  * so this term survives to the DAG and contributes exactly zero.
  */
-auto eval(std::string const& expression, double x1 = 0.0, double x2 = 0.0) -> double
+auto eval(std::string const& expression,
+          double x1 = 0.0,
+          double x2 = 0.0) -> double
 {
   auto parsed = gams::parse<double>(model_with("(" + expression + ") + 0*x1"));
   return evaluate_objective(parsed.problem, {x1, x2});
@@ -70,8 +72,8 @@ TEST_CASE("arithmetic and precedence", "[gams][expr]")
 {
   CHECK(close(eval("1 + 2*3"), 7.0));
   CHECK(close(eval("(1 + 2)*3"), 9.0));
-  CHECK(close(eval("10 - 2 - 3"), 5.0));    // left-associative
-  CHECK(close(eval("100/10/2"), 5.0));      // left-associative
+  CHECK(close(eval("10 - 2 - 3"), 5.0));  // left-associative
+  CHECK(close(eval("100/10/2"), 5.0));  // left-associative
   CHECK(close(eval("2*x1 + 3*x2", 5.0, 7.0), 31.0));
 }
 
@@ -136,7 +138,8 @@ TEST_CASE("x**y lowers to exp(y*log(x)) when the exponent is not constant",
   // exponent, just with y as an ordinary DAG operand instead of a payload
   // constant.
   CHECK(close(eval("x1**x2", 2.0, 3.0), std::pow(2.0, 3.0)));
-  CHECK(close(eval("10**(x1 + 0.5*x2)", 2.0, 3.0), std::pow(10.0, 2.0 + 0.5 * 3.0)));
+  CHECK(close(eval("10**(x1 + 0.5*x2)", 2.0, 3.0),
+              std::pow(10.0, 2.0 + 0.5 * 3.0)));
 }
 
 TEST_CASE("GAMS is case-insensitive", "[gams][lex]")
@@ -183,7 +186,8 @@ TEST_CASE("dollar-control lines are skipped", "[gams][lex]")
 namespace
 {
 
-struct Eliminated {
+struct Eliminated
+{
   bool eliminated;
   double value;  // objective evaluated at x1 = 3
   std::size_t vars;
@@ -200,10 +204,13 @@ auto try_eliminate(std::string const& equation) -> Eliminated
       "Solve m using NLP minimizing objvar;\n");
 
   bool kept = false;
-  for (auto const& name : parsed.var_names) kept = kept || name == "objvar";
+  for (auto const& name : parsed.var_names) {
+    kept = kept || name == "objvar";
+  }
 
   std::vector<double> point(parsed.problem.box_bounds.size(), 3.0);
-  return {!kept, evaluate_objective(parsed.problem, point),
+  return {!kept,
+          evaluate_objective(parsed.problem, point),
           parsed.problem.box_bounds.size()};
 }
 
@@ -223,10 +230,13 @@ auto try_eliminate_ineq(std::string const& equations,
       "Solve m using NLP " + sense + " objvar;\n");
 
   bool kept = false;
-  for (auto const& name : parsed.var_names) kept = kept || name == "objvar";
+  for (auto const& name : parsed.var_names) {
+    kept = kept || name == "objvar";
+  }
 
   std::vector<double> point(parsed.problem.box_bounds.size(), 3.0);
-  return {!kept, evaluate_objective(parsed.problem, point),
+  return {!kept,
+          evaluate_objective(parsed.problem, point),
           parsed.problem.box_bounds.size()};
 }
 
@@ -368,10 +378,10 @@ TEST_CASE("an inequality that is tight at the optimum eliminates objvar",
   {
     // "Nothing else pushes objvar down" stops being true: e2 could make the
     // tight value infeasible, so the substitution is not sound.
-    auto r = try_eliminate_ineq("e1.. sqr(x1) - objvar =L= 0;\n"
-                                "e2.. objvar + x1 =L= 4;",
-                                "minimizing",
-                                "Equations e1,e2;\n");
+    auto r = try_eliminate_ineq(
+        "e1.. sqr(x1) - objvar =L= 0;\n" "e2.. objvar + x1 =L= 4;",
+        "minimizing",
+        "Equations e1,e2;\n");
     CHECK_FALSE(r.eliminated);
     CHECK(r.vars == 2);
   }
@@ -380,10 +390,10 @@ TEST_CASE("an inequality that is tight at the optimum eliminates objvar",
   {
     // e2 would also be admissible; the equality is unconditionally valid, so a
     // model carrying both never relies on the weaker argument.
-    auto r = try_eliminate_ineq("e1.. -(sqr(x1)) + objvar =E= 0;\n"
-                                "e2.. 2*x1 - objvar =L= 0;",
-                                "minimizing",
-                                "Equations e1,e2;\n");
+    auto r = try_eliminate_ineq(
+        "e1.. -(sqr(x1)) + objvar =E= 0;\n" "e2.. 2*x1 - objvar =L= 0;",
+        "minimizing",
+        "Equations e1,e2;\n");
     CHECK(r.eliminated);
     CHECK(close(r.value, 9.0));
     // e2 is not the defining equation, so it stays a real constraint.
@@ -391,8 +401,9 @@ TEST_CASE("an inequality that is tight at the optimum eliminates objvar",
   }
 }
 
-TEST_CASE("a bound on the eliminated objective variable survives as a constraint",
-          "[gams][elimination]")
+TEST_CASE(
+    "a bound on the eliminated objective variable survives as a constraint",
+    "[gams][elimination]")
 {
   auto parsed = gams::parse<double>(
       "Variables x1,objvar;\n"
@@ -402,9 +413,9 @@ TEST_CASE("a bound on the eliminated objective variable survives as a constraint
       "objvar.up = 25;\n"
       "Solve m using NLP minimizing objvar;\n");
 
-  REQUIRE(parsed.var_names.size() == 1);          // objvar is gone
+  REQUIRE(parsed.var_names.size() == 1);  // objvar is gone
   REQUIRE(parsed.problem.constraints.size() == 1);  // but its bound is not
-  CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+  CHECK(parsed.problem.constraints[0].cmp == cuminlp::model::Cmp::LE);
   CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
 }
 
@@ -425,19 +436,20 @@ TEST_CASE("a surviving objvar bound is stated in the file's own sense",
       "Solve m using NLP maximizing objvar;\n");
 
   REQUIRE(parsed.problem.constraints.size() == 1);
-  CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+  CHECK(parsed.problem.constraints[0].cmp == cuminlp::model::Cmp::LE);
   CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
   // f(3) = 9, not -9.
-  CHECK(close(cuminlp::testing::evaluate(parsed.problem.graph,
-                                         parsed.problem.constraints[0].root_id,
-                                         {3.0}),
-              9.0));
+  CHECK(close(
+      cuminlp::testing::evaluate(
+          parsed.problem.graph, parsed.problem.constraints[0].root_id, {3.0}),
+      9.0));
 }
 
 TEST_CASE("an inequality elimination keeps only the binding objvar bound",
           "[gams][elimination]")
 {
-  auto parse_bounded = [](char const* bounds, char const* sense) {
+  auto parse_bounded = [](char const* bounds, char const* sense)
+  {
     return gams::parse<double>(
         "Variables x1,objvar;\n"
         "Equations e1;\n"
@@ -452,7 +464,7 @@ TEST_CASE("an inequality elimination keeps only the binding objvar bound",
     // No feasible objvar exists at all unless sqr(x1) <= 25.
     auto parsed = parse_bounded("objvar.up = 25;\n", "minimizing");
     REQUIRE(parsed.problem.constraints.size() == 1);
-    CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+    CHECK(parsed.problem.constraints[0].cmp == cuminlp::model::Cmp::LE);
     CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
   }
 
@@ -508,31 +520,35 @@ namespace
 /// test depends on nothing beyond the committed dag.hpp.
 auto pown(Problem<double>& problem, Expr<double> base, int n) -> Expr<double>
 {
-  cuminlp::dag::DAGNodePayload<double> payload;
+  cuminlp::model::DAGNodePayload<double> payload;
   payload.int_exp = n;
-  return Expr<double>(&problem.graph,
-                      problem.graph.emit(cuminlp::dag::Op::PowN, {base.id()}, payload));
+  return Expr<double>(
+      &problem.graph,
+      problem.graph.emit(cuminlp::model::Op::PowN, {base.id()}, payload));
 }
 
 /// Rebuild ex4_1_2 exactly as source/power_series.cu does.
 auto hand_built_ex4_1_2() -> Problem<double>
 {
   static constexpr double kCoeffs[] = {
-      1.666666666, 1.25, 1.0, 0.8333333, 0.714285714, 0.625, 0.555555555, 1.0,
-      -43.6363636, 0.41666666, 0.384615384, 0.357142857, 0.3333333, 0.3125,
-      0.294117647, 0.277777777, 0.263157894, 0.25, 0.238095238, 0.227272727,
-      0.217391304, 0.208333333, 0.2, 0.192307692, 0.185185185, 0.178571428,
-      0.344827586, 0.6666666, -15.48387097, 0.15625, 0.1515151, 0.14705882,
-      0.14285712, 0.138888888, 0.135135135, 0.131578947, 0.128205128, 0.125,
-      0.121951219, 0.119047619, 0.116279069, 0.113636363, 0.1111111,
-      0.108695652, 0.106382978, 0.208333333, 0.408163265, 0.8};
+      1.666666666, 1.25,        1.0,        0.8333333,    0.714285714,
+      0.625,       0.555555555, 1.0,        -43.6363636,  0.41666666,
+      0.384615384, 0.357142857, 0.3333333,  0.3125,       0.294117647,
+      0.277777777, 0.263157894, 0.25,       0.238095238,  0.227272727,
+      0.217391304, 0.208333333, 0.2,        0.192307692,  0.185185185,
+      0.178571428, 0.344827586, 0.6666666,  -15.48387097, 0.15625,
+      0.1515151,   0.14705882,  0.14285712, 0.138888888,  0.135135135,
+      0.131578947, 0.128205128, 0.125,      0.121951219,  0.119047619,
+      0.116279069, 0.113636363, 0.1111111,  0.108695652,  0.106382978,
+      0.208333333, 0.408163265, 0.8};
   constexpr int kFirstPower = 3;
 
   Problem<double> problem;
   auto x = problem.var(1, 2);
   Expr<double> obj = (2.5 * (x * x)) - (500.0 * x);
   for (std::size_t i = 0; i < std::size(kCoeffs); ++i) {
-    obj = obj + (kCoeffs[i] * pown(problem, x, kFirstPower + static_cast<int>(i)));
+    obj = obj
+        + (kCoeffs[i] * pown(problem, x, kFirstPower + static_cast<int>(i)));
   }
   problem.set_objective(obj);
   return problem;
@@ -568,7 +584,9 @@ auto hand_built_ex8_6_2() -> Problem<double>
   }
 
   Expr<double> obj = terms[0];
-  for (std::size_t i = 1; i < terms.size(); ++i) obj = obj + terms[i];
+  for (std::size_t i = 1; i < terms.size(); ++i) {
+    obj = obj + terms[i];
+  }
   problem.set_objective(-45 + obj);
   return problem;
 }
@@ -645,7 +663,8 @@ TEST_CASE("fixed variables become constants, not degenerate boxes",
 // Layer 4b: integer and binary variables
 // ---------------------------------------------------------------------------
 
-TEST_CASE("integer variables parse as VarKind::Integer", "[gams][minlplib][discrete]")
+TEST_CASE("integer variables parse as VarKind::Integer",
+          "[gams][minlplib][discrete]")
 {
   // nvs01.gms declares i1,i2 as Integer (implicit lower bound 0) and narrows
   // their upper bound with `i1.up = 200;` / `i2.up = 200;`; x3 stays
@@ -653,9 +672,9 @@ TEST_CASE("integer variables parse as VarKind::Integer", "[gams][minlplib][discr
   auto parsed = gams::parse_file<double>(data_file("nvs01.gms"));
 
   REQUIRE(parsed.problem.var_kinds.size() == 3);
-  CHECK(parsed.problem.var_kinds[0] == cuminlp::dag::VarKind::Integer);
-  CHECK(parsed.problem.var_kinds[1] == cuminlp::dag::VarKind::Integer);
-  CHECK(parsed.problem.var_kinds[2] == cuminlp::dag::VarKind::Continuous);
+  CHECK(parsed.problem.var_kinds[0] == cuminlp::model::VarKind::Integer);
+  CHECK(parsed.problem.var_kinds[1] == cuminlp::model::VarKind::Integer);
+  CHECK(parsed.problem.var_kinds[2] == cuminlp::model::VarKind::Continuous);
 
   CHECK(close(parsed.problem.box_bounds[0].lb, 0.0));
   CHECK(close(parsed.problem.box_bounds[0].ub, 200.0));
@@ -683,15 +702,17 @@ TEST_CASE("Problem::validate() defects the frontend must not reproduce",
   {
     // [0.3, 0.7] contains no integer at all, but isn't lo > up before
     // snapping -- the empty-box check must run after ceil/floor, not before.
-    CHECK_THROWS_AS(
-        gams::parse<double>(
-            "Variables i1,objvar;\n"
-            "Integer Variables i1;\n"
-            "Equations e1;\n"
-            "e1.. -(i1) + objvar =E= 0;\n"
-            "i1.lo = 0.3; i1.up = 0.7;\n"
-            "Solve m using MINLP minimizing objvar;\n"),
-        gams::ParseError);
+    CHECK_THROWS_AS(gams::parse<
+                        double>("Variables i1,objvar;\n" "Integer Variables "
+                                                         "i1;\n" "Equations "
+                                                                 "e1;\n" "e1.. "
+                                                                         "-(i1)"
+                                                                         " + "
+                                                                         "objva"
+                                                                         "r "
+                                                                         "=E= "
+                                                                         "0;\n" "i1.lo = 0.3; i1.up = 0.7;\n" "Solve m using MINLP minimizing objvar;\n"),
+                    gams::ParseError);
   }
 
   SECTION("a binary narrowed off [0,1] lowers to VarKind::Integer")
@@ -706,7 +727,7 @@ TEST_CASE("Problem::validate() defects the frontend must not reproduce",
         "e1.. -(b1) + objvar =E= 0;\n"
         "b1.up = 0;\n"
         "Solve m using MINLP minimizing objvar;\n");
-    CHECK(parsed.problem.var_kinds[0] == cuminlp::dag::VarKind::Integer);
+    CHECK(parsed.problem.var_kinds[0] == cuminlp::model::VarKind::Integer);
     CHECK(close(parsed.problem.box_bounds[0].lb, 0.0));
     CHECK(close(parsed.problem.box_bounds[0].ub, 0.0));
   }
@@ -725,7 +746,7 @@ TEST_CASE("Problem::validate() defects the frontend must not reproduce",
         "e1.. -(i1) + objvar =E= 0;\n"
         "i1.up = 10;\n"
         "Solve m using MINLP minimizing objvar;\n");
-    CHECK(parsed.problem.var_kinds[0] == cuminlp::dag::VarKind::Integer);
+    CHECK(parsed.problem.var_kinds[0] == cuminlp::model::VarKind::Integer);
   }
 }
 
@@ -740,8 +761,11 @@ TEST_CASE("validate() passes on every fixture in test/data/gams/",
   // reason (e.g. a function this frontend doesn't lower yet) -- that's a
   // frontier gap, not a validate() defect, and isn't what this test checks.
   for (auto const& entry :
-       std::filesystem::directory_iterator(CUMINLP_GAMS_TEST_DATA)) {
-    if (entry.path().extension() != ".gms") continue;
+       std::filesystem::directory_iterator(CUMINLP_GAMS_TEST_DATA))
+  {
+    if (entry.path().extension() != ".gms") {
+      continue;
+    }
     INFO("file: " << entry.path());
     try {
       gams::parse_file<double>(entry.path());
@@ -751,7 +775,8 @@ TEST_CASE("validate() passes on every fixture in test/data/gams/",
   }
 }
 
-TEST_CASE("nvs04.gms agrees with the hand-built DAG", "[gams][minlplib][discrete]")
+TEST_CASE("nvs04.gms agrees with the hand-built DAG",
+          "[gams][minlplib][discrete]")
 {
   // Rebuild nvs04 (https://www.minlplib.org/nvs04.html) by hand: a
   // Rosenbrock-shaped objective over two integers in [0, 200]. Its defining
@@ -765,17 +790,19 @@ TEST_CASE("nvs04.gms agrees with the hand-built DAG", "[gams][minlplib][discrete
   Problem<double> reference;
   auto i1 = reference.int_var(0, 200);
   auto i2 = reference.int_var(0, 200);
-  reference.set_objective(100.0 * sqr(0.5 - sqr(0.6 + i1) + i2) + sqr(0.4 - i1));
+  reference.set_objective(100.0 * sqr(0.5 - sqr(0.6 + i1) + i2)
+                          + sqr(0.4 - i1));
 
   auto parsed = gams::parse_file<double>(data_file("nvs04.gms"));
 
   REQUIRE(parsed.problem.var_kinds.size() == 2);
-  CHECK(parsed.problem.var_kinds[0] == cuminlp::dag::VarKind::Integer);
-  CHECK(parsed.problem.var_kinds[1] == cuminlp::dag::VarKind::Integer);
+  CHECK(parsed.problem.var_kinds[0] == cuminlp::model::VarKind::Integer);
+  CHECK(parsed.problem.var_kinds[1] == cuminlp::model::VarKind::Integer);
   CHECK(parsed.problem.constraints.empty());
 
   std::mt19937 rng(20260730);
-  std::uniform_int_distribution<int> pick(0, 200);  // lattice points in [0, 200]
+  std::uniform_int_distribution<int> pick(0,
+                                          200);  // lattice points in [0, 200]
   for (int s = 0; s < 32; ++s) {
     std::vector<double> point = {static_cast<double>(pick(rng)),
                                  static_cast<double>(pick(rng))};
@@ -804,7 +831,7 @@ TEST_CASE("autocorr_bern20-03.gms agrees with the hand-built DAG",
 
   REQUIRE(parsed.problem.var_kinds.size() == 20);
   for (std::size_t i = 0; i < 20; ++i) {
-    CHECK(parsed.problem.var_kinds[i] == cuminlp::dag::VarKind::Binary);
+    CHECK(parsed.problem.var_kinds[i] == cuminlp::model::VarKind::Binary);
   }
   CHECK(parsed.problem.constraints.empty());
 
@@ -813,7 +840,9 @@ TEST_CASE("autocorr_bern20-03.gms agrees with the hand-built DAG",
   for (int s = 0; s < 32; ++s) {
     std::vector<double> b;
     b.reserve(20);
-    for (int j = 0; j < 20; ++j) b.push_back(static_cast<double>(pick(rng)));
+    for (int j = 0; j < 20; ++j) {
+      b.push_back(static_cast<double>(pick(rng)));
+    }
 
     double const want = evaluate_objective(reference, b);
     double const got = evaluate_objective(parsed.problem, b);
@@ -826,9 +855,11 @@ TEST_CASE("autocorr_bern20-03.gms agrees with the hand-built DAG",
 // Layer 5: diagnostics
 // ---------------------------------------------------------------------------
 
-TEST_CASE("unrepresentable input is rejected with a line number", "[gams][errors]")
+TEST_CASE("unrepresentable input is rejected with a line number",
+          "[gams][errors]")
 {
-  auto fails_at = [](std::string const& source, int line) {
+  auto fails_at = [](std::string const& source, int line)
+  {
     try {
       gams::parse<double>(source);
     } catch (gams::ParseError const& e) {
@@ -895,14 +926,14 @@ TEST_CASE("relations canonicalise into LE and EQ", "[gams][constraints]")
   auto const& graph = parsed.problem.graph;
 
   // e2 keeps its constant right-hand side out of the DAG.
-  CHECK(parsed.problem.constraints[0].cmp == cuminlp::dag::Cmp::LE);
+  CHECK(parsed.problem.constraints[0].cmp == cuminlp::model::Cmp::LE);
   CHECK(close(parsed.problem.constraints[0].rhs, 8.0));
 
   // e3 `3*x1 =G= 6` is stored by swapping sides into `6 =L= 3*x1`, which has a
   // non-constant right-hand side, so it lowers to `6 - 3*x1 <= 0`.
-  CHECK(parsed.problem.constraints[1].cmp == cuminlp::dag::Cmp::LE);
+  CHECK(parsed.problem.constraints[1].cmp == cuminlp::model::Cmp::LE);
   CHECK(close(parsed.problem.constraints[1].rhs, 0.0));
-  double const body =
-      cuminlp::testing::evaluate(graph, parsed.problem.constraints[1].root_id, {5.0});
+  double const body = cuminlp::testing::evaluate(
+      graph, parsed.problem.constraints[1].root_id, {5.0});
   CHECK(close(body, 6.0 - 15.0));
 }

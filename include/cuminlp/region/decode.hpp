@@ -5,27 +5,26 @@
 
 #include <cuinterval/interval.h>
 
-#include "cuminlp/composition_policy.hpp"
+#include "cuminlp/region/slot.hpp"
 
 // __host__ __device__ only mean anything to nvcc; on a plain host compiler
 // (e.g. building the host-only test targets without CUDA) they'd be
 // undefined identifiers, so they're no-ops outside __CUDACC__. This lets the
-// exact same function be called from partition.cuh's __device__ kernels and
-// from search.hpp's host-only Node::materialise, which is
-// what makes host/device agreement structural rather than something to prove
-// by test (see TEST_EXTENSION.md).
+// exact same function be called from backend::graph's __device__ kernels and
+// from search::Node::materialise, which is what makes host/device agreement
+// structural rather than something to prove by test (see TEST_EXTENSION.md).
 #if defined(__CUDACC__)
 #  define CUMINLP_HD __host__ __device__
 #else
 #  define CUMINLP_HD
 #endif
 
-namespace cuminlp::decode
+namespace cuminlp::region::decode
 {
 
 // Decodes one slot's contribution to a dimension's bounds: `part` is this
 // slot's index into its `fan_out`-way radix (see slot_prefixes in
-// composition_policy.hpp, design/MODULE_REFACTOR.md §4.2), `parent` the
+// region/composition.hpp, design/MODULE_REFACTOR.md §4.2), `parent` the
 // dimension's bounds before this slot acted on it.
 //
 // IntegerEnumerate/BinaryEnumerate snap to the integer lattice via
@@ -67,4 +66,4 @@ CUMINLP_HD inline void slot_bounds(SlotKind kind,
   }
 }
 
-}  // namespace cuminlp::decode
+}  // namespace cuminlp::region::decode

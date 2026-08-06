@@ -10,8 +10,9 @@
 #include <cuinterval/interval.h>
 
 #include "cuminlp/backend/backend.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
 
 // The contract every backend must satisfy, written against
 // cuminlp::backend's three role interfaces and RegionBackendFactory and
@@ -35,7 +36,7 @@ namespace cuminlp::test
  */
 struct ContractModel
 {
-  const dag::Problem<double>& problem;
+  const model::Problem<double>& problem;
   std::vector<cu::interval<double>> box;
   std::function<double(std::span<const double>)> objective;
   std::function<bool(std::span<const double>)> feasible;
@@ -80,7 +81,7 @@ inline void check_on_lattice(const ContractModel& model,
                              std::span<const double> point)
 {
   for (std::size_t v = 0; v < model.box.size(); ++v) {
-    if (model.problem.var_kinds[v] == dag::VarKind::Continuous) {
+    if (model.problem.var_kinds[v] == model::VarKind::Continuous) {
       continue;
     }
     CHECK(detail::close(point[v], std::round(point[v])));
@@ -102,13 +103,13 @@ inline void check_on_lattice(const ContractModel& model,
 inline void check_backend_contract(
     const backend::RegionBackendFactory<double>& factory,
     const ContractModel& model,
-    const SlotAssignment& enumerable,
-    const SlotAssignment& subdividing,
-    const FanOutSpec& fan_out,
+    const region::SlotAssignment& enumerable,
+    const region::SlotAssignment& subdividing,
+    const region::FanOutSpec& fan_out,
     std::size_t samples_per_region)
 {
-  REQUIRE(is_fully_enumerable(enumerable.composition));
-  REQUIRE_FALSE(is_fully_enumerable(subdividing.composition));
+  REQUIRE(region::is_fully_enumerable(enumerable.composition));
+  REQUIRE_FALSE(region::is_fully_enumerable(subdividing.composition));
 
   backend::BackendCapabilities const caps = factory.capabilities();
   backend::BuildBudget budget;
@@ -123,16 +124,22 @@ inline void check_backend_contract(
         >= cost.bundle_bytes(100, samples_per_region, false));
 
   // ---- bundle shape: a missing role is a capability, not a surprise ----
-  backend::SubdivisionBundle<double> flat = factory.build_subdivision(
-      model.problem, subdividing.composition, fan_out, budget,
-      backend::RoleRequest::all());
+  backend::SubdivisionBundle<double> flat =
+      factory.build_subdivision(model.problem,
+                                subdividing.composition,
+                                fan_out,
+                                budget,
+                                backend::RoleRequest::all());
   REQUIRE(flat.bounder != nullptr);
   REQUIRE(flat.sampler != nullptr);
   CHECK(flat.enumerator == nullptr);  // not fully enumerable
 
-  backend::SubdivisionBundle<double> exact = factory.build_subdivision(
-      model.problem, enumerable.composition, fan_out, budget,
-      backend::RoleRequest::all());
+  backend::SubdivisionBundle<double> exact =
+      factory.build_subdivision(model.problem,
+                                enumerable.composition,
+                                fan_out,
+                                budget,
+                                backend::RoleRequest::all());
   REQUIRE(exact.bounder != nullptr);
   REQUIRE(exact.sampler != nullptr);
   CHECK((exact.enumerator != nullptr) == caps.exact_enumeration);
@@ -141,22 +148,28 @@ inline void check_backend_contract(
   // one path or the other, and a backend that builds both anyway charges the
   // device for graphs that iteration will not launch.
   backend::SubdivisionBundle<double> const bound_only =
-      factory.build_subdivision(model.problem, enumerable.composition, fan_out,
-                                budget, backend::RoleRequest::subdividing());
+      factory.build_subdivision(model.problem,
+                                enumerable.composition,
+                                fan_out,
+                                budget,
+                                backend::RoleRequest::subdividing());
   CHECK(bound_only.bounder != nullptr);
   CHECK(bound_only.sampler != nullptr);
   CHECK(bound_only.enumerator == nullptr);
 
   backend::SubdivisionBundle<double> const fathom_only =
-      factory.build_subdivision(model.problem, enumerable.composition, fan_out,
-                                budget, backend::RoleRequest::enumerating());
+      factory.build_subdivision(model.problem,
+                                enumerable.composition,
+                                fan_out,
+                                budget,
+                                backend::RoleRequest::enumerating());
   CHECK(fathom_only.bounder == nullptr);
   CHECK(fathom_only.sampler == nullptr);
   CHECK((fathom_only.enumerator != nullptr) == caps.exact_enumeration);
 
   // ---- bounder ----
   std::size_t const flat_regions =
-      composition_fan_out(subdividing.composition, fan_out);
+      region::composition_fan_out(subdividing.composition, fan_out);
   CHECK(flat.bounder->n_regions() == flat_regions);
 
   backend::Region<double> const flat_region {model.box, subdividing};
@@ -170,9 +183,9 @@ inline void check_backend_contract(
 
   // Bounding is a function of the region: two calls, one answer. Copied out
   // first, because the result is a view the second call invalidates.
-  std::vector<double> const first_lb(bounds.obj_lb.begin(),
-                                     bounds.obj_lb.begin()
-                                         + static_cast<std::ptrdiff_t>(flat_regions));
+  std::vector<double> const first_lb(
+      bounds.obj_lb.begin(),
+      bounds.obj_lb.begin() + static_cast<std::ptrdiff_t>(flat_regions));
   backend::BoundResult<double> const again = flat.bounder->bound(flat_region);
   for (std::size_t r = 0; r < flat_regions; ++r) {
     CHECK(detail::close(first_lb[r], again.obj_lb[r]));
@@ -180,7 +193,7 @@ inline void check_backend_contract(
 
   // ---- enumerator, and the bound below it ----
   std::size_t const exact_regions =
-      composition_fan_out(enumerable.composition, fan_out);
+      region::composition_fan_out(enumerable.composition, fan_out);
   backend::Region<double> const exact_region {model.box, enumerable};
 
   if (exact.enumerator != nullptr) {
@@ -250,8 +263,11 @@ inline void check_backend_contract(
   tiny.bytes = 1;
   tiny.samples_per_region = samples_per_region;
   try {
-    factory.build_subdivision(model.problem, enumerable.composition, fan_out,
-                              tiny, backend::RoleRequest::all());
+    factory.build_subdivision(model.problem,
+                              enumerable.composition,
+                              fan_out,
+                              tiny,
+                              backend::RoleRequest::all());
     FAIL("a one-byte budget must not admit a build");
   } catch (const backend::OverBudgetError& e) {
     backend::OverBudget const& facts = e.facts();

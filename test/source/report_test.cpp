@@ -3,20 +3,21 @@
 #include <sstream>
 #include <string>
 
-#include "cuminlp/report/observer.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 
-using cuminlp::DropAccounting;
-using cuminlp::FrontierPolicy;
-using cuminlp::ProblemProfile;
-using cuminlp::StopReason;
+#include "cuminlp/region/fan_out.hpp"
+#include "cuminlp/report/observer.hpp"
+
 using cuminlp::backend::OverBudget;
+using cuminlp::config::ProblemProfile;
 using cuminlp::report::BudgetStopEvent;
 using cuminlp::report::CompactionEvent;
 using cuminlp::report::ConsoleReporter;
 using cuminlp::report::FinalReport;
 using cuminlp::report::IterationEvent;
+using cuminlp::search::DropAccounting;
+using cuminlp::search::FrontierPolicy;
+using cuminlp::search::StopReason;
 
 namespace
 {
@@ -31,6 +32,7 @@ public:
       : prev_(std::cout.rdbuf(buf_.rdbuf()))
   {
   }
+
   ~CoutCapture() { std::cout.rdbuf(prev_); }
 
   std::string str() const { return buf_.str(); }
@@ -155,9 +157,9 @@ TEST_CASE("on_budget_stop before compaction points at --bounded-frontier",
            "worst-bounded regions and keep searching instead.\n");
 }
 
-TEST_CASE("on_budget_stop after compaction says the budget is still "
-          "exceeded",
-          "[report]")
+TEST_CASE(
+    "on_budget_stop after compaction says the budget is still " "exceeded",
+    "[report]")
 {
   ConsoleReporter reporter {ProblemProfile {}};
   CoutCapture out;
@@ -174,8 +176,7 @@ TEST_CASE("on_budget_stop after compaction says the budget is still "
 // on_backend_error / on_mid_search_error
 // ---------------------------------------------------------------------------
 
-TEST_CASE("on_backend_error prefixes explain_over_budget's report",
-          "[report]")
+TEST_CASE("on_backend_error prefixes explain_over_budget's report", "[report]")
 {
   ConsoleReporter reporter {ProblemProfile {}};
   OverBudget over {
@@ -189,7 +190,7 @@ TEST_CASE("on_backend_error prefixes explain_over_budget's report",
       .element_inventory = "4 DAG nodes",
       .cost = {},
       .composition = {},
-      .fan_out = cuminlp::FanOutSpec {2, 2},
+      .fan_out = cuminlp::region::FanOutSpec {2, 2},
       .solve_samples_per_region = 1,
       .sampler_bytes = 0,
   };
@@ -197,8 +198,8 @@ TEST_CASE("on_backend_error prefixes explain_over_budget's report",
   CoutCapture out;
   reporter.on_backend_error(over);
   std::string const text = out.str();
-  CHECK(text.starts_with("Out of device memory mid-search: interval graph "
-                         "needs"));
+  CHECK(text.starts_with(
+      "Out of device memory mid-search: interval graph " "needs"));
   CHECK(text.ends_with('\n'));
 }
 
@@ -261,16 +262,16 @@ TEST_CASE("on_finish notes when proven optimal at the iteration limit",
       .iter_idx = 1248,
       .iter_limit = 1248,
   });
-  CHECK(out.str().find(
-            "Proven optimal: no pending region can beat the incumbent (the "
-            "iteration limit was reached, but every remaining region is "
-            "already dominated).\n")
-        != std::string::npos);
+  CHECK(
+      out.str().find("Proven optimal: no pending region can beat the incumbent "
+                     "(the " "iteration limit was reached, but every remaining "
+                             "region is " "already dominated).\n")
+      != std::string::npos);
 }
 
-TEST_CASE("on_finish notes plain proven-optimal short of the iteration "
-          "limit",
-          "[report]")
+TEST_CASE(
+    "on_finish notes plain proven-optimal short of the iteration " "limit",
+    "[report]")
 {
   ConsoleReporter reporter {ProblemProfile {}};
   CoutCapture out;
@@ -311,17 +312,38 @@ TEST_CASE("on_finish reports infeasibility ahead of the Finished block",
       .iter_limit = 1000,
   });
   std::string const text = out.str();
-  CHECK(text.starts_with(
-      "Search space exhausted: every region was proven to hold no feasible "
-      "point, so the problem is infeasible as far as interval analysis can "
-      "tell. Sampling that merely never landed on a feasible point would "
-      "have left regions pending here instead.\n"
-      "------------ Finished ------------\n"));
+  CHECK(text
+            .starts_with("Search space exhausted: every region was proven to "
+                         "hold no feasible " "point, so the problem is "
+                                             "infeasible as far as interval "
+                                             "analysis can " "tell. Sampling "
+                                                             "that merely "
+                                                             "never landed on "
+                                                             "a feasible point "
+                                                             "would " "have "
+                                                                      "left "
+                                                                      "regions "
+                                                                      "pending "
+                                                                      "here "
+                                                                      "instead."
+                                                                      "\n" "---"
+                                                                           "---"
+                                                                           "---"
+                                                                           "---"
+                                                                           " Fi"
+                                                                           "nis"
+                                                                           "hed"
+                                                                           " --"
+                                                                           "---"
+                                                                           "---"
+                                                                           "---"
+                                                                           "-"
+                                                                           "\n"));
 }
 
-TEST_CASE("on_finish prints the dropped lb floor when something was "
-          "dropped",
-          "[report]")
+TEST_CASE(
+    "on_finish prints the dropped lb floor when something was " "dropped",
+    "[report]")
 {
   ConsoleReporter reporter {ProblemProfile {}};
   DropAccounting dropped;

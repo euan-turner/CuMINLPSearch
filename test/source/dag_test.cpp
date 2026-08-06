@@ -4,19 +4,20 @@
 #include <string>
 #include <type_traits>
 
-#include "cuminlp/dag.hpp"
-#include "cuminlp/dag_print.hpp"
+#include "cuminlp/model/dag.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
 #include "cuminlp/errors.hpp"
+#include "cuminlp/model/print.hpp"
+#include "cuminlp/model/problem.hpp"
 
 using cuminlp::InvalidDAG;
 using cuminlp::InvalidProblem;
-using cuminlp::dag::Op;
-using cuminlp::dag::Problem;
-using cuminlp::dag::VarKind;
+using cuminlp::model::Op;
+using cuminlp::model::Problem;
+using cuminlp::model::VarKind;
 
 namespace
 {
@@ -87,7 +88,7 @@ TEST_CASE(
   auto e = x * x + 2.0 * y;  // Sqr(x) [op_count 2], 2.0*y [Const, Mul ->
                              // op_count 3], Add -> 6
   p.set_objective(e);
-  p.add_constraint(x + y, cuminlp::dag::Cmp::LE, 5.0);
+  p.add_constraint(x + y, cuminlp::model::Cmp::LE, 5.0);
 
   for (const auto& node : p.graph.nodes) {
     for (auto in_id : node.in) {
@@ -109,7 +110,8 @@ TEST_CASE(
 
   auto objective = shared + shared;  // reused in the objective ...
   p.set_objective(objective);
-  p.add_constraint(shared, cuminlp::dag::Cmp::LE, 1.0);  // ... and a constraint
+  p.add_constraint(
+      shared, cuminlp::model::Cmp::LE, 1.0);  // ... and a constraint
 
   CHECK(p.graph.nodes[shared.id()].op_count == 2);
   // objective = Add(shared, shared): 1 + 2 + 2 = 5
@@ -208,7 +210,7 @@ TEST_CASE("A bare Const as a constraint root is rejected by validate()",
   Problem<double> p;
   auto x = p.var(-1.0, 1.0);
   p.set_objective(x * x);
-  p.add_constraint(p.fixed(1.0), cuminlp::dag::Cmp::LE, 0.0);
+  p.add_constraint(p.fixed(1.0), cuminlp::model::Cmp::LE, 0.0);
 
   REQUIRE_THROWS_AS(p.validate(), InvalidDAG);
 }
@@ -221,7 +223,7 @@ TEST_CASE("validate() accepts a well-formed Problem", "[dag][2]")
   auto x = p.var(-1.0, 1.0);
   auto y = p.int_var(0.0, 5.0);
   p.set_objective(x * x + y);
-  p.add_constraint(x + y, cuminlp::dag::Cmp::LE, 5.0);
+  p.add_constraint(x + y, cuminlp::model::Cmp::LE, 5.0);
 
   REQUIRE_NOTHROW(p.validate());
 }
@@ -291,7 +293,7 @@ TEST_CASE("validate() rejects a non-finite constraint rhs", "[dag][2]")
   auto x = p.var(-1.0, 1.0);
   p.set_objective(x * x);
   p.add_constraint(
-      x, cuminlp::dag::Cmp::LE, std::numeric_limits<double>::infinity());
+      x, cuminlp::model::Cmp::LE, std::numeric_limits<double>::infinity());
 
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }
@@ -302,7 +304,7 @@ TEST_CASE("validate() rejects a NaN constraint rhs", "[dag][2]")
   auto x = p.var(-1.0, 1.0);
   p.set_objective(x * x);
   p.add_constraint(
-      x, cuminlp::dag::Cmp::EQ, std::numeric_limits<double>::quiet_NaN());
+      x, cuminlp::model::Cmp::EQ, std::numeric_limits<double>::quiet_NaN());
 
   REQUIRE_THROWS_AS(p.validate(), InvalidProblem);
 }
@@ -318,24 +320,25 @@ TEST_CASE("validate() rejects a NaN constraint rhs", "[dag][2]")
 
 namespace
 {
-auto render(Problem<double> const& p, cuminlp::dag::PrintOptions const& options)
-    -> std::string
+auto render(Problem<double> const& p,
+            cuminlp::model::PrintOptions const& options) -> std::string
 {
   std::ostringstream os;
-  cuminlp::dag::print_problem(os, p, options);
+  cuminlp::model::print_problem(os, p, options);
   return os.str();
 }
 }  // namespace
 
-TEST_CASE("print_problem renders a known expression in infix form", "[dag][print]")
+TEST_CASE("print_problem renders a known expression in infix form",
+          "[dag][print]")
 {
   Problem<double> p;
   auto x = p.var(-1.0, 2.0);
   auto y = p.int_var(0.0, 5.0);
   p.set_objective(x * x + y);
-  p.add_constraint(x + y, cuminlp::dag::Cmp::LE, 4.0);
+  p.add_constraint(x + y, cuminlp::model::Cmp::LE, 4.0);
 
-  cuminlp::dag::PrintOptions options;
+  cuminlp::model::PrintOptions options;
   options.var_names = {"x", "y"};
   std::string const text = render(p, options);
 
@@ -360,7 +363,7 @@ TEST_CASE("print_problem falls back to positional names", "[dag][print]")
   auto a = q.var(0.0, 1.0);
   auto b = q.var(0.0, 1.0);
   q.set_objective(a + b);
-  cuminlp::dag::PrintOptions options;
+  cuminlp::model::PrintOptions options;
   options.var_names = {"a"};
   std::string const text = render(q, options);
   REQUIRE(text.find("(a + x1)") != std::string::npos);
@@ -374,10 +377,12 @@ TEST_CASE("print_problem's infix limit degrades instead of exploding",
   Problem<double> p;
   auto x = p.var(0.0, 1.0);
   auto acc = x + x;
-  for (int i = 0; i < 50; ++i) acc = acc + x;
+  for (int i = 0; i < 50; ++i) {
+    acc = acc + x;
+  }
   p.set_objective(acc);
 
-  cuminlp::dag::PrintOptions options;
+  cuminlp::model::PrintOptions options;
   options.max_infix_ops = 10;
   REQUIRE(render(p, options).find("too large to render") != std::string::npos);
 
@@ -394,10 +399,10 @@ TEST_CASE("print_problem's nodes style lists every node once", "[dag][print]")
   // `shared` feeds both roots: the whole point of the nodes style is that a
   // shared subexpression appears once, where infix would duplicate it.
   p.set_objective(shared + shared);
-  p.add_constraint(shared, cuminlp::dag::Cmp::LE, 1.0);
+  p.add_constraint(shared, cuminlp::model::Cmp::LE, 1.0);
 
-  cuminlp::dag::PrintOptions options;
-  options.style = cuminlp::dag::PrintStyle::Nodes;
+  cuminlp::model::PrintOptions options;
+  options.style = cuminlp::model::PrintStyle::Nodes;
   std::string const text = render(p, options);
 
   REQUIRE(text.find("nodes (" + std::to_string(p.graph.nodes.size()) + ")")
@@ -418,7 +423,7 @@ TEST_CASE("print_problem prints an unset objective rather than reading past "
   // printing it is exactly what you want to do to find out why.
   REQUIRE(render(p, {}).find("<unset>") != std::string::npos);
 
-  cuminlp::dag::PrintOptions options;
-  options.style = cuminlp::dag::PrintStyle::Nodes;
+  cuminlp::model::PrintOptions options;
+  options.style = cuminlp::model::PrintStyle::Nodes;
   REQUIRE(render(p, options).find("<unset>") != std::string::npos);
 }

@@ -8,14 +8,13 @@
 // legacy fixed-Rosenbrock driver retired there is exactly one derived class,
 // so that state moved into SearchDriver itself and its accessors became
 // SolveOutcome's fields (design/MODULE_REFACTOR.md §6.1). No backend is
-// included here: the application chooses one (e.g. graph_replay.cuh's
+// included here: the application chooses one (e.g. backend/graph/factory.cuh's
 // GraphBackendFactory) and hands it to the driver.
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/config/run_spec.hpp"
 #include "cuminlp/errors.hpp"
-#include "cuminlp/host_budget.hpp"
-#include "cuminlp/policy_catalogue.hpp"
-#include "cuminlp/search.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/cache.hpp"
 #include "cuminlp/search/driver.hpp"

@@ -11,13 +11,13 @@
  * For everything else, reading the expression back is the only check there is,
  * so this header exists to make that possible without a debugger.
  *
- * Deliberately core rather than part of the GAMS frontend: it renders
- * dag::Problem, which knows nothing about GAMS. Variable names are an optional
- * caller-supplied side table (ParsedModel::var_names is indexed to match), so
- * a hand-built Problem can be dumped just as well as a parsed one.
+ * Deliberately part of `model` rather than the GAMS frontend: it renders
+ * model::Problem, which knows nothing about GAMS. Variable names are an
+ * optional caller-supplied side table (ParsedModel::var_names is indexed to
+ * match), so a hand-built Problem can be dumped just as well as a parsed one.
  *
- * Host-only and header-only: no CUDA, no device code, matching dag.hpp's own
- * "a malformed Problem must be diagnosable without a GPU" stance.
+ * Host-only and header-only: no CUDA, no device code, matching model/dag.hpp's
+ * own "a malformed Problem must be diagnosable without a GPU" stance.
  */
 
 #include <cstddef>
@@ -25,9 +25,10 @@
 #include <string>
 #include <vector>
 
-#include "cuminlp/dag.hpp"
+#include "cuminlp/model/dag.hpp"
+#include "cuminlp/model/problem.hpp"
 
-namespace cuminlp::dag
+namespace cuminlp::model
 {
 
 /// How much of the DAG to render.
@@ -130,10 +131,6 @@ inline auto cmp_name(Cmp cmp) -> char const*
   return "?";
 }
 
-// Not `detail`: graph_replay.cuh is also inside cuminlp::dag and calls
-// `detail::check` unqualified, expecting to find cuminlp::detail. A
-// cuminlp::dag::detail would hide it and break every CUDA translation unit
-// that includes both.
 namespace print_detail
 {
 
@@ -323,4 +320,4 @@ void print_problem(std::ostream& os,
   }
 }
 
-}  // namespace cuminlp::dag
+}  // namespace cuminlp::model

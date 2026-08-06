@@ -2,78 +2,19 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <vector>
 
 #include "cuminlp/backend/cost_model.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/dag.hpp"
+#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/saturating_arith.hpp"
 
-// Split out of graph_replay.cuh: these functions are plain templated C++ over
-// Problem<T>/FanOutSpec, with no CUDA type or kernel among them, but
-// graph_replay.cuh also holds real __global__/__device__ kernels and
-// <cub/cub.cuh>, so it cannot be #included by a host-only .cpp translation
-// unit (a plain host compiler doesn't know what __global__ means). Moving
-// them here lets policy_catalogue.hpp's resolver reuse the exact scan
-// graph_replay.cuh's own auto-fitting used, from a test target that needs no
-// GPU.
-//
-// The shape enumeration below is now generic over a
-// backend::RegionCostModel rather than over a value type and a buffer count
-// (design/MODULE_REFACTOR.md §5.5): what a region costs is the backend's
-// answer, and asking for it as four coefficients is what lets this scan run
-// against hand-written numbers in a host-only test. The graph backend's own
-// coefficients live in backend/graph/cost.hpp.
-namespace cuminlp::dag
+// The shape-fitting scan config/resolve.hpp's two-phase fit runs, moved out
+// of the CUDA-graph backend (design/MODULE_REFACTOR.md §5.5, §11): these
+// functions are plain templated C++ over counts and a backend::RegionCostModel,
+// with no CUDA type or kernel among them, so a host-only resolver test can
+// exercise the exact scan a live backend would run without a GPU. The graph
+// backend's own coefficients live in backend/graph/cost.hpp.
+namespace cuminlp::config
 {
-
-/**
- * @brief Number of DAG nodes that will actually get a device buffer.
- *
- * Not simply "every non-Const node": GraphBuilder allocates lazily from the
- * objective and constraint roots (add_expression -> ensure_node), so a node
- * no root reaches never allocates. Const nodes never allocate either -- their
- * payload is consumed by value at the use site (see wire_binary).
- *
- * Counting all non-Const nodes instead would *over*-estimate, and an
- * over-estimate is not the safe direction here: it would make build() refuse
- * configurations that would in fact have fit. A parsed Problem can carry dead
- * nodes that a hand-built one would not.
- *
- * DAGNode ids are topologically ordered (every id in `.in` is < the node's own
- * id), so one reverse sweep suffices -- no recursion or worklist.
- */
-template<typename T>
-std::size_t buffer_node_count(const Problem<T>& problem)
-{
-  std::size_t const n = problem.graph.nodes.size();
-  std::vector<bool> reachable(n, false);
-
-  auto mark = [&](std::size_t id)
-  {
-    if (id < n) {
-      reachable[id] = true;
-    }
-  };
-  mark(problem.objective_root);
-  for (const auto& c : problem.constraints) {
-    mark(c.root_id);
-  }
-
-  std::size_t count = 0;
-  for (std::size_t i = n; i-- > 0;) {
-    if (!reachable[i]) {
-      continue;
-    }
-    for (std::size_t in_id : problem.graph.nodes[i].in) {
-      mark(in_id);
-    }
-    if (problem.graph.nodes[i].op != Op::Const) {
-      ++count;
-    }
-  }
-  return count;
-}
 
 /**
  * @brief The most device memory any Composition of at most `cap` slots can
@@ -123,7 +64,7 @@ inline std::size_t worst_composition_footprint(
     std::size_t n_integer,
     std::size_t n_continuous,
     const backend::RegionCostModel& cost,
-    const FanOutSpec& fan_out,
+    const region::FanOutSpec& fan_out,
     std::size_t sample_points)
 {
   std::size_t const integer_width =
@@ -134,16 +75,16 @@ inline std::size_t worst_composition_footprint(
   std::size_t worst = 0;
 
   for (std::size_t s = 1; s <= cap; ++s) {
-    widest = detail::saturating_mul(
-        widest,
-        s <= n_integer                    ? integer_width
-            : s <= n_integer + n_continuous ? fan_out.partition_num()
-                                            : std::size_t {2});
+    widest = detail::saturating_mul(widest,
+                                    s <= n_integer ? integer_width
+                                        : s <= n_integer + n_continuous
+                                        ? fan_out.partition_num()
+                                        : std::size_t {2});
     // No continuous slot in the first `s` of that ordering means the shape is
     // fully enumerable and pays for the exact graph too.
     bool const enumerable = s <= n_integer || n_continuous == 0;
-    worst = std::max(
-        worst, cost.bundle_bytes(widest, sample_points, enumerable));
+    worst =
+        std::max(worst, cost.bundle_bytes(widest, sample_points, enumerable));
 
     // The all-discrete shape is a separate maximum rather than a special case
     // of the one above: it is narrower whenever continuous slots exist, but
@@ -151,15 +92,14 @@ inline std::size_t worst_composition_footprint(
     if (s <= n_integer + n_binary) {
       discrete = detail::saturating_mul(
           discrete, s <= n_integer ? integer_width : std::size_t {2});
-      worst = std::max(worst,
-                       cost.bundle_bytes(discrete, sample_points, true));
+      worst = std::max(worst, cost.bundle_bytes(discrete, sample_points, true));
     }
   }
   return worst;
 }
 
 /**
- * @brief The widest --max-cycle-size whose graphs fit in `budget`, or 0 if
+ * @brief The widest --max-slots whose graphs fit in `budget`, or 0 if
  *        not even a single slot does.
  *
  * What the CLI uses instead of a hardcoded per-shape constant. A scan, since
@@ -180,7 +120,7 @@ inline std::size_t auto_max_cycle_size(std::size_t n_binary,
                                        std::size_t n_integer,
                                        std::size_t n_continuous,
                                        const backend::RegionCostModel& cost,
-                                       const FanOutSpec& fan_out,
+                                       const region::FanOutSpec& fan_out,
                                        std::size_t sample_points,
                                        std::size_t budget,
                                        std::size_t ceiling)
@@ -206,4 +146,4 @@ inline std::size_t auto_max_cycle_size(std::size_t n_binary,
   return best;
 }
 
-}  // namespace cuminlp::dag
+}  // namespace cuminlp::config

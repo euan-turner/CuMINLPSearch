@@ -3,8 +3,8 @@
 // GC, the dropped-floor gating of the epilogue's claims, and the budget
 // arithmetic that sizes a compaction.
 //
-// None of it needs a GPU. search.hpp deliberately includes only
-// cuinterval/interval.h, and host_budget.hpp is arithmetic on counts and
+// None of it needs a GPU. search/frontier.hpp deliberately includes only
+// cuinterval/interval.h, and search/budget.hpp is arithmetic on counts and
 // bounds -- the backend-side wiring is the only part that
 // cannot be reached from a plain host translation unit. See TEST_EXTENSION.md.
 #include <algorithm>
@@ -14,25 +14,26 @@
 #include <string>
 #include <vector>
 
-#include "cuminlp/host_budget.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
-#include "cuminlp/search.hpp"
+#include "cuminlp/search/budget.hpp"
+#include "cuminlp/search/epilogue.hpp"
+#include "cuminlp/search/frontier.hpp"
+#include "cuminlp/search/history.hpp"
 // Not used below: included so a plain host compiler proves the search
 // layer names no CUDA type (design/MODULE_REFACTOR.md invariant 18, §3.1).
 #include "cuminlp/search/driver.hpp"
 
-using cuminlp::compact_keep_count;
-using cuminlp::DropAccounting;
-using cuminlp::FinalBounds;
-using cuminlp::finalise_bounds;
-using cuminlp::over_host_budget;
-using cuminlp::StopReason;
-using cuminlp::search::Node;
+using cuminlp::search::compact_keep_count;
+using cuminlp::search::DropAccounting;
+using cuminlp::search::FinalBounds;
+using cuminlp::search::finalise_bounds;
 using cuminlp::search::IntervalHistory;
 using cuminlp::search::IntervalPQueue;
+using cuminlp::search::Node;
+using cuminlp::search::over_host_budget;
+using cuminlp::search::StopReason;
 
 namespace
 {

@@ -3,10 +3,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <string>
-#include <limits>
 #include <span>
-#include <utility>
+#include <string>
 #include <vector>
 
 // Only field access (.lb/.ub) on cu::interval<T> below, never interval
@@ -17,130 +15,20 @@
 // host-testable without a CUDA toolchain (see TEST_EXTENSION.md).
 #include <cuinterval/interval.h>
 
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/slot_decode.hpp"
+#include "cuminlp/errors.hpp"
+#include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/policy.hpp"
+#include "cuminlp/region/composition.hpp"
+#include "cuminlp/region/fan_out.hpp"
+#include "cuminlp/region/materialise.hpp"
+#include "cuminlp/search/history.hpp"
 
 namespace cuminlp::search
 {
 
-// ```interval``` from ```interval.h``` is used to represent a box in one
-// dimension whenever a multi-dimensional box is required, store them as a
-// vector.
-
-// A history entry is only ever read back as the direct parent of a dequeued
-// node (Node::materialise's `history.intervals[pidx]` lookup),
-// so an entry with no pending children is garbage the moment its last child
-// leaves the queue. Refcounting says exactly when that is: an entry's count is
-// the construction reference enqueue() hands back, plus one per pending node
-// naming it as pidx. See design/BOUNDED_FRONTIER.md §6.
-template<typename T>
-struct IntervalHistory
-{
-  std::vector<std::vector<cu::interval<T>>> intervals;
-
-  explicit IntervalHistory(std::size_t initial_size = 0)
-      : intervals(initial_size)
-      , refs_(initial_size, 0)
-      , live_bytes_(initial_size * entry_bytes(0))
-  {
-  }
-
-  // Appends an interval to the history, returning the slot holding it with one
-  // reference -- the "construction reference" -- held by the caller. The slot
-  // index is what Node entries derived from this box carry as
-  // their pidx.
-  //
-  // A slot freed by release() is reused here rather than growing the vector,
-  // so an index is only unique among *live* entries: pidx is no longer a
-  // monotone recency stamp, which costs operator<'s third tie-break (see
-  // there) and nothing else.
-  std::size_t enqueue(std::vector<cu::interval<T>> new_interval)
-  {
-    std::size_t const bytes = entry_bytes(new_interval.size());
-    if (!free_slots_.empty()) {
-      std::size_t const idx = free_slots_.back();
-      free_slots_.pop_back();
-      intervals[idx] = std::move(new_interval);
-      refs_[idx] = 1;
-      live_bytes_ += bytes;
-      return idx;
-    }
-    std::size_t const idx = intervals.size();
-    intervals.push_back(std::move(new_interval));
-    refs_.push_back(1);
-    live_bytes_ += bytes;
-    return idx;
-  }
-
-  // One more pending node names `idx` as its pidx.
-  void add_ref(std::size_t idx)
-  {
-    if (idx == kRootSlot) {
-      return;  // see release()
-    }
-    assert(idx < refs_.size() && "add_ref() on a slot that was never enqueued");
-    assert(refs_[idx] > 0 && "add_ref() on a freed slot");
-    ++refs_[idx];
-  }
-
-  // One fewer holder of `idx`. At zero references the box's memory is returned
-  // and the slot joins the free list.
-  //
-  // Slot 0 is the root sentinel -- materialise() answers pidx == 0 from
-  // root_box without ever looking the slot up -- so releasing it is a no-op and
-  // it never enters the free list. That keeps index 0 meaning "the root" for
-  // every node, which slot reuse would otherwise quietly break.
-  void release(std::size_t idx)
-  {
-    if (idx == kRootSlot) {
-      return;
-    }
-    assert(idx < refs_.size() && "release() on a slot that was never enqueued");
-    assert(refs_[idx] > 0 && "release() on an already-freed slot");
-    if (--refs_[idx] > 0) {
-      return;
-    }
-    live_bytes_ -= entry_bytes(intervals[idx].size());
-    // Not clear(): that keeps the capacity, and the whole point is to hand the
-    // memory back.
-    std::vector<cu::interval<T>>().swap(intervals[idx]);
-    free_slots_.push_back(idx);
-  }
-
-  // Host bytes the live entries hold, for the driver's memory budget
-  // (design/BOUNDED_FRONTIER.md §3.3). Maintained incrementally rather than
-  // summed on demand, since it is read once per iteration.
-  std::size_t live_bytes() const { return live_bytes_; }
-
-  // Entries currently holding a box. Bounded by the number of distinct parents
-  // among the pending nodes once the driver releases what it dequeues.
-  std::size_t live_count() const
-  {
-    return intervals.size() - free_slots_.size();
-  }
-
-  std::size_t ref_count(std::size_t idx) const { return refs_[idx]; }
-
-private:
-  static constexpr std::size_t kRootSlot = 0;
-
-  // The box itself plus a fixed charge for the std::vector header holding it:
-  // an entry costs more than its elements, and at 200 variables the header is
-  // noise while at 2 it is not.
-  static constexpr std::size_t entry_bytes(std::size_t n_vars)
-  {
-    return n_vars * sizeof(cu::interval<T>)
-        + sizeof(std::vector<cu::interval<T>>);
-  }
-
-  std::vector<std::size_t> refs_;  // parallel to intervals
-  std::vector<std::size_t> free_slots_;
-  std::size_t live_bytes_ = 0;
-};
-
 /**
  * @brief SearchDriver's node type. CompositionPolicy is a pure function of a
- * node's box + variable kinds (see composition_policy.hpp), so `materialise`
+ * node's box + variable kinds (see policy/policy.hpp), so `materialise`
  * recovers the SlotAssignment that produced this interval by just
  * re-invoking the policy on the reconstructed parent box, rather than by
  * tracking which slots/variables were used at each node.
@@ -205,10 +93,10 @@ struct Node
   // `policy`/`var_kinds` must be the same ones used to produce this interval
   // on device, so re-invoking `policy.choose()` on the reconstructed parent
   // box deterministically recovers the same SlotAssignment (see
-  // CompositionPolicy's class comment), which is then decoded via the same
-  // cuminlp::decode::slot_bounds the device's apply_slots_kernel calls (see
-  // TEST_EXTENSION.md) -- host/device agreement is structural, not asserted
-  // by two hand-written implementations.
+  // CompositionPolicy's class comment), which is then decoded via
+  // region::materialise -- the same decode the device's apply_slots_kernel
+  // calls (see TEST_EXTENSION.md) -- so host/device agreement is structural,
+  // not asserted by two hand-written implementations.
   //
   // `root_box` is the true root domain (Problem::box_bounds) for pidx == 0:
   // there is no parent to look up at the root, so it can't be reconstructed
@@ -218,8 +106,8 @@ struct Node
   // themselves (see SearchDriver::solve()).
   void materialise(const IntervalHistory<T>& history,
                    std::vector<cu::interval<T>>& out,
-                   const cuminlp::CompositionPolicy<T>& policy,
-                   std::span<const dag::VarKind> var_kinds,
+                   const policy::CompositionPolicy<T>& policy,
+                   std::span<const model::VarKind> var_kinds,
                    std::span<const cu::interval<T>> root_box) const
   {
     if (pidx == 0) {
@@ -228,9 +116,8 @@ struct Node
     }
 
     const std::vector<cu::interval<T>>& parent = history.intervals[pidx];
-    out = parent;
 
-    cuminlp::SlotAssignment assignment = policy.choose(parent, var_kinds);
+    region::SlotAssignment assignment = policy.choose(parent, var_kinds);
 
     // The purity tripwire (see slot_count above). If the policy did not
     // return the same assignment it returned when this node was enqueued,
@@ -247,23 +134,7 @@ struct Node
             "on state that changes during a solve");
     }
 
-    // Decode sidx into a per-slot partition/enumeration index, mirroring
-    // the device's arithmetic digit extraction (slot_prefixes,
-    // composition_policy.hpp), then narrow each slot's dimension via the
-    // same decode the device's apply_slots_kernel uses. A composition is
-    // exactly its live slots now, so every slot here is real -- nothing to
-    // skip (design/MODULE_REFACTOR.md §4.6).
-    std::size_t idx = sidx;
-    for (std::size_t j = 0; j < assignment.composition.size(); ++j) {
-      SlotKind kind = assignment.composition[j];
-      std::size_t fan_out = cuminlp::slot_fan_out(kind, policy.fan_out());
-      std::size_t part = idx % fan_out;
-      idx /= fan_out;
-
-      std::size_t dim = assignment.var_ids[j];
-      cuminlp::decode::slot_bounds<T>(
-          kind, parent[dim], part, fan_out, out[dim]);
-    }
+    region::materialise<T>(parent, sidx, assignment, policy.fan_out(), out);
   }
 };
 
@@ -392,7 +263,10 @@ public:
   // process is already past. See design/BOUNDED_FRONTIER.md §3.3.
   std::size_t capacity() const { return elems.capacity(); }
 
-  std::size_t capacity_bytes() const { return elems.capacity() * sizeof(Element); }
+  std::size_t capacity_bytes() const
+  {
+    return elems.capacity() * sizeof(Element);
+  }
 
   // Keep the `n_keep` best elements under Element::operator<, hand each of the
   // others to `on_evict`, restore the heap invariant over the survivors, and

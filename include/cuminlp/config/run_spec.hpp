@@ -6,16 +6,20 @@
 #include <string_view>
 
 #include "cuminlp/backend/cost_model.hpp"
-#include "cuminlp/composition_policy.hpp"
-#include "cuminlp/host_budget.hpp"
-#include "cuminlp/policy_catalogue.hpp"
+#include "cuminlp/config/calibration.hpp"
+#include "cuminlp/config/catalogue.hpp"
+#include "cuminlp/config/problem_profile.hpp"
+#include "cuminlp/config/resolve.hpp"
+#include "cuminlp/policy/policy.hpp"
+#include "cuminlp/region/fan_out.hpp"
+#include "cuminlp/search/budget.hpp"
 
 // The single owner of a run's hyperparameters (design/MODULE_REFACTOR.md
 // §7.1), so the `PARAMS` line becomes a serialisation of one value instead
-// of an assembly of locals. `resolve()` here wraps today's
-// `cuminlp::resolve` (policy_catalogue.hpp, unchanged) with the
-// experimental-override folding and provenance bookkeeping that used to be
-// hand-written in solve.cu's `main` (design/MODULE_REFACTOR.md §7.2).
+// of an assembly of locals. `resolve()` here wraps `resolve_shape()`
+// (config/resolve.hpp) with the experimental-override folding and
+// provenance bookkeeping that used to be hand-written in solve.cu's `main`
+// (design/MODULE_REFACTOR.md §7.2).
 //
 // `RunSpec::calibration`, `budgets`, `frontier`, `iter_limit` and
 // `tolerance` are not filled in by `resolve()` -- they are not search-shape
@@ -49,9 +53,12 @@ enum class Provenance
 inline std::string_view to_string(Provenance source)
 {
   switch (source) {
-    case Provenance::Auto:        return "auto";
-    case Provenance::Named:       return "named";
-    case Provenance::Overridden:  return "overridden";
+    case Provenance::Auto:
+      return "auto";
+    case Provenance::Named:
+      return "named";
+    case Provenance::Overridden:
+      return "overridden";
   }
   return "?";
 }
@@ -78,14 +85,14 @@ struct OverrideSet
 struct RunSpec
 {
   // --- what the search does ---
-  PolicyKind policy_kind = PolicyKind::GreedyByKind;
-  FanOutSpec fan_out;
+  policy::PolicyKind policy_kind = policy::PolicyKind::GreedyByKind;
+  region::FanOutSpec fan_out;
   std::size_t max_slots = 1;
   std::size_t sample_points = 1;
 
   // --- what it may spend ---
   Budgets budgets;
-  FrontierPolicy frontier = FrontierPolicy::StopAtBudget;
+  search::FrontierPolicy frontier = search::FrontierPolicy::StopAtBudget;
   std::uint32_t iter_limit = 1000000;
   double tolerance = 1e-6;
 
@@ -120,7 +127,7 @@ inline RunSpec resolve(const PolicyProfile& policy,
                        Provenance base_source,
                        const OverrideSet& overrides = {})
 {
-  ResolvedShape const shape = cuminlp::resolve(policy, problem, calibration, cost);
+  ResolvedShape const shape = resolve_shape(policy, problem, calibration, cost);
 
   std::size_t const chosen_partition_num =
       overrides.partition_num.value_or(shape.partition_num);
@@ -138,11 +145,12 @@ inline RunSpec resolve(const PolicyProfile& policy,
   // fuller one it builds the policy against (see solve.cu's `solve`).
   return RunSpec {
       .policy_kind = policy.kind,
-      .fan_out = FanOutSpec {chosen_partition_num, chosen_enumerate_cap},
+      .fan_out =
+          region::FanOutSpec {chosen_partition_num, chosen_enumerate_cap},
       .max_slots = overrides.max_slots.value_or(shape.max_cycle_size),
       .sample_points = overrides.sample_points.value_or(shape.sample_points),
       .budgets = {},
-      .frontier = FrontierPolicy::StopAtBudget,
+      .frontier = search::FrontierPolicy::StopAtBudget,
       .iter_limit = 1000000,
       .tolerance = 1e-6,
       .calibration = calibration,
