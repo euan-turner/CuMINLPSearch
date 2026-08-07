@@ -10,20 +10,20 @@
 #include "cuminlp/config/calibration.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/fan_out.hpp"
 
 using cuminlp::ShapeMismatch;
 using cuminlp::model::VarKind;
-using cuminlp::policy::GreedyCompositionPolicy;
+using cuminlp::policy::GreedyEnumCompositionPolicy;
 using cuminlp::region::can_fathom_without_children;
 using cuminlp::region::Composition;
 using cuminlp::region::FanOutSpec;
 using cuminlp::region::is_fully_enumerable;
 using cuminlp::region::SlotKind;
 
-TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
+TEST_CASE("GreedyEnumCompositionPolicy fills binary slots before integer slots",
           "[composition_policy]")
 {
   // vars: 0 continuous [0,10], 1 binary [0,1], 2 integer [0,3] (4 values)
@@ -36,7 +36,7 @@ TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
       VarKind::Continuous, VarKind::Binary, VarKind::Integer};
 
   // PartitionNum = 4: the integer's domain size (4) is enumerable.
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
@@ -46,13 +46,13 @@ TEST_CASE("GreedyCompositionPolicy fills binary slots before integer slots",
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy partitions integer domains above PartitionNum",
+    "GreedyEnumCompositionPolicy partitions integer domains above PartitionNum",
     "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 100.0}};
   std::vector<VarKind> kinds = {VarKind::Integer};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 0);
@@ -60,7 +60,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy's enumerate_cap is independent of partition_num's "
+    "GreedyEnumCompositionPolicy's enumerate_cap is independent of partition_num's "
     "partition width",
     "[composition_policy]")
 {
@@ -70,7 +70,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> box = {{0.0, 39.0}, {0.0, 10.0}};
   std::vector<VarKind> kinds = {VarKind::Integer, VarKind::Continuous};
 
-  GreedyCompositionPolicy<double> policy {
+  GreedyEnumCompositionPolicy<double> policy {
       FanOutSpec {/*partition_num=*/4, /*enumerate_cap=*/50}};
   auto assignment = policy.choose(box, kinds);
 
@@ -88,32 +88,32 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy prefers the smallest remaining integer domain",
+    "GreedyEnumCompositionPolicy prefers the smallest remaining integer domain",
     "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 100.0}, {0.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Integer, VarKind::Integer};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {50}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {50}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
   CHECK(assignment.composition[0] == SlotKind::IntegerEnumerate);
 }
 
-TEST_CASE("GreedyCompositionPolicy prefers the widest continuous variable",
+TEST_CASE("GreedyEnumCompositionPolicy prefers the widest continuous variable",
           "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{0.0, 2.0}, {0.0, 10.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous, VarKind::Continuous};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 1);
 }
 
-TEST_CASE("GreedyCompositionPolicy spills into the next kind once one runs out",
+TEST_CASE("GreedyEnumCompositionPolicy spills into the next kind once one runs out",
           "[composition_policy]")
 {
   // Only one binary available, but two slots to fill; second slot should
@@ -121,7 +121,7 @@ TEST_CASE("GreedyCompositionPolicy spills into the next kind once one runs out",
   std::vector<cu::interval<double>> box = {{0.0, 1.0}, {0.0, 5.0}};
   std::vector<VarKind> kinds = {VarKind::Binary, VarKind::Integer};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.var_ids[0] == 0);
@@ -129,14 +129,14 @@ TEST_CASE("GreedyCompositionPolicy spills into the next kind once one runs out",
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy returns an empty composition once every "
+    "GreedyEnumCompositionPolicy returns an empty composition once every "
     "variable is resolved",
     "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {{3.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   // A composition is exactly its live slots (design/MODULE_REFACTOR.md §4.6):
@@ -146,7 +146,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy::choose is a pure function of (box, var_kinds)",
+    "GreedyEnumCompositionPolicy::choose is a pure function of (box, var_kinds)",
     "[composition_policy]")
 {
   std::vector<cu::interval<double>> box = {
@@ -157,7 +157,7 @@ TEST_CASE(
   std::vector<VarKind> kinds = {
       VarKind::Continuous, VarKind::Binary, VarKind::Integer};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto first = policy.choose(box, kinds);
   auto second = policy.choose(box, kinds);
 
@@ -166,7 +166,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "GreedyCompositionPolicy::choose throws ShapeMismatch on an empty "
+    "GreedyEnumCompositionPolicy::choose throws ShapeMismatch on an empty "
     "var_kinds span",
     "[composition_policy]")
 {
@@ -177,7 +177,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> box;
   std::vector<VarKind> kinds;
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   REQUIRE_THROWS_AS(policy.choose(box, kinds), ShapeMismatch);
 }
 
@@ -185,7 +185,7 @@ TEST_CASE(
     "integer_domain_size does not underflow on a sub-box with no integer point",
     "[composition_policy][3b]")
 {
-  using Policy = GreedyCompositionPolicy<double>;
+  using Policy = GreedyEnumCompositionPolicy<double>;
 
   // A normal, lattice-aligned domain still counts correctly.
   CHECK(Policy::integer_domain_size({0.0, 3.0}) == 4);
@@ -209,7 +209,7 @@ TEST_CASE(
   std::vector<cu::interval<double>> box = {{2.5, 2.9}};
   std::vector<VarKind> kinds = {VarKind::Integer};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(assignment.composition[0] == SlotKind::IntegerEnumerate);
@@ -249,7 +249,7 @@ TEST_CASE("can_fathom_without_children at live_count == 0 (fully resolved box)",
   std::vector<cu::interval<double>> box = {{3.0, 3.0}};
   std::vector<VarKind> kinds = {VarKind::Continuous};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto assignment = policy.choose(box, kinds);
 
   CHECK(can_fathom_without_children(0, assignment.composition));
@@ -340,7 +340,7 @@ TEST_CASE("A policy's fan_out is what its callers decode against",
   // The reason FanOutSpec lives on the policy: Node::materialise
   // reads it off the same object it calls choose() on, so the widths used to
   // encode a node's sidx and to decode it cannot come apart.
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4, 50}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4, 50}};
   CHECK(policy.fan_out().partition_num() == 4);
   CHECK(policy.fan_out().enumerate_cap() == 50);
 }
@@ -353,7 +353,7 @@ TEST_CASE("choose reports the number of slots it filled, per box",
   // Same policy, different boxes -> different slot counts.
   std::vector<VarKind> kinds = {
       VarKind::Binary, VarKind::Binary, VarKind::Binary};
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
 
   std::vector<cu::interval<double>> all_live = {
       {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}};
@@ -377,7 +377,7 @@ TEST_CASE("max_cycle_size caps the slots a policy fills",
       {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}};
   std::vector<VarKind> kinds(5, VarKind::Binary);
 
-  GreedyCompositionPolicy<double> policy {
+  GreedyEnumCompositionPolicy<double> policy {
       FanOutSpec {4}, cuminlp::config::SearchCalibration {.max_cycle_size = 3}};
   auto const assignment = policy.choose(box, kinds);
 
@@ -394,25 +394,25 @@ TEST_CASE("A policy cannot be capped above kMaxSlots",
 {
   // Asking for more slots than the search cap allows is a configuration
   // error, not something to silently clamp.
-  CHECK_THROWS_AS((GreedyCompositionPolicy<double> {
+  CHECK_THROWS_AS((GreedyEnumCompositionPolicy<double> {
                       FanOutSpec {4},
                       cuminlp::config::SearchCalibration {
                           .max_cycle_size = cuminlp::config::kMaxSlots + 1}}),
                   cuminlp::InvalidConfiguration);
 
   // Unset (0) means "the full search cap".
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   CHECK(policy.max_cycle_size() == cuminlp::config::kMaxSlots);
 }
 
 // --- The var_ids contract (§4.5) --------------------------------------------
 //
 // choose() must return pairwise-distinct var_ids, each indexing a live
-// (lb < ub) dimension -- GreedyCompositionPolicy satisfies this by
+// (lb < ub) dimension -- GreedyEnumCompositionPolicy satisfies this by
 // construction; assignment_is_distinct_and_live is the debug assertion
 // SearchDriver checks it with.
 
-TEST_CASE("GreedyCompositionPolicy always satisfies the distinct-and-live "
+TEST_CASE("GreedyEnumCompositionPolicy always satisfies the distinct-and-live "
           "var_ids contract",
           "[composition_policy][4.5]")
 {
@@ -423,7 +423,7 @@ TEST_CASE("GreedyCompositionPolicy always satisfies the distinct-and-live "
                                 VarKind::Integer,
                                 VarKind::Continuous};
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
   auto const assignment = policy.choose(box, kinds);
 
   CHECK(cuminlp::policy::assignment_is_distinct_and_live<double>(assignment,

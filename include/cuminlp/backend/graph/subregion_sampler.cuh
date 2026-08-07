@@ -93,7 +93,7 @@ __device__ __forceinline__ T sample_from_interval(T lb,
 // witness. ceil/floor (rather than assuming lb/ub are themselves already
 // integers) is what keeps this correct even for a sub-box produced by
 // partitioning an integer variable whose domain was too wide to enumerate
-// outright (see GreedyCompositionPolicy) -- IntegerPartition reuses the same
+// outright (see GreedyEnumCompositionPolicy) -- IntegerPartition reuses the same
 // linear-width formula as Continuous, so its sub-box boundaries generally
 // land off the integer lattice.
 template<typename T>

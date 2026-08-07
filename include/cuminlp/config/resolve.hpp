@@ -97,9 +97,16 @@ inline ResolvedShape resolve_shape(const PolicyProfile& profile,
                                    const SearchCalibration& calibration,
                                    const backend::RegionCostModel& cost)
 {
-  std::size_t const target = std::min(
-      problem.num_binary + problem.num_integer + problem.num_continuous,
-      kMaxSlots);
+  // Bounds how many slots the fits below will ever try. Normally the
+  // problem's own live-variable count (capped at kMaxSlots); a
+  // CycleRule::Pin instead makes that bound the pin itself, so every branch
+  // below -- including the have-budget ones, which otherwise never consult
+  // profile.cycle at all -- naturally settles on exactly that many slots
+  // rather than auto-fitting as many as the budget affords.
+  std::size_t const target = profile.cycle.mode == CycleRule::Mode::Pin
+      ? profile.cycle.pinned
+      : std::min(problem.num_binary + problem.num_integer + problem.num_continuous,
+                 kMaxSlots);
 
   bool const ec_follows_partition =
       profile.enumerate.mode == EnumerateRule::Mode::FollowPartition;

@@ -51,7 +51,7 @@ ProblemProfile profile_problem(const model::Problem<T>& problem)
       case model::VarKind::Integer: {
         ++out.num_integer;
         // Number of integers in [ceil(lb), floor(ub)] -- same snapping as
-        // GreedyCompositionPolicy::integer_domain_size, and 0 (not an
+        // GreedyEnumCompositionPolicy::integer_domain_size, and 0 (not an
         // underflowed huge size_t) when the box has no integer point at all.
         T const lo = std::ceil(problem.box_bounds[i].lb);
         T const hi = std::floor(problem.box_bounds[i].ub);

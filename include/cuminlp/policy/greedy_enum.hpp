@@ -13,6 +13,7 @@
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
 #include "cuminlp/policy/policy.hpp"
+#include "cuminlp/policy/width_first.hpp"
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"
 
@@ -23,7 +24,7 @@ namespace cuminlp::policy
 // non-degenerate, lb < ub) variables, binaries first, then integers, then
 // continuous.
 template<typename T>
-class GreedyCompositionPolicy : public CompositionPolicy<T>
+class GreedyEnumCompositionPolicy : public CompositionPolicy<T>
 {
 public:
   using CompositionPolicy<T>::CompositionPolicy;
@@ -167,9 +168,8 @@ private:
 /**
  * @brief Construct the CompositionPolicy subclass a PolicyKind names.
  *
- * Today GreedyByKind is the only value, so this is a one-case switch -- but
- * the switch, not an if, is deliberate: adding a second PolicyKind without a
- * matching case here is a compiler warning away from being caught.
+ * A switch, not an if-chain, is deliberate: adding a PolicyKind without a
+ * matching case here is a compiler warning (-Wswitch) away from being caught.
  */
 template<typename T>
 std::unique_ptr<CompositionPolicy<T>> make_policy(
@@ -178,8 +178,10 @@ std::unique_ptr<CompositionPolicy<T>> make_policy(
     config::SearchCalibration calibration)
 {
   switch (kind) {
-    case PolicyKind::GreedyByKind:
-      return std::make_unique<GreedyCompositionPolicy<T>>(fan_out, calibration);
+    case PolicyKind::GreedyEnumerate:
+      return std::make_unique<GreedyEnumCompositionPolicy<T>>(fan_out, calibration);
+    case PolicyKind::WidthFirst:
+      return std::make_unique<WidthFirstCompositionPolicy<T>>(fan_out, calibration);
   }
   throw InvalidConfiguration("unknown PolicyKind");
 }

@@ -18,7 +18,8 @@ namespace cuminlp::policy
 /// Which CompositionPolicy subclass a profile names.
 enum class PolicyKind
 {
-  GreedyByKind
+  GreedyEnumerate, // prioritises enumerating discrete variables first
+  WidthFirst,    // prioritises splitting the largest continuous domains first
 };
 
 // Decides, for a search-tree node's current box, which variables to act on
@@ -33,7 +34,7 @@ enum class PolicyKind
 //
 // `choose()` must return an assignment whose `var_ids` are pairwise distinct
 // and each index a live (lb < ub) dimension
-// -- GreedyCompositionPolicy satisfies this by construction (fill_binary/
+// -- GreedyEnumCompositionPolicy satisfies this by construction (fill_binary/
 // fill_integer/fill_continuous each visit distinct vids and partition by
 // VarKind), and SearchDriver asserts it in debug builds.
 template<typename T>
@@ -79,7 +80,7 @@ private:
 
 // True iff every var_id in `assignment` is unique and indexes a live
 // (lb < ub) dimension of `box` -- CompositionPolicy's contract (§4.5), a
-// debug-only check (see SearchDriver::solve()). GreedyCompositionPolicy
+// debug-only check (see SearchDriver::solve()). GreedyEnumCompositionPolicy
 // satisfies it by construction; nothing asserted it before this.
 template<typename T>
 bool assignment_is_distinct_and_live(const region::SlotAssignment& assignment,

@@ -14,7 +14,7 @@
 #include "cuminlp/config/run_spec.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/cache.hpp"
 #include "cuminlp/search/driver.hpp"

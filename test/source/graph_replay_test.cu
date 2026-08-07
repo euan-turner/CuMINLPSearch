@@ -525,7 +525,7 @@ TEST_CASE("auto_max_cycle_size charges the widest composition the search can "
           "[graph_replay][5][config]")
 {
   // batch.gms in miniature: binaries fill the root's slots at fan-out 2, so a
-  // scan charging slots in the order GreedyCompositionPolicy fills them sees
+  // scan charging slots in the order GreedyEnumCompositionPolicy fills them sees
   // 2^cap and certifies a huge cap. But binaries *resolve* as the search
   // descends, and a descendant fills those same slots with continuous
   // variables at partition_num each -- on batch.gms itself, 2^14 regions at

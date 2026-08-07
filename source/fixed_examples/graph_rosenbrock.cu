@@ -9,7 +9,7 @@
 #include "cuminlp/config/problem_profile.hpp"
 #include "cuminlp/example_main.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
 #include "cuminlp/search/driver.hpp"
@@ -58,7 +58,7 @@ auto main() -> int
         Problem<double> problem = make_rosenbrock(DIMS);
 
         auto policy =
-            std::make_shared<cuminlp::policy::GreedyCompositionPolicy<double>>(
+            std::make_shared<cuminlp::policy::GreedyEnumCompositionPolicy<double>>(
                 cuminlp::region::FanOutSpec {PARTITION_NUM},
                 cuminlp::config::SearchCalibration {.max_cycle_size =
                                                         CYCLE_SIZE});

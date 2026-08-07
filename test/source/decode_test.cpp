@@ -14,14 +14,14 @@
 #include <cuinterval/interval.h>
 
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/search/frontier.hpp"
 #include "cuminlp/search/history.hpp"
 
 using cuminlp::model::VarKind;
-using cuminlp::policy::GreedyCompositionPolicy;
+using cuminlp::policy::GreedyEnumCompositionPolicy;
 using cuminlp::region::Composition;
 using cuminlp::region::FanOutSpec;
 using cuminlp::region::SlotKind;
@@ -164,7 +164,7 @@ TEST_CASE("Node::materialise at pidx == 0 returns the given root box",
   std::vector<cu::interval<double>> root_box = {{-1.0, 1.0}};
 
   IntervalHistory<double> history;
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
 
   Node<double> node {.sidx = 0, .pidx = 0, .depth = 0, .lb = 0.0};
 
@@ -190,7 +190,7 @@ TEST_CASE(
   std::size_t parent_idx =
       history.enqueue({{0.0, 8.0}});  // index 1: the real parent box
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
 
   // The policy partitions the one continuous variable 4-ways; sidx == 2 is
   // the third quarter: [4.0, 6.0].
@@ -226,7 +226,7 @@ TEST_CASE(
   history.enqueue({});
   std::size_t parent_idx = history.enqueue({{0.0, 8.0}, {0.0, 8.0}});
 
-  GreedyCompositionPolicy<double> policy {FanOutSpec {4}};
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
 
   // The policy fills 2 slots for this box; claim 1.
   Node<double> node {

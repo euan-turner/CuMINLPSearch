@@ -10,7 +10,7 @@
 #include "cuminlp/errors.hpp"
 #include "cuminlp/gams.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"
 
@@ -473,11 +473,11 @@ TEST_CASE("nvs09 (the discrete row's evidence) selects discrete",
 // ---------------------------------------------------------------------------
 
 TEST_CASE(
-    "make_policy<GreedyByKind> constructs a working GreedyCompositionPolicy",
+    "make_policy<GreedyEnumerate> constructs a working GreedyEnumCompositionPolicy",
     "[policy_catalogue]")
 {
   auto policy = cuminlp::policy::make_policy<double>(
-      PolicyKind::GreedyByKind, FanOutSpec {4}, SearchCalibration {});
+      PolicyKind::GreedyEnumerate, FanOutSpec {4}, SearchCalibration {});
   REQUIRE(policy != nullptr);
 
   std::vector<cu::interval<double>> box = {{0.0, 1.0}};

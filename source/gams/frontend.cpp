@@ -1177,7 +1177,7 @@ public:
         // A binary narrowed by e.g. `.up = 0` no longer has the exact [0,1]
         // box Problem::validate() requires of VarKind::Binary specifically.
         // Integer with a domain of size 1 is the same search behaviour --
-        // GreedyCompositionPolicy::fill_integer handles it via
+        // GreedyEnumCompositionPolicy::fill_integer handles it via
         // integer_domain_size(), and unresolved() skips a degenerate box
         // entirely -- so nothing is lost but BinaryEnumerate's fixed fan-out
         // of 2, which is meaningless for a domain that isn't size 2 anyway.

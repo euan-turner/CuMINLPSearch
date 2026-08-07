@@ -71,20 +71,26 @@ struct PolicyProfile
   bool provisional;  ///< no measurement behind it yet
 };
 
-/// Ceiling on partition_num's own fit: a guard against absurdity, not
-/// a measured limit -- source/power_series.cu bisects one variable 10,000
-/// ways, so the machinery tolerates far more than this. Numerically equal to
-/// kMaxSlots (config/calibration.hpp) today, but a distinct constant: one
-/// bounds a slot's fan-out, the other bounds how many slots exist.
-inline constexpr std::size_t partition_ceiling = 64;
+/// Ceiling on partition_num's own fit: a guard against absurdity, not a
+/// measured limit -- source/power_series.cu bisects one variable 10,000
+/// ways, so the machinery tolerates far more than this. Used to sit at
+/// kMaxSlots (64), but that was low enough to actually bind: a live GPU's
+/// true single-slot budget fit landed well past a million on every model
+/// probed for width-first (circle.gms 889167, alkyl.gms 1039955, ex14_1_1.gms
+/// 1352789), and mixed-all-small was silently capped at 64 rather than its
+/// true fit (96/110) on two of those same models. Raised past every observed
+/// true limit; the scan itself stays cheap regardless (multi-slot rows still
+/// break out within a couple hundred iterations, their product blowing the
+/// budget long before the ceiling matters).
+inline constexpr std::size_t partition_ceiling = 2000000;
 
 /// The roster: concrete, inspectable instances of the rule automatic
 /// selection will eventually be. Order matches the table in
 /// design/POLICY_SELECTION.md and is what select_policy's classification
 /// indexes into by position.
-inline constexpr std::array<PolicyProfile, 5> policy_roster = {{
+inline constexpr std::array<PolicyProfile, 6> policy_roster = {{
     {"all-binary",
-     policy::PolicyKind::GreedyByKind,
+     policy::PolicyKind::GreedyEnumerate,
      {PartitionRule::Mode::Pin, 2},
      {EnumerateRule::Mode::Pin, 0, 2},
      1,
@@ -92,7 +98,7 @@ inline constexpr std::array<PolicyProfile, 5> policy_roster = {{
      "autocorr_bern20_03.cu",
      false},
     {"discrete",
-     policy::PolicyKind::GreedyByKind,
+     policy::PolicyKind::GreedyEnumerate,
      {PartitionRule::Mode::FitToCoverage, 0},
      {EnumerateRule::Mode::CoverDomains, 16, 0},
      5,
@@ -100,7 +106,7 @@ inline constexpr std::array<PolicyProfile, 5> policy_roster = {{
      "nvs09.cu, RUNTIME_SHAPE.md",
      false},
     {"mixed-binary",
-     policy::PolicyKind::GreedyByKind,
+     policy::PolicyKind::GreedyEnumerate,
      {PartitionRule::Mode::FitToCoverage, 0},
      {EnumerateRule::Mode::FollowPartition, 0, 0},
      5,
@@ -108,7 +114,7 @@ inline constexpr std::array<PolicyProfile, 5> policy_roster = {{
      "no size split has been measured",
      true},
     {"mixed-all-small",
-     policy::PolicyKind::GreedyByKind,
+     policy::PolicyKind::GreedyEnumerate,
      {PartitionRule::Mode::FitToCoverage, 0},
      {EnumerateRule::Mode::CoverDomains, 16, 0},
      10,
@@ -116,12 +122,30 @@ inline constexpr std::array<PolicyProfile, 5> policy_roster = {{
      "ex8_6_2 (continuous-only)",
      false},
     {"mixed-all-large",
-     policy::PolicyKind::GreedyByKind,
+     policy::PolicyKind::GreedyEnumerate,
      {PartitionRule::Mode::FitToCoverage, 0},
      {EnumerateRule::Mode::CoverDomains, 16, 0},
      3,
      {CycleRule::Mode::FitDevice, 4},
      "sample_points=3 is a guess, not a measurement",
+     true},
+    // Named-only: select_policy never returns this row (it classifies by
+    // position into policy_roster[0..4], design/POLICY_SELECTION.md), so
+    // WidthFirstCompositionPolicy is reachable only via --policy=width-first,
+    // never automatically. cycle pins to 1: the policy's whole point is
+    // spending every cycle on the single widest live variable, not splitting
+    // fan-out across several at once -- CycleRule::Pin actually enforces that
+    // now (config/resolve.hpp's `target`), where it used to be a no-op
+    // whenever a device budget was available. FitToCoverage then finds the
+    // widest partition_num (up to partition_ceiling) that single slot can
+    // afford, rather than a hand-picked constant.
+    {"width-first",
+     policy::PolicyKind::WidthFirst,
+     {PartitionRule::Mode::FitToCoverage, 0},
+     {EnumerateRule::Mode::CoverDomains, 16, 0},
+     10,
+     {CycleRule::Mode::Pin, 1},
+     "no size split has been measured",
      true},
 }};
 

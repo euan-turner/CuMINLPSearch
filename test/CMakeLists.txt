@@ -50,7 +50,7 @@ target_include_directories(
 )
 catch_discover_tests(cuminlp_gams_test)
 
-# Host-only: GreedyCompositionPolicy is plain templated C++ with no device
+# Host-only: GreedyEnumCompositionPolicy is plain templated C++ with no device
 # code, so this doesn't need a CUDA device to run.
 add_executable(cuminlp_composition_policy_test source/composition_policy_test.cpp)
 target_link_libraries(

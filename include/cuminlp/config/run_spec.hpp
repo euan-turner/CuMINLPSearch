@@ -85,7 +85,7 @@ struct OverrideSet
 struct RunSpec
 {
   // --- what the search does ---
-  policy::PolicyKind policy_kind = policy::PolicyKind::GreedyByKind;
+  policy::PolicyKind policy_kind = policy::PolicyKind::GreedyEnumerate;
   region::FanOutSpec fan_out;
   std::size_t max_slots = 1;
   std::size_t sample_points = 1;

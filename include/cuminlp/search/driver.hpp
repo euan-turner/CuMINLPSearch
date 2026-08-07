@@ -18,7 +18,7 @@
 #include "cuminlp/backend/backend.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"

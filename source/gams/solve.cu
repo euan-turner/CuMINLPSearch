@@ -44,7 +44,7 @@
 #include "cuminlp/gams.hpp"
 #include "cuminlp/model/print.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "cuminlp/policy/greedy.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
