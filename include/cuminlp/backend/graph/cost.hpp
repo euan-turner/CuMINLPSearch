@@ -98,4 +98,51 @@ RegionCostModel cost_model_for(const model::Problem<T>& problem)
   return cost_model_for<T>(buffer_node_count(problem));
 }
 
+/**
+ * @brief The bisection budget `B` a device budget affords, closed form
+ *        (design/BUDGETED_PARTITION.md §3.2).
+ *
+ * Under `BisectionBudgetCompositionPolicy`, `N = 2^B` regions is fixed for
+ * the *whole solve* -- every composition costs exactly the same, so there is
+ * one number to fit rather than config::auto_max_cycle_size's scan over an
+ * ordered factorisation `partition_num^k`. `per_region` is what one region's
+ * sampler + bounder + enumerator cost together
+ * (`RegionCostModel::bundle_bytes` at `n_regions = 1`, `enumerable = true`,
+ * since a single-region bundle already includes the enumerator's share) and
+ * `B` is the largest power of two that many `per_region`s fit in `budget`.
+ *
+ * Returns 0 when even one region's three roles do not fit -- the run then
+ * proceeds to `GraphReplay::build`'s own out-of-memory report rather than
+ * refusing to start, the same fallback `resolve_shape`'s `max_cycle_size`
+ * floor uses.
+ */
+template<typename T>
+std::size_t bisection_budget(std::size_t n_buffers,
+                             std::size_t sample_points,
+                             std::size_t budget)
+{
+  RegionCostModel const cost = cost_model_for<T>(n_buffers);
+  std::size_t const per_region =
+      cost.bundle_bytes(1, sample_points, /*enumerable=*/true);
+  if (per_region == 0 || budget < per_region) {
+    return 0;
+  }
+  std::size_t ratio = budget / per_region;
+  std::size_t b = 0;
+  while (ratio > 1) {
+    ratio >>= 1;
+    ++b;
+  }
+  return b;
+}
+
+/// @copydoc bisection_budget(std::size_t, std::size_t, std::size_t)
+template<typename T>
+std::size_t bisection_budget(const model::Problem<T>& problem,
+                             std::size_t sample_points,
+                             std::size_t budget)
+{
+  return bisection_budget<T>(buffer_node_count(problem), sample_points, budget);
+}
+
 }  // namespace cuminlp::backend::graph

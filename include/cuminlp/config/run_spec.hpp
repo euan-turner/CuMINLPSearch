@@ -89,6 +89,12 @@ struct RunSpec
   region::FanOutSpec fan_out;
   std::size_t max_slots = 1;
   std::size_t sample_points = 1;
+  // BisectionBudgetCompositionPolicy's B (design/BUDGETED_PARTITION.md);
+  // meaningless for GreedyEnumerate/WidthFirst, which read `fan_out`
+  // instead. Populated directly by the CLI's own --bisection-budget path
+  // (§11), not by `resolve()` -- BisectionBudget never appears in
+  // `policy_roster` and has no shape to fit against it.
+  std::size_t bisection_budget = 0;
 
   // --- what it may spend ---
   Budgets budgets;

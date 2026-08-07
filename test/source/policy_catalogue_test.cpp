@@ -477,7 +477,7 @@ TEST_CASE(
     "[policy_catalogue]")
 {
   auto policy = cuminlp::policy::make_policy<double>(
-      PolicyKind::GreedyEnumerate, FanOutSpec {4}, SearchCalibration {});
+      PolicyKind::GreedyEnumerate, FanOutSpec {4}, 0, SearchCalibration {});
   REQUIRE(policy != nullptr);
 
   std::vector<cu::interval<double>> box = {{0.0, 1.0}};

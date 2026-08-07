@@ -144,14 +144,13 @@ public:
     std::streamsize const prev_precision = std::cout.precision(17);
 
     std::span<const model::VarKind> const var_kinds = problem.var_kinds;
-    region::FanOutSpec const& fan_out = policy_->fan_out();
 
     // Roles per Composition, built on first use and evicted under pressure
     // -- see search/cache.hpp for why that is the search layer's decision
     // and not the backend's.
     search::BackendCache<T> cache(backend_,
                                   problem,
-                                  fan_out,
+                                  *policy_,
                                   budget_bytes_,
                                   sample_points_,
                                   report_build_,
@@ -180,7 +179,7 @@ public:
         .lb = GLB_,
         // The root has no parent to decode against, so materialise() returns
         // root_box directly and never reaches the tripwire.
-        .slot_count = 0,
+        .assignment_hash = 0,
     });
 
     bool converged = false;
@@ -191,11 +190,17 @@ public:
     // than reported per-event -- see report/observer.hpp's on_telemetry for
     // why there is no per-prune event to raise instead.
     std::uint64_t pruned_dominated = 0;
+    std::uint64_t pruned_duplicate = 0;
     std::uint64_t bounded = 0;
     std::uint64_t sampled = 0;
     std::uint64_t enqueued = 0;
     std::uint64_t fathomed = 0;
     std::uint64_t fathomed_points = 0;
+    // §6.2: a witness that failed witness_is_admissible, so it was rejected
+    // rather than folded into GUB_. Zero across a corpus says the enumerate
+    // clamp's fractional-witness hazard isn't reachable in practice; nonzero
+    // says it is and the clamp needs the fix §6.2 describes.
+    std::uint64_t witness_rejected = 0;
 
     // What the frontier gave up, and the floor that keeps giving it up sound.
     DropAccounting dropped;
@@ -258,9 +263,15 @@ public:
           if (exact.found) {
             double const val = static_cast<double>(exact.value);
             if (val < GUB_) {
-              GUB_ = val;
-              best_point_.assign(exact.point.begin(), exact.point.end());
-              observer_->on_incumbent(GUB_);
+              if (witness_is_admissible<T>(
+                      exact.point, var_kinds, problem.box_bounds))
+              {
+                GUB_ = val;
+                best_point_.assign(exact.point.begin(), exact.point.end());
+                observer_->on_incumbent(GUB_);
+              } else {
+                ++witness_rejected;
+              }
             }
           }
           ++fathomed;
@@ -279,9 +290,14 @@ public:
         sampled += roles.sampler->n_samples();
         double cand = static_cast<double>(drawn.value);
         if (cand < GUB_) {
-          GUB_ = cand;
-          best_point_.assign(drawn.point.begin(), drawn.point.end());
-          observer_->on_incumbent(GUB_);
+          if (witness_is_admissible<T>(drawn.point, var_kinds, problem.box_bounds))
+          {
+            GUB_ = cand;
+            best_point_.assign(drawn.point.begin(), drawn.point.end());
+            observer_->on_incumbent(GUB_);
+          } else {
+            ++witness_rejected;
+          }
         }
 
         // Interval analysis of sub-domains, then feasibility and GUB pruning
@@ -289,7 +305,24 @@ public:
         bounded += bounds.n_regions;
         auto obj_lb = bounds.obj_lb;
         auto feasible = bounds.feasible;
+
+        // §8.1: a rounded-up enumerate slot (or leftover-budget padding,
+        // §7's fallback) can make a child a bitwise duplicate of a sibling
+        // already covered. Computed once per node, not per region -- see
+        // region::is_duplicate_child. Empty for GreedyEnumerate/WidthFirst
+        // (domain_sizes is never populated), so this is a no-op for them.
+        bool const may_duplicate = !assignment.domain_sizes.empty();
+        std::vector<std::size_t> const slot_prefix =
+            may_duplicate ? region::slot_prefixes(assignment.widths)
+                          : std::vector<std::size_t> {};
+
         for (std::size_t tid = 0; tid < bounds.n_regions; ++tid) {
+          if (may_duplicate
+              && region::is_duplicate_child(tid, assignment, slot_prefix))
+          {
+            ++pruned_duplicate;
+            continue;
+          }
           // feasible[tid] == 0: some constraint provably excludes its rhs over
           // this child. Sound to discard regardless of GUB_.
           if (!feasible[tid]) {
@@ -308,7 +341,7 @@ public:
               .lb = obj_lb[tid],
               // Recorded so materialise() can prove the policy re-derives the
               // same assignment when this child is dequeued.
-              .slot_count = assignment.composition.size(),
+              .assignment_hash = region::assignment_hash(assignment),
           });
           // This child now names box_idx as its parent, and holds the box alive
           // until it is itself dequeued or evicted.
@@ -448,6 +481,8 @@ public:
         .bounded = bounded,
         .sampled = sampled,
         .enqueued = enqueued,
+        .witness_rejected = witness_rejected,
+        .pruned_duplicate = pruned_duplicate,
         .pruned_infeasible = pruned_infeasible,
         .pruned_dominated = pruned_dominated,
         .dropped = dropped,

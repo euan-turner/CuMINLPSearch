@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
@@ -19,7 +20,6 @@
 #include "cuminlp/model/problem.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/composition.hpp"
-#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/region/materialise.hpp"
 #include "cuminlp/search/history.hpp"
 
@@ -33,9 +33,10 @@ namespace cuminlp::search
  * re-invoking the policy on the reconstructed parent box, rather than by
  * tracking which slots/variables were used at each node.
  *
- * The fan-outs sidx is encoded against are read off `policy` in materialise()
- * rather than carried as template parameters, so they cannot disagree with
- * the ones the policy itself used (see CompositionPolicy::fan_out).
+ * The fan-outs sidx is encoded against come from re-invoking `policy.choose()`
+ * on the reconstructed parent box, which returns them on the SlotAssignment
+ * itself (SlotAssignment::widths) -- they cannot disagree with the ones the
+ * policy used to encode sidx in the first place, because it is the same call.
  *
  * @tparam T
  */
@@ -47,15 +48,20 @@ struct Node
   std::size_t depth;  // tree depth of interval
   T lb;  // sound lower bound over this interval
 
-  // Slots the policy filled when this node's sidx was encoded. Purely a
-  // tripwire: materialise() re-derives the assignment anyway, so this exists
-  // to catch the case where it re-derives a *different* one. See the
-  // purity contract on CompositionPolicy -- a policy that consulted
-  // mutable state would decode sidx against the wrong radix vector and
-  // produce a silently wrong box rather than any kind of error. Two bytes
-  // of the same information, compared, turns that into a thrown exception
-  // at the exact point of violation.
-  std::size_t slot_count = 0;
+  // A hash of the SlotAssignment (kinds, var_ids, widths) the policy filled
+  // when this node's sidx was encoded. Purely a tripwire: materialise()
+  // re-derives the assignment anyway, so this exists to catch the case
+  // where it re-derives a *different* one. See the purity contract on
+  // CompositionPolicy -- a policy that consulted mutable state would decode
+  // sidx against the wrong radix vector and produce a silently wrong box
+  // rather than any kind of error.
+  //
+  // A slot *count* alone (the old tripwire) cannot see this once widths are
+  // data-dependent (design/BUDGETED_PARTITION.md §9): two assignments with
+  // the same slot count but different widths decode sidx into completely
+  // different, entirely plausible-looking boxes. Hashing `widths` in too is
+  // what turns that into a thrown exception at the exact point of violation.
+  std::uint64_t assignment_hash = 0;
 
   bool operator<(const Node& other) const
   {
@@ -119,22 +125,22 @@ struct Node
 
     region::SlotAssignment assignment = policy.choose(parent, var_kinds);
 
-    // The purity tripwire (see slot_count above). If the policy did not
+    // The purity tripwire (see assignment_hash above). If the policy did not
     // return the same assignment it returned when this node was enqueued,
     // every decode below is against the wrong radix vector and the box we
     // would hand back is wrong but entirely plausible-looking. Fail here
     // instead.
-    if (assignment.composition.size() != slot_count) {
+    std::uint64_t const rehashed = region::assignment_hash(assignment);
+    if (rehashed != assignment_hash) {
       throw cuminlp::InvalidConfiguration(
           "CompositionPolicy::choose is not a pure function of (box, "
-          "var_kinds): re-invoking it on this node's parent returned "
-          + std::to_string(assignment.composition.size()) + " slots, but "
-          + std::to_string(slot_count)
-          + " were used to encode the node's sidx. A policy must not depend "
-            "on state that changes during a solve");
+          "var_kinds): re-invoking it on this node's parent returned an "
+          "assignment whose hash does not match the one used to encode the "
+          "node's sidx. A policy must not depend on state that changes "
+          "during a solve");
     }
 
-    region::materialise<T>(parent, sidx, assignment, policy.fan_out(), out);
+    region::materialise<T>(parent, sidx, assignment, out);
   }
 };
 

@@ -17,6 +17,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cuinterval/interval.h>
 
+#include "cuminlp/model/problem.hpp"
 #include "cuminlp/search/budget.hpp"
 #include "cuminlp/search/epilogue.hpp"
 #include "cuminlp/search/frontier.hpp"
@@ -25,6 +26,7 @@
 // layer names no CUDA type (design/MODULE_REFACTOR.md invariant 18, §3.1).
 #include "cuminlp/search/driver.hpp"
 
+using cuminlp::model::VarKind;
 using cuminlp::search::compact_keep_count;
 using cuminlp::search::DropAccounting;
 using cuminlp::search::FinalBounds;
@@ -34,6 +36,7 @@ using cuminlp::search::IntervalPQueue;
 using cuminlp::search::Node;
 using cuminlp::search::over_host_budget;
 using cuminlp::search::StopReason;
+using cuminlp::search::witness_is_admissible;
 
 namespace
 {
@@ -51,7 +54,7 @@ using Queue = IntervalPQueue<double>;
 Entry node(double lb, std::size_t depth = 1, std::size_t pidx = 1)
 {
   return Entry {
-      .sidx = 0, .pidx = pidx, .depth = depth, .lb = lb, .slot_count = 1};
+      .sidx = 0, .pidx = pidx, .depth = depth, .lb = lb, .assignment_hash = 1};
 }
 
 // The frontier's elements in priority order, which is the only order the
@@ -627,6 +630,51 @@ TEST_CASE("a compacted frontier absorbs n_keep insertions before it grows",
   // ... and the one after that is what trips the budget again.
   q.enqueue(node(-1000.0));
   CHECK(q.capacity() > cap_after);
+}
+
+// ---------------------------------------------------------------- §6.2
+
+TEST_CASE("witness_is_admissible accepts a lattice point within the box",
+          "[epilogue][6.2]")
+{
+  std::vector<double> const point {1.0, 3.0, 0.5};
+  std::vector<VarKind> const kinds {
+      VarKind::Integer, VarKind::Binary, VarKind::Continuous};
+  std::vector<cu::interval<double>> const box {
+      {0.0, 5.0}, {0.0, 3.0}, {0.0, 1.0}};
+
+  CHECK(witness_is_admissible<double>(point, kinds, box));
+}
+
+TEST_CASE(
+    "witness_is_admissible rejects a fractional Integer/Binary component",
+    "[epilogue][6.2]")
+{
+  std::vector<VarKind> const kinds {VarKind::Integer};
+  std::vector<cu::interval<double>> const box {{0.0, 10.0}};
+
+  CHECK_FALSE(
+      witness_is_admissible<double>(
+          std::vector<double> {5.7}, kinds, box));
+  // Within tolerance of the lattice: accepted.
+  CHECK(witness_is_admissible<double>(
+      std::vector<double> {5.0 + 1e-9}, kinds, box));
+}
+
+TEST_CASE("witness_is_admissible rejects a component outside the root box",
+          "[epilogue][6.2]")
+{
+  std::vector<VarKind> const kinds {VarKind::Continuous};
+  std::vector<cu::interval<double>> const box {{0.0, 1.0}};
+
+  CHECK_FALSE(
+      witness_is_admissible<double>(
+          std::vector<double> {1.5}, kinds, box));
+  CHECK_FALSE(
+      witness_is_admissible<double>(
+          std::vector<double> {-0.5}, kinds, box));
+  CHECK(witness_is_admissible<double>(
+      std::vector<double> {1.0}, kinds, box));
 }
 
 // ---------------------------------------------------------------- reporting

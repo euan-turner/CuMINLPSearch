@@ -849,6 +849,14 @@ def scrape_policy(text):
     if policy is None:
         return None
     cell = f"--policy={policy}"
+    # bisection-budget's own field, not nested under `overrides=` since it
+    # isn't an override of a resolved shape -- there is no shape, only B
+    # (design/BUDGETED_PARTITION.md §11). Recorded unconditionally whenever
+    # present so a pasted-back run reproduces the exact B used, not whatever
+    # --bisection-budget=0's auto-derivation picks on a re-run.
+    bisection_budget = fields.get("bisection_budget")
+    if bisection_budget is not None:
+        cell += f" --bisection-budget={bisection_budget}"
     for pair in fields.get("overrides", "").split(","):
         key, sep, value = pair.partition("=")
         flag = OVERRIDE_FLAGS.get(key)

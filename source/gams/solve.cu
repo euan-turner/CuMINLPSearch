@@ -85,8 +85,10 @@ auto solve_with(cuminlp::model::Problem<double> const& problem,
                 bool verbose) -> Solution
 {
   std::shared_ptr<const cuminlp::policy::CompositionPolicy<double>> policy =
-      cuminlp::policy::make_policy<double>(
-          spec.policy_kind, spec.fan_out, spec.calibration);
+      cuminlp::policy::make_policy<double>(spec.policy_kind,
+                                           spec.fan_out,
+                                           spec.bisection_budget,
+                                           spec.calibration);
   auto backend = std::make_shared<
       const cuminlp::backend::graph::GraphBackendFactory<double>>();
 
@@ -129,11 +131,16 @@ auto free_device_bytes() -> std::size_t
   return free_bytes;
 }
 
-auto probe_calibration(std::size_t max_slots)
+auto probe_calibration(std::size_t max_slots, std::size_t enumerate_cap)
     -> cuminlp::config::SearchCalibration
 {
   cuminlp::config::SearchCalibration calibration;
   calibration.max_cycle_size = max_slots;
+  // BisectionBudgetCompositionPolicy's optional enumerate ceiling
+  // (design/BUDGETED_PARTITION.md §14.3); harmlessly unread by
+  // GreedyEnumerate/WidthFirst, which carry their own enumerate_cap on
+  // `spec.fan_out` instead.
+  calibration.enumerate_cap = enumerate_cap;
 
   calibration.free_device_bytes = free_device_bytes();
   int device = 0;
@@ -202,7 +209,8 @@ auto solve(cuminlp::model::Problem<double> const& problem,
            std::optional<double> known_primal_bound,
            bool verbose) -> Solution
 {
-  spec.calibration = probe_calibration(spec.max_slots);
+  spec.calibration =
+      probe_calibration(spec.max_slots, spec.overrides.enumerate_cap.value_or(0));
   return solve_with(problem, spec, known_primal_bound, verbose);
 }
 
@@ -293,6 +301,26 @@ auto main(int argc, char* argv[]) -> int
            "  --list-policies   print the policy roster (name, rules, "
            "evidence,\n"
            "                    provisional status) and exit; needs no GPU.\n"
+           "  --policy=bisection-budget  per-node per-slot widths under a "
+           "fixed region\n"
+           "                    budget N = 2^B (design/BUDGETED_PARTITION.md)"
+           ", instead\n"
+           "                    of a partition_num/enumerate_cap shared "
+           "across the\n"
+           "                    whole solve. Not in --list-policies' roster "
+           "(never\n"
+           "                    auto-selected); changes which tree the "
+           "search explores,\n"
+           "                    so a bound recorded under it is not "
+           "comparable with one\n"
+           "                    recorded under the default roster.\n"
+           "  --bisection-budget=B  B for --policy=bisection-budget "
+           "(bisections to\n"
+           "                    distribute per node, N = 2^B regions). 0 "
+           "(the default)\n"
+           "                    derives B from this device's free memory. "
+           "Ignored,\n"
+           "                    and an error, under any other policy.\n"
            "\n"
            "Memory:\n"
            "  --host-budget-bytes=N  cap the host memory the search's pending\n"
@@ -372,6 +400,9 @@ auto main(int argc, char* argv[]) -> int
   std::optional<std::size_t> enumerate_cap;
   std::optional<std::size_t> sample_points;
   std::optional<std::size_t> max_slots;
+  // --policy=bisection-budget only; 0 (the default) derives B from the
+  // device budget (design/BUDGETED_PARTITION.md §3.2, §11).
+  std::optional<std::size_t> bisection_budget;
   std::optional<double> known_primal_bound;
   std::size_t host_budget_bytes = 0;
   bool bounded_frontier = false;
@@ -464,6 +495,13 @@ auto main(int argc, char* argv[]) -> int
                    "instead\n";
       max_slots = parse_count(arg.substr(17), "--max-cycle-size");
       if (!max_slots) {
+        return 2;
+      }
+      continue;
+    }
+    if (arg.rfind("--bisection-budget=", 0) == 0) {
+      bisection_budget = parse_count(arg.substr(19), "--bisection-budget");
+      if (!bisection_budget) {
         return 2;
       }
       continue;
@@ -591,100 +629,178 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::config::SearchCalibration selection_calibration;
     selection_calibration.free_device_bytes = free_device_bytes();
 
-    cuminlp::config::PolicyProfile policy {};
-    cuminlp::config::Provenance base_source;
-    if (policy_name) {
-      auto found = cuminlp::config::lookup_policy(*policy_name);
-      if (!found) {
-        std::cerr << "unknown policy '" << *policy_name
-                  << "'; available " "policies:\n";
-        print_roster(std::cerr);
+    bool const bisection_budget_policy =
+        policy_name && *policy_name == "bisection-budget";
+
+    // --policy=bisection-budget is not in policy_roster (never
+    // auto-selected, design/BUDGETED_PARTITION.md §11) and is not shaped by
+    // partition_num/enumerate_cap fitting at all, so it bypasses
+    // lookup_policy/select_policy/config::resolve entirely and builds its
+    // RunSpec directly. --partition-num and --max-slots/--max-cycle-size
+    // are errors under it rather than silently ignored, since both appear
+    // in recorded reproduction keys (tools/minlp_status.py) and a
+    // silently-ignored flag there would make two different runs look
+    // identical.
+    if (bisection_budget_policy) {
+      if (partition_num) {
+        std::cerr << "--partition-num has no meaning under "
+                     "--policy=bisection-budget; use --bisection-budget "
+                     "instead\n";
         return 2;
       }
-      policy = *found;
-      if (!cuminlp::config::is_applicable(policy, problem_profile)) {
-        std::cerr << "policy '" << *policy_name
-                  << "' is not applicable to this model: "
-                  << problem_profile.num_binary << " binary, "
-                  << problem_profile.num_integer << " integer, "
-                  << problem_profile.num_continuous << " continuous "
-                  << "variable(s)"
-                  << (problem_profile.objvar_kept
-                          ? " (one continuous is the kept objective variable)"
-                          : "")
-                  << "; pick a policy whose rules match these kinds, or omit "
-                     "--policy to select one automatically. See "
-                     "--list-policies.\n";
+      if (max_slots) {
+        std::cerr << "--max-slots/--max-cycle-size is not a memory knob "
+                     "under --policy=bisection-budget (a slot needs "
+                     "b_j >= 1, so the budget already bounds the slot "
+                     "count); use --bisection-budget instead\n";
         return 2;
       }
-      base_source = cuminlp::config::Provenance::Named;
-    } else {
-      policy = cuminlp::config::select_policy(problem_profile,
-                                              selection_calibration);
-      base_source = cuminlp::config::Provenance::Auto;
+    } else if (bisection_budget) {
+      std::cerr << "--bisection-budget only applies under "
+                   "--policy=bisection-budget\n";
+      return 2;
     }
 
-    cuminlp::config::OverrideSet overrides;
-    overrides.partition_num = partition_num;
-    overrides.enumerate_cap = enumerate_cap;
-    overrides.sample_points = sample_points;
-    overrides.max_slots = max_slots;
+    // RunSpec::fan_out has no default (FanOutSpec's own constructor always
+    // validates partition_num >= 2), so a placeholder is required here even
+    // though only the resolve() branch below ends up using it for real.
+    cuminlp::config::RunSpec spec {.fan_out = cuminlp::region::FanOutSpec {2}};
 
-    // The backend's four cost coefficients, so the fit can be run before any
-    // graph exists (design/MODULE_REFACTOR.md §5.5).
-    cuminlp::config::RunSpec spec = cuminlp::config::resolve(
-        policy,
-        problem_profile,
-        selection_calibration,
-        cuminlp::backend::graph::cost_model_for<double>(parsed.problem),
-        base_source,
-        overrides);
+    if (bisection_budget_policy) {
+      spec.policy_kind = cuminlp::policy::PolicyKind::BisectionBudget;
+      spec.policy_name = "bisection-budget";
+      spec.source = cuminlp::config::Provenance::Named;
+      // spec.fan_out keeps its placeholder value from construction above --
+      // unused by this policy (BisectionBudgetCompositionPolicy has no
+      // shared FanOutSpec, design/BUDGETED_PARTITION.md §14.3).
+      spec.sample_points = sample_points.value_or(1);
+      spec.max_slots = cuminlp::config::kMaxSlots;
+      spec.overrides.enumerate_cap = enumerate_cap;
+      spec.overrides.sample_points = sample_points;
+      if (bisection_budget && *bisection_budget != 0) {
+        spec.bisection_budget = *bisection_budget;
+      } else {
+        // §3.2's closed form, against the same fraction of free device
+        // memory config::resolve_shape's own fit reserves.
+        std::size_t const n_buffers =
+            cuminlp::backend::graph::buffer_node_count(parsed.problem);
+        std::size_t const device_budget = static_cast<std::size_t>(
+            static_cast<double>(free_device_bytes())
+            * cuminlp::config::auto_budget_fraction);
+        spec.bisection_budget = cuminlp::backend::graph::bisection_budget<double>(
+            n_buffers, spec.sample_points, device_budget);
+      }
+    } else {
+      cuminlp::config::PolicyProfile policy {};
+      cuminlp::config::Provenance base_source;
+      if (policy_name) {
+        auto found = cuminlp::config::lookup_policy(*policy_name);
+        if (!found) {
+          std::cerr << "unknown policy '" << *policy_name
+                    << "'; available " "policies:\n";
+          print_roster(std::cerr);
+          return 2;
+        }
+        policy = *found;
+        if (!cuminlp::config::is_applicable(policy, problem_profile)) {
+          std::cerr << "policy '" << *policy_name
+                    << "' is not applicable to this model: "
+                    << problem_profile.num_binary << " binary, "
+                    << problem_profile.num_integer << " integer, "
+                    << problem_profile.num_continuous << " continuous "
+                    << "variable(s)"
+                    << (problem_profile.objvar_kept
+                            ? " (one continuous is the kept objective variable)"
+                            : "")
+                    << "; pick a policy whose rules match these kinds, or omit "
+                       "--policy to select one automatically. See "
+                       "--list-policies.\n";
+          return 2;
+        }
+        base_source = cuminlp::config::Provenance::Named;
+      } else {
+        policy = cuminlp::config::select_policy(problem_profile,
+                                                selection_calibration);
+        base_source = cuminlp::config::Provenance::Auto;
+      }
+
+      cuminlp::config::OverrideSet overrides;
+      overrides.partition_num = partition_num;
+      overrides.enumerate_cap = enumerate_cap;
+      overrides.sample_points = sample_points;
+      overrides.max_slots = max_slots;
+
+      // The backend's four cost coefficients, so the fit can be run before
+      // any graph exists (design/MODULE_REFACTOR.md §5.5).
+      spec = cuminlp::config::resolve(
+          policy,
+          problem_profile,
+          selection_calibration,
+          cuminlp::backend::graph::cost_model_for<double>(parsed.problem),
+          base_source,
+          overrides);
+    }
+
     spec.budgets.host_bytes = host_budget_bytes;
     spec.frontier = bounded_frontier
         ? cuminlp::search::FrontierPolicy::Compact
         : cuminlp::search::FrontierPolicy::StopAtBudget;
     spec.iter_limit = static_cast<std::uint32_t>(std::stoi(positional[1]));
 
-    std::cout << "policy: " << spec.policy_name << " ("
-              << cuminlp::config::to_string(spec.source)
-              << "), partition_num: " << spec.fan_out.partition_num()
-              << ", enumerate_cap: " << spec.fan_out.enumerate_cap()
-              << ", sample_points: " << spec.sample_points
-              << ", max_slots: " << spec.max_slots << "\n";
+    if (bisection_budget_policy) {
+      std::cout << "policy: " << spec.policy_name << " ("
+                << cuminlp::config::to_string(spec.source)
+                << "), bisection_budget: " << spec.bisection_budget
+                << ", sample_points: " << spec.sample_points << "\n";
+    } else {
+      std::cout << "policy: " << spec.policy_name << " ("
+                << cuminlp::config::to_string(spec.source)
+                << "), partition_num: " << spec.fan_out.partition_num()
+                << ", enumerate_cap: " << spec.fan_out.enumerate_cap()
+                << ", sample_points: " << spec.sample_points
+                << ", max_slots: " << spec.max_slots << "\n";
+    }
 
     // The machine-readable twin, for tools/minlp_status.py. `overrides=`
     // only appears on the overridden path, and lists only the flags actually
     // given.
-    std::cout << "PARAMS\tpolicy=" << spec.policy_name
-              << "\tsource=" << cuminlp::config::to_string(spec.source)
-              << "\tpartition_num=" << spec.fan_out.partition_num()
-              << "\tenumerate_cap=" << spec.fan_out.enumerate_cap()
-              << "\tsample_points=" << spec.sample_points
-              << "\tmax_slots=" << spec.max_slots;
-    if (overrides.any()) {
-      std::cout << "\toverrides=";
-      bool first = true;
-      auto emit_override =
-          [&](char const* name, std::optional<std::size_t> const& value)
-      {
-        if (!value) {
-          return;
-        }
-        if (!first) {
-          std::cout << ",";
-        }
-        std::cout << name << "=" << *value;
-        first = false;
-      };
-      emit_override("partition_num", overrides.partition_num);
-      emit_override("enumerate_cap", overrides.enumerate_cap);
-      emit_override("sample_points", overrides.sample_points);
-      emit_override("max_slots", overrides.max_slots);
-    }
-    std::cout << '\n';
+    if (bisection_budget_policy) {
+      std::cout << "PARAMS\tpolicy=" << spec.policy_name
+                << "\tsource=" << cuminlp::config::to_string(spec.source)
+                << "\tbisection_budget=" << spec.bisection_budget
+                << "\tsample_points=" << spec.sample_points << '\n';
+    } else {
+      std::cout << "PARAMS\tpolicy=" << spec.policy_name
+                << "\tsource=" << cuminlp::config::to_string(spec.source)
+                << "\tpartition_num=" << spec.fan_out.partition_num()
+                << "\tenumerate_cap=" << spec.fan_out.enumerate_cap()
+                << "\tsample_points=" << spec.sample_points
+                << "\tmax_slots=" << spec.max_slots;
+      if (spec.overrides.any()) {
+        std::cout << "\toverrides=";
+        bool first = true;
+        auto emit_override =
+            [&](char const* name, std::optional<std::size_t> const& value)
+        {
+          if (!value) {
+            return;
+          }
+          if (!first) {
+            std::cout << ",";
+          }
+          std::cout << name << "=" << *value;
+          first = false;
+        };
+        emit_override("partition_num", spec.overrides.partition_num);
+        emit_override("enumerate_cap", spec.overrides.enumerate_cap);
+        emit_override("sample_points", spec.overrides.sample_points);
+        emit_override("max_slots", spec.overrides.max_slots);
+      }
+      std::cout << '\n';
 
-    if (partition_num && !enumerate_cap) {
-      warn_on_implied_enumerate_cap(parsed.problem, spec.fan_out);
+      if (partition_num && !enumerate_cap) {
+        warn_on_implied_enumerate_cap(parsed.problem, spec.fan_out);
+      }
     }
 
     bool const maximise = parsed.sense == cuminlp::gams::Sense::Maximise;

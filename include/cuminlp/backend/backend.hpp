@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 
@@ -202,10 +203,17 @@ public:
   /// Once per distinct Composition, for the roles `roles` asks for. Roles it
   /// does not ask for come back null; so does `enumerator` for a composition
   /// that is not fully enumerable, or from a backend that cannot enumerate.
+  ///
+  /// `n_regions` is the total children `composition` produces --
+  /// policy::CompositionPolicy::n_regions(composition) -- rather than a
+  /// FanOutSpec: under design/BUDGETED_PARTITION.md, per-slot widths are
+  /// per-launch data (SlotAssignment::widths), not something a single spec
+  /// can express for every policy, so build-time sizing takes the one number
+  /// it actually needs.
   virtual SubdivisionBundle<T> build_subdivision(
       const model::Problem<T>& problem,
       const region::Composition& composition,
-      const region::FanOutSpec& fan_out,
+      std::size_t n_regions,
       const BuildBudget& budget,
       RoleRequest roles) const = 0;
 };
@@ -237,7 +245,13 @@ struct OverBudget
   std::string element_inventory;  ///< what the per-element cost scales with
   RegionCostModel cost;
   region::Composition composition;
-  region::FanOutSpec fan_out;
+  // Set only when the policy that built this composition has a uniform
+  // FanOutSpec to report (GreedyEnumerate/WidthFirst) -- BisectionBudget's
+  // widths are per-slot and per-box, not a single spec, so its overflows
+  // report the region count and byte breakdown without the per-kind tally
+  // or the "--max-cycle-size=N" advice that need one (config::
+  // explain_over_budget).
+  std::optional<region::FanOutSpec> fan_out;
   std::size_t solve_samples_per_region = 1;  ///< the solve-wide setting
   std::size_t sampler_bytes = 0;  ///< already spent; 0 until §5.2
 };

@@ -539,7 +539,7 @@ model, and filling it would be worse than leaving it empty.
 | ex3_1_4 | yes | min | 3 | 3 | 49 | -4 | -4.000000001 | — | — | — | — | — | — | — | — | default-bound |
 | ex3pb | yes | min | 32 | 31 | 191 | 68.00974405 | 68.009743 | — | — | — | — | — | — | — | — | default-bound |
 | ex4 | yes | min | 36 | 30 | 997 | -8.064136165 | -8.064136165 | — | — | — | — | — | — | — | — | default-bound |
-| ex4_1_1 | yes | min | 1 | 0 | 21 | -7.487312365 | -7.487312372 | -7.4873123649 | d908b4d | 2285 | --policy=mixed-all-small | -7.4873123649 | d908b4d | 2285 | --policy=mixed-all-small | — |
+| ex4_1_1 | yes | min | 1 | 0 | 21 | -7.487312365 | -7.487312372 | -7.4873123649 | 91224d1 | 769 | --policy=width-first | -7.4873123649 | 91224d1 | 769 | --policy=width-first | — |
 | ex4_1_2 | yes | min | 1 | 0 | 195 | -663.5000966 | -663.5000973 | -663.50009661 | 816bc13-dirty | 409 | --policy=mixed-all-small | -663.50009661 | 816bc13-dirty | 409 | --policy=mixed-all-small | — |
 | ex4_1_3 | yes | min | 1 | 0 | 19 | -443.6717047 | -443.6717054 | — | — | — | — | — | — | — | — | — |
 | ex4_1_4 | yes | min | 1 | 0 | 10 | 0 | -1e-09 | — | — | — | — | — | — | — | — | — |

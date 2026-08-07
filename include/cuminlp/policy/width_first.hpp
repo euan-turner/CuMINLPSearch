@@ -8,6 +8,7 @@
 
 #include <cuinterval/interval.h>
 
+#include "cuminlp/config/calibration.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
 #include "cuminlp/policy/policy.hpp"
@@ -35,9 +36,21 @@ template<typename T>
 class WidthFirstCompositionPolicy : public CompositionPolicy<T>
 {
 public:
-  using CompositionPolicy<T>::CompositionPolicy;
-  using CompositionPolicy<T>::fan_out;
+  explicit WidthFirstCompositionPolicy(
+      region::FanOutSpec fan_out, config::SearchCalibration calibration = {})
+      : CompositionPolicy<T>(calibration)
+      , fan_out_(fan_out)
+  {
+  }
+
   using CompositionPolicy<T>::max_cycle_size;
+
+  const region::FanOutSpec& fan_out() const { return fan_out_; }
+
+  std::size_t n_regions(const region::Composition& composition) const override
+  {
+    return region::composition_fan_out(composition, fan_out_);
+  }
 
   region::SlotAssignment choose(
       std::span<const cu::interval<T>> box,
@@ -156,6 +169,7 @@ public:
       }
       out.composition.kinds.push_back(c.kind);
       out.var_ids.push_back(c.vid);
+      out.widths.push_back(region::slot_fan_out(c.kind, fan_out_));
     }
     return out;
   }
@@ -178,6 +192,8 @@ private:
     }
     return static_cast<std::size_t>(hi - lo) + 1;
   }
+
+  region::FanOutSpec fan_out_;
 };
 
 }  // namespace cuminlp::policy

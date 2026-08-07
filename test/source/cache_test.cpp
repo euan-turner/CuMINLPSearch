@@ -17,6 +17,7 @@
 #include "cuminlp/backend/backend.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
@@ -35,6 +36,7 @@ using cuminlp::backend::RegionSampler;
 using cuminlp::backend::RoleRequest;
 using cuminlp::backend::SubdivisionBundle;
 using cuminlp::model::Problem;
+using cuminlp::policy::GreedyEnumCompositionPolicy;
 using cuminlp::region::Composition;
 using cuminlp::region::FanOutSpec;
 using cuminlp::region::SlotKind;
@@ -154,7 +156,7 @@ public:
   SubdivisionBundle<double> build_subdivision(
       const Problem<double>&,
       const Composition& composition,
-      const FanOutSpec&,
+      std::size_t,
       const BuildBudget&,
       RoleRequest roles) const override
   {
@@ -201,9 +203,10 @@ TEST_CASE("subdivision() builds two graphs, one per non-null role",
   auto factory = std::make_shared<FakeFactory>(counter);
   Problem<double> problem;
   cuminlp::report::SearchObserver observer;
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {2}};
 
   BackendCache<double> cache(
-      factory, problem, FanOutSpec {2}, 0, 1, false, observer);
+      factory, problem, policy, 0, 1, false, observer);
   cache.subdivision(continuous_comp());
 
   CHECK(cache.graphs_built() == 2);
@@ -217,9 +220,10 @@ TEST_CASE("a second request for the same composition is a cache hit",
   auto factory = std::make_shared<FakeFactory>(counter);
   Problem<double> problem;
   cuminlp::report::SearchObserver observer;
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {2}};
 
   BackendCache<double> cache(
-      factory, problem, FanOutSpec {2}, 0, 1, false, observer);
+      factory, problem, policy, 0, 1, false, observer);
   Composition const comp = continuous_comp();
   cache.subdivision(comp);
   cache.subdivision(comp);
@@ -235,9 +239,10 @@ TEST_CASE("enumerator() tallies its own graph separately from subdivision()",
   auto factory = std::make_shared<FakeFactory>(counter);
   Problem<double> problem;
   cuminlp::report::SearchObserver observer;
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {2}};
 
   BackendCache<double> cache(
-      factory, problem, FanOutSpec {2}, 0, 1, false, observer);
+      factory, problem, policy, 0, 1, false, observer);
   cache.subdivision(continuous_comp());  // 2 graphs
   cache.enumerator(binary_comp());  // 1 more
 
@@ -257,12 +262,13 @@ TEST_CASE(
   auto factory = std::make_shared<FakeFactory>(counter);
   Problem<double> problem;
   cuminlp::report::SearchObserver observer;
+  GreedyEnumCompositionPolicy<double> policy {FanOutSpec {2}};
 
   // budget_bytes == 0: BackendCache only evicts when sizing against "free
   // device memory" rather than an explicit per-build budget (cache.hpp's
   // find_or_build).
   BackendCache<double> cache(
-      factory, problem, FanOutSpec {2}, 0, 1, false, observer);
+      factory, problem, policy, 0, 1, false, observer);
 
   Composition const comp_a {.kinds = {SlotKind::Continuous}};
   Composition const comp_b {.kinds = {SlotKind::IntegerPartition}};

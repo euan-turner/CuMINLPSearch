@@ -1,13 +1,62 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
+#include <span>
 
+#include <cuinterval/interval.h>
+
+#include "cuminlp/model/problem.hpp"
 #include "cuminlp/search/budget.hpp"
 
 namespace cuminlp::search
 {
+
+/**
+ * @brief Whether a candidate witness point may become the incumbent
+ *        (design/BUDGETED_PARTITION.md §6.2).
+ *
+ * The exact graph's enumerate path can hand back a witness with a
+ * fractional Integer/Binary component -- the enumerate clamp in
+ * region/decode.hpp is sound for the interval bounder (a clamped duplicate
+ * stays inside the parent domain) but not for a *point* graph, where that
+ * clamped value becomes the reported incumbent. This is exactly what
+ * sample_from_interval already goes out of its way to prevent on the
+ * sampling path. Constraint feasibility is not re-checked here -- that is
+ * the device's job (feasibility_check_kernel), and duplicating it host-side
+ * would be a second implementation to disagree with.
+ *
+ * Tolerance matches the driver's own default convergence tolerance (1e-6):
+ * there is no separate "integrality tolerance" concept elsewhere in this
+ * codebase to reuse instead.
+ */
+template<typename T>
+bool witness_is_admissible(std::span<const T> point,
+                           std::span<const model::VarKind> var_kinds,
+                           std::span<const cu::interval<T>> root_box)
+{
+  constexpr T kIntegralityTolerance = T(1e-6);
+  if (point.size() != var_kinds.size() || point.size() != root_box.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < point.size(); ++i) {
+    T const v = point[i];
+    if (!(v >= root_box[i].lb) || !(v <= root_box[i].ub)) {
+      return false;
+    }
+    if (var_kinds[i] == model::VarKind::Integer
+        || var_kinds[i] == model::VarKind::Binary)
+    {
+      T const nearest = std::round(v);
+      if (std::abs(v - nearest) > kIntegralityTolerance) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
 
 /// The epilogue's three answers.
 struct FinalBounds

@@ -123,11 +123,16 @@ inline void check_backend_contract(
   CHECK(cost.bundle_bytes(100, samples_per_region, true)
         >= cost.bundle_bytes(100, samples_per_region, false));
 
+  std::size_t const flat_n_regions =
+      region::composition_fan_out(subdividing.composition, fan_out);
+  std::size_t const exact_n_regions =
+      region::composition_fan_out(enumerable.composition, fan_out);
+
   // ---- bundle shape: a missing role is a capability, not a surprise ----
   backend::SubdivisionBundle<double> flat =
       factory.build_subdivision(model.problem,
                                 subdividing.composition,
-                                fan_out,
+                                flat_n_regions,
                                 budget,
                                 backend::RoleRequest::all());
   REQUIRE(flat.bounder != nullptr);
@@ -137,7 +142,7 @@ inline void check_backend_contract(
   backend::SubdivisionBundle<double> exact =
       factory.build_subdivision(model.problem,
                                 enumerable.composition,
-                                fan_out,
+                                exact_n_regions,
                                 budget,
                                 backend::RoleRequest::all());
   REQUIRE(exact.bounder != nullptr);
@@ -150,7 +155,7 @@ inline void check_backend_contract(
   backend::SubdivisionBundle<double> const bound_only =
       factory.build_subdivision(model.problem,
                                 enumerable.composition,
-                                fan_out,
+                                exact_n_regions,
                                 budget,
                                 backend::RoleRequest::subdividing());
   CHECK(bound_only.bounder != nullptr);
@@ -160,7 +165,7 @@ inline void check_backend_contract(
   backend::SubdivisionBundle<double> const fathom_only =
       factory.build_subdivision(model.problem,
                                 enumerable.composition,
-                                fan_out,
+                                exact_n_regions,
                                 budget,
                                 backend::RoleRequest::enumerating());
   CHECK(fathom_only.bounder == nullptr);
@@ -168,8 +173,7 @@ inline void check_backend_contract(
   CHECK((fathom_only.enumerator != nullptr) == caps.exact_enumeration);
 
   // ---- bounder ----
-  std::size_t const flat_regions =
-      region::composition_fan_out(subdividing.composition, fan_out);
+  std::size_t const flat_regions = flat_n_regions;
   CHECK(flat.bounder->n_regions() == flat_regions);
 
   backend::Region<double> const flat_region {model.box, subdividing};
@@ -192,8 +196,7 @@ inline void check_backend_contract(
   }
 
   // ---- enumerator, and the bound below it ----
-  std::size_t const exact_regions =
-      region::composition_fan_out(enumerable.composition, fan_out);
+  std::size_t const exact_regions = exact_n_regions;
   backend::Region<double> const exact_region {model.box, enumerable};
 
   if (exact.enumerator != nullptr) {
@@ -265,7 +268,7 @@ inline void check_backend_contract(
   try {
     factory.build_subdivision(model.problem,
                               enumerable.composition,
-                              fan_out,
+                              exact_n_regions,
                               tiny,
                               backend::RoleRequest::all());
     FAIL("a one-byte budget must not admit a build");

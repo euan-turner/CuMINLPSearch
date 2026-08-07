@@ -11,8 +11,8 @@
 #include "cuminlp/backend/backend.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/composition.hpp"
-#include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
 
 // The driver's backend roles, kept between iterations
@@ -43,14 +43,14 @@ class BackendCache
 public:
   BackendCache(std::shared_ptr<const backend::RegionBackendFactory<T>> factory,
                const model::Problem<T>& problem,
-               region::FanOutSpec fan_out,
+               const policy::CompositionPolicy<T>& policy,
                std::size_t budget_bytes,
                std::size_t samples_per_region,
                bool report_build,
                report::SearchObserver& observer)
       : factory_(std::move(factory))
       , problem_(problem)
-      , fan_out_(fan_out)
+      , policy_(policy)
       , budget_ {budget_bytes, samples_per_region, report_build}
       , observer_(observer)
   {
@@ -138,6 +138,8 @@ private:
         return e.bundle;
       }
     }
+    std::size_t const n_regions = policy_.n_regions(composition);
+
     // Retry, evicting until it fits. Only when this cache is sizing against
     // whatever the device has free (budget_.bytes == 0): under an explicit
     // per-build budget, freeing memory cannot change the verdict, so evicting
@@ -145,7 +147,7 @@ private:
     for (;;) {
       try {
         backend::SubdivisionBundle<T> built = factory_->build_subdivision(
-            problem_, composition, fan_out_, budget_, roles);
+            problem_, composition, n_regions, budget_, roles);
         tally_built(composition, built);
         entries.push_back(Entry {composition, std::move(built), ++use_clock_});
         return entries.back().bundle;
@@ -216,7 +218,7 @@ private:
 
   std::shared_ptr<const backend::RegionBackendFactory<T>> factory_;
   const model::Problem<T>& problem_;
-  region::FanOutSpec fan_out_;
+  const policy::CompositionPolicy<T>& policy_;
   backend::BuildBudget budget_;
   report::SearchObserver& observer_;
 

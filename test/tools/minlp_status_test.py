@@ -200,5 +200,40 @@ class CurrentFormat(unittest.TestCase):
         self.assertIsNone(outcome)
 
 
+class ScrapePolicy(unittest.TestCase):
+    """scrape_policy's pasteable `--policy=<name> [--flag=value ...]`
+    reproduction cell (design/BUDGETED_PARTITION.md §11's addition:
+    bisection-budget's own field, not nested under `overrides=`)."""
+
+    def test_no_params_line_is_unknown(self):
+        self.assertIsNone(ms.scrape_policy("no PARAMS line here\n"))
+
+    def test_a_named_run_with_no_overrides(self):
+        text = "PARAMS\tpolicy=discrete\tsource=auto\tpartition_num=4\n"
+        self.assertEqual(ms.scrape_policy(text), "--policy=discrete")
+
+    def test_an_overridden_run_lists_every_override(self):
+        text = ("PARAMS\tpolicy=discrete\tsource=overridden\t"
+                "partition_num=4\toverrides=partition_num=9,max_slots=3\n")
+        self.assertEqual(
+            ms.scrape_policy(text),
+            "--policy=discrete --partition-num=9 --max-slots=3")
+
+    def test_bisection_budget_records_its_own_b(self):
+        text = ("PARAMS\tpolicy=bisection-budget\tsource=named\t"
+                "bisection_budget=17\tsample_points=5\n")
+        self.assertEqual(
+            ms.scrape_policy(text),
+            "--policy=bisection-budget --bisection-budget=17")
+
+    def test_only_the_last_params_line_is_read(self):
+        text = ("PARAMS\tpolicy=discrete\tsource=auto\tpartition_num=4\n"
+                "PARAMS\tpolicy=bisection-budget\tsource=named\t"
+                "bisection_budget=8\tsample_points=1\n")
+        self.assertEqual(
+            ms.scrape_policy(text),
+            "--policy=bisection-budget --bisection-budget=8")
+
+
 if __name__ == "__main__":
     unittest.main()

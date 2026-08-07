@@ -12,6 +12,7 @@
 #include "cuminlp/config/calibration.hpp"
 #include "cuminlp/errors.hpp"
 #include "cuminlp/model/problem.hpp"
+#include "cuminlp/policy/bisection_budget.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/policy/width_first.hpp"
 #include "cuminlp/region/composition.hpp"
@@ -23,13 +24,32 @@ namespace cuminlp::policy
 // Greedy, stateless composition policy: fills slots from unresolved (i.e.
 // non-degenerate, lb < ub) variables, binaries first, then integers, then
 // continuous.
+//
+// Owns its own FanOutSpec (design/BUDGETED_PARTITION.md §14.3): the type
+// stays exactly what it always was, uniform width per SlotKind, but it is no
+// longer part of the CompositionPolicy base interface or the decode/backend
+// pipeline -- BisectionBudgetCompositionPolicy has no single such spec to
+// share, so each policy that needs one now keeps it privately and fills
+// SlotAssignment::widths explicitly in choose().
 template<typename T>
 class GreedyEnumCompositionPolicy : public CompositionPolicy<T>
 {
 public:
-  using CompositionPolicy<T>::CompositionPolicy;
-  using CompositionPolicy<T>::fan_out;
+  explicit GreedyEnumCompositionPolicy(
+      region::FanOutSpec fan_out, config::SearchCalibration calibration = {})
+      : CompositionPolicy<T>(calibration)
+      , fan_out_(fan_out)
+  {
+  }
+
   using CompositionPolicy<T>::max_cycle_size;
+
+  const region::FanOutSpec& fan_out() const { return fan_out_; }
+
+  std::size_t n_regions(const region::Composition& composition) const override
+  {
+    return region::composition_fan_out(composition, fan_out_);
+  }
 
   region::SlotAssignment choose(
       std::span<const cu::interval<T>> box,
@@ -84,6 +104,7 @@ private:
   {
     out.composition.kinds.push_back(kind);
     out.var_ids.push_back(vid);
+    out.widths.push_back(region::slot_fan_out(kind, fan_out_));
   }
 
   bool at_cap(const region::SlotAssignment& out) const
@@ -163,6 +184,8 @@ private:
       append(out, region::SlotKind::Continuous, vid);
     }
   }
+
+  region::FanOutSpec fan_out_;
 };
 
 /**
@@ -170,11 +193,18 @@ private:
  *
  * A switch, not an if-chain, is deliberate: adding a PolicyKind without a
  * matching case here is a compiler warning (-Wswitch) away from being caught.
+ *
+ * `fan_out` is what GreedyEnumerate/WidthFirst construct against;
+ * `bisection_budget` is BisectionBudgetCompositionPolicy's `B`
+ * (design/BUDGETED_PARTITION.md) -- each PolicyKind reads only the one it
+ * needs, so callers building a RunSpec fill in both without having to know
+ * in advance which the chosen policy will use.
  */
 template<typename T>
 std::unique_ptr<CompositionPolicy<T>> make_policy(
     PolicyKind kind,
     region::FanOutSpec fan_out,
+    std::size_t bisection_budget,
     config::SearchCalibration calibration)
 {
   switch (kind) {
@@ -182,6 +212,9 @@ std::unique_ptr<CompositionPolicy<T>> make_policy(
       return std::make_unique<GreedyEnumCompositionPolicy<T>>(fan_out, calibration);
     case PolicyKind::WidthFirst:
       return std::make_unique<WidthFirstCompositionPolicy<T>>(fan_out, calibration);
+    case PolicyKind::BisectionBudget:
+      return std::make_unique<BisectionBudgetCompositionPolicy<T>>(
+          bisection_budget, calibration);
   }
   throw InvalidConfiguration("unknown PolicyKind");
 }

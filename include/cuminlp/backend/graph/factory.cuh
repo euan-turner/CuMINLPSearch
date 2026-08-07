@@ -76,7 +76,7 @@ public:
   backend::SubdivisionBundle<T> build_subdivision(
       const Problem<T>& problem,
       const Composition& composition,
-      const FanOutSpec& fan_out,
+      std::size_t n_regions,
       const backend::BuildBudget& budget,
       backend::RoleRequest roles) const override
   {
@@ -85,7 +85,7 @@ public:
       bundle.sampler = std::make_unique<PointGraphReplay<T>>(
           PointGraphReplay<T>::build(problem,
                                      composition,
-                                     fan_out,
+                                     n_regions,
                                      budget.bytes,
                                      budget.samples_per_region,
                                      budget.report_build));
@@ -98,7 +98,7 @@ public:
       bundle.bounder = std::make_unique<IntervalGraphReplay<T>>(
           IntervalGraphReplay<T>::build(problem,
                                         composition,
-                                        fan_out,
+                                        n_regions,
                                         budget.bytes,
                                         budget.samples_per_region,
                                         budget.report_build));
@@ -107,7 +107,7 @@ public:
       bundle.enumerator = std::make_unique<ExactGraphReplay<T>>(
           ExactGraphReplay<T>::build(problem,
                                      composition,
-                                     fan_out,
+                                     n_regions,
                                      budget.bytes,
                                      budget.samples_per_region,
                                      budget.report_build));

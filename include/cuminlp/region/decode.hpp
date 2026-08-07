@@ -31,6 +31,15 @@ namespace cuminlp::region::decode
 // remaining domain, or a domain with no integer point at all) clamps to
 // parent.ub -- sound (a clamped duplicate is still inside the parent
 // domain), just possibly a duplicate evaluation.
+//
+// Continuous/IntegerPartition's top slot (part == fan_out - 1) snaps its
+// `ub` to `parent.ub` verbatim rather than computing it via
+// `lb + width * fan_out`: in floating point that sum is not guaranteed to
+// equal `ub` (design/BUDGETED_PARTITION.md §6.1), and if it rounds low the
+// children silently fail to cover the parent's top sliver -- a region
+// holding the optimum can be dropped. Interior boundaries need no such
+// snap: adjacent children share the identical expression for their shared
+// edge, so there is no gap between them, only possibly at the outer edge.
 template<typename T>
 CUMINLP_HD inline void slot_bounds(SlotKind kind,
                                    const cu::interval<T>& parent,
@@ -54,7 +63,8 @@ CUMINLP_HD inline void slot_bounds(SlotKind kind,
     case SlotKind::IntegerPartition: {
       T width = (parent.ub - parent.lb) / static_cast<T>(fan_out);
       bound.lb = parent.lb + width * static_cast<T>(part);
-      bound.ub = parent.lb + width * static_cast<T>(part + 1);
+      bound.ub = (part + 1 == fan_out) ? parent.ub
+                                       : parent.lb + width * static_cast<T>(part + 1);
       break;
     }
   }

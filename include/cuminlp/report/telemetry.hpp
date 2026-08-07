@@ -29,6 +29,13 @@ struct RunTelemetry
   std::uint64_t bounded = 0;  ///< sum of BoundResult::n_regions
   std::uint64_t sampled = 0;  ///< sum of RegionSampler::n_samples()
   std::uint64_t enqueued = 0;
+  // design/BUDGETED_PARTITION.md §6.2: a witness rejected by
+  // witness_is_admissible rather than folded into GUB_.
+  std::uint64_t witness_rejected = 0;
+  // design/BUDGETED_PARTITION.md §8.1: a duplicate child (a rounded-up
+  // enumerate slot's digit landing past its true domain) excluded before
+  // enqueueing rather than explored again.
+  std::uint64_t pruned_duplicate = 0;
 
   // why a subdomain left, all four ways
   std::uint64_t pruned_infeasible = 0;
@@ -49,15 +56,23 @@ struct RunTelemetry
   /// §2.1's free self-check: two identities the independently-tracked
   /// counters above must satisfy if nothing was miscounted.
   ///
-  ///   bounded      = pruned_infeasible + pruned_dominated + enqueued
+  ///   bounded      = pruned_infeasible + pruned_dominated + pruned_duplicate
+  ///                  + enqueued
   ///   enqueued + 1 = dequeued + swept_dominated + swept_viable + pending
+  ///
+  /// A duplicate child (design/BUDGETED_PARTITION.md §8.1) is excluded
+  /// before the feasible[]/obj_lb[] checks, so it is still counted in
+  /// `bounded` (the bounder evaluated it) but never reaches `enqueued`,
+  /// `pruned_infeasible` or `pruned_dominated` -- its own term in the first
+  /// identity.
   ///
   /// The `+ 1` is the root, enqueued directly rather than through the child
   /// loop. A counter that disagrees with the others is a bug report, not a
   /// rounding difference.
   bool balances() const
   {
-    bool const bound_flow = bounded == pruned_infeasible + pruned_dominated + enqueued;
+    bool const bound_flow = bounded
+        == pruned_infeasible + pruned_dominated + pruned_duplicate + enqueued;
     bool const frontier_flow = enqueued + 1
         == iterations + dropped.dominated + dropped.viable + pending;
     return bound_flow && frontier_flow;
@@ -93,8 +108,10 @@ public:
               << " exact points)\n"
               << "pruned      infeasible " << telemetry_.pruned_infeasible
               << "  dominated " << telemetry_.pruned_dominated
+              << "  duplicate " << telemetry_.pruned_duplicate
               << "  swept-dominated " << telemetry_.dropped.dominated
               << "  swept-viable " << telemetry_.dropped.viable << '\n'
+              << "witness     rejected " << telemetry_.witness_rejected << '\n'
               << "frontier    pending " << telemetry_.pending << "  viable "
               << telemetry_.viable << '\n'
               << "history     slots freed " << telemetry_.history_freed

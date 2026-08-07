@@ -142,6 +142,36 @@ TEST_CASE(
   CHECK(feq(child.ub, parent.ub));
 }
 
+// design/BUDGETED_PARTITION.md §6.1: the top slot's ub must equal parent.ub
+// bitwise, even when lb + width*fan_out would round low in floating point.
+TEST_CASE(
+    "Continuous/IntegerPartition's top child's ub equals parent.ub bitwise, "
+    "over adversarial FP bounds",
+    "[decode][6.1]")
+{
+  struct Case
+  {
+    double lb, ub;
+    std::size_t fan_out;
+  };
+  // 0.1/0.3 and 7-way splits are exactly the kind of input where
+  // lb + width*fan_out does not reproduce ub bit-for-bit.
+  std::vector<Case> const cases = {
+      {0.0, 10.0, 4},
+      {0.1, 0.3, 3},
+      {-3.7, 12.9, 7},
+      {1.0, 1.0 + 1e-10, 5},
+      {0.0, 1.0, 97},
+  };
+  for (const Case& c : cases) {
+    cu::interval<double> parent {c.lb, c.ub};
+    cu::interval<double> child;
+    slot_bounds<double>(
+        SlotKind::Continuous, parent, c.fan_out - 1, c.fan_out, child);
+    CHECK(feq(child.ub, parent.ub));
+  }
+}
+
 TEST_CASE("BinaryEnumerate decodes 0 and 1 exactly", "[decode][3b]")
 {
   cu::interval<double> parent {0.0, 1.0};
@@ -194,12 +224,17 @@ TEST_CASE(
 
   // The policy partitions the one continuous variable 4-ways; sidx == 2 is
   // the third quarter: [4.0, 6.0].
-  // slot_count must match what the policy fills for this parent box (one
-  // continuous variable, so one slot); materialise() checks it before
-  // decoding, since a disagreement means sidx would be decoded against the
-  // wrong radix vector.
-  Node<double> node {
-      .sidx = 2, .pidx = parent_idx, .depth = 1, .lb = 0.0, .slot_count = 1};
+  // assignment_hash must match what the policy fills for this parent box
+  // (one continuous variable, so one slot, width 4); materialise() checks
+  // it before decoding, since a disagreement means sidx would be decoded
+  // against the wrong radix vector.
+  std::vector<cu::interval<double>> const parent_box = {{0.0, 8.0}};
+  Node<double> node {.sidx = 2,
+                     .pidx = parent_idx,
+                     .depth = 1,
+                     .lb = 0.0,
+                     .assignment_hash = cuminlp::region::assignment_hash(
+                         policy.choose(parent_box, kinds))};
 
   std::vector<cu::interval<double>> out;
   node.materialise(history, out, policy, kinds, root_box);
@@ -210,15 +245,15 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "materialise rejects a node whose slot_count the policy no longer agrees "
-    "with",
-    "[decode][4a]")
+    "materialise rejects a node whose assignment_hash the policy no longer "
+    "agrees with",
+    "[decode][4a][9]")
 {
   // The purity tripwire. A policy that consulted state changing during a
   // solve would return a different assignment here than the one that encoded
   // sidx, and every bound decoded below would be against the wrong radix
   // vector -- a wrong box, not an error. Simulated by handing materialise a
-  // slot_count that disagrees with what the policy returns for this parent.
+  // hash that disagrees with what the policy returns for this parent.
   std::vector<VarKind> kinds = {VarKind::Continuous, VarKind::Continuous};
   std::vector<cu::interval<double>> root_box = {{0.0, 8.0}, {0.0, 8.0}};
 
@@ -228,10 +263,74 @@ TEST_CASE(
 
   GreedyEnumCompositionPolicy<double> policy {FanOutSpec {4}};
 
-  // The policy fills 2 slots for this box; claim 1.
-  Node<double> node {
-      .sidx = 2, .pidx = parent_idx, .depth = 1, .lb = 0.0, .slot_count = 1};
+  // The policy fills 2 slots (widths [4, 4]) for this box; claim a hash that
+  // cannot match it.
+  Node<double> node {.sidx = 2,
+                     .pidx = parent_idx,
+                     .depth = 1,
+                     .lb = 0.0,
+                     .assignment_hash = 0xDEADBEEFull};
 
+  std::vector<cu::interval<double>> out;
+  CHECK_THROWS_AS(node.materialise(history, out, policy, kinds, root_box),
+                  cuminlp::InvalidConfiguration);
+}
+
+namespace
+{
+// A deliberately impure policy: identical composition/var_ids every call,
+// but the width it hands back for that one slot flips between two values on
+// alternating calls. This is exactly the case the old slot-count-only
+// tripwire could not see (design/BUDGETED_PARTITION.md §9) -- same slot
+// count, different radix, a plausible-looking wrong box.
+class FlippingWidthPolicy : public cuminlp::policy::CompositionPolicy<double>
+{
+public:
+  cuminlp::region::SlotAssignment choose(
+      std::span<const cu::interval<double>>,
+      std::span<const VarKind>) const override
+  {
+    std::size_t const width = (calls_++ == 0) ? 4 : 8;
+    cuminlp::region::SlotAssignment out {};
+    out.composition.kinds = {SlotKind::Continuous};
+    out.var_ids = {0};
+    out.widths = {width};
+    return out;
+  }
+
+  std::size_t n_regions(const Composition&) const override { return 4; }
+
+private:
+  mutable std::size_t calls_ = 0;
+};
+}  // namespace
+
+TEST_CASE(
+    "the assignment-hash tripwire catches a same-slot-count, "
+    "different-widths impure policy",
+    "[decode][9]")
+{
+  std::vector<VarKind> kinds = {VarKind::Continuous};
+  std::vector<cu::interval<double>> root_box = {{0.0, 8.0}};
+
+  IntervalHistory<double> history;
+  history.enqueue({});
+  std::size_t parent_idx = history.enqueue({{0.0, 8.0}});
+
+  FlippingWidthPolicy policy;
+  // First call (as if at enqueue time): width 4.
+  cuminlp::region::SlotAssignment const enqueue_time_assignment =
+      policy.choose(root_box, kinds);
+  Node<double> node {.sidx = 2,
+                     .pidx = parent_idx,
+                     .depth = 1,
+                     .lb = 0.0,
+                     .assignment_hash = cuminlp::region::assignment_hash(
+                         enqueue_time_assignment)};
+
+  // materialise()'s re-invocation is the second call: width 8. Same slot
+  // count (1) as the first call, so the old tripwire would not have caught
+  // this; the hash, which folds widths in, does.
   std::vector<cu::interval<double>> out;
   CHECK_THROWS_AS(node.materialise(history, out, policy, kinds, root_box),
                   cuminlp::InvalidConfiguration);

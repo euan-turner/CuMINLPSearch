@@ -251,21 +251,29 @@ inline std::string explain_over_budget(const backend::OverBudget& over,
       + " of device memory, but only "
       + cuminlp::detail::format_bytes(over.budget_bytes) + " is available.\n";
 
-  // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)".
+  // Per-kind slot tally: "10 x IntegerEnumerate (fan-out 7 each)". Only
+  // meaningful when the policy that built this composition has one uniform
+  // FanOutSpec (GreedyEnumerate/WidthFirst) -- BisectionBudget's widths are
+  // per-slot and per-box, so `over.fan_out` is nullopt there and this whole
+  // tally, along with the --max-cycle-size advice below, is skipped in
+  // favour of a plainer report.
   msg += "  composition: " + std::to_string(over.composition.size())
       + " live slot(s)";
-  for (int k = 0; k < 4; ++k) {
-    auto const kind = static_cast<region::SlotKind>(k);
-    std::size_t slots = 0;
-    for (region::SlotKind s : over.composition) {
-      if (s == kind) {
-        ++slots;
+  if (over.fan_out) {
+    for (int k = 0; k < 4; ++k) {
+      auto const kind = static_cast<region::SlotKind>(k);
+      std::size_t slots = 0;
+      for (region::SlotKind s : over.composition) {
+        if (s == kind) {
+          ++slots;
+        }
       }
-    }
-    if (slots > 0) {
-      msg += "\n    " + std::to_string(slots) + " x "
-          + region::slot_kind_name(kind) + " (fan-out "
-          + std::to_string(region::slot_fan_out(kind, over.fan_out)) + " each)";
+      if (slots > 0) {
+        msg += "\n    " + std::to_string(slots) + " x "
+            + region::slot_kind_name(kind) + " (fan-out "
+            + std::to_string(region::slot_fan_out(kind, *over.fan_out))
+            + " each)";
+      }
     }
   }
 
@@ -277,12 +285,18 @@ inline std::string explain_over_budget(const backend::OverBudget& over,
       + " per element (" + over.element_breakdown + ")"
       + "\n  = " + cuminlp::detail::format_bytes(over.needed_bytes) + '\n';
 
+  if (!over.fan_out) {
+    msg += "\n  Lowering --bisection-budget shrinks every slot's fan-out "
+           "together (N = 2^B), which reduces the region count.";
+    return msg;
+  }
+
   std::size_t const best_slots =
       auto_max_cycle_size(problem.num_binary,
                           problem.num_integer,
                           problem.num_continuous,
                           over.cost,
-                          over.fan_out,
+                          *over.fan_out,
                           over.solve_samples_per_region,
                           over.budget_bytes,
                           kMaxSlots);
@@ -294,7 +308,7 @@ inline std::string explain_over_budget(const backend::OverBudget& over,
                                     problem.num_integer,
                                     problem.num_continuous,
                                     over.cost,
-                                    over.fan_out,
+                                    *over.fan_out,
                                     over.solve_samples_per_region);
     msg += "\n  Acting on " + std::to_string(best_slots)
         + " variable(s) at a time instead of "

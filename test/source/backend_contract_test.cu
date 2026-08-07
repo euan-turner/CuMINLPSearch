@@ -87,10 +87,12 @@ TEST_CASE("The CUDA-graph backend satisfies the region-role contract",
                              SlotKind::IntegerEnumerate,
                              SlotKind::IntegerEnumerate}},
       {0, 1, 2, 3},
+      {2, 2, 4, 4},
   };
   SlotAssignment const subdividing {
       Composition {.kinds = {SlotKind::Continuous, SlotKind::Continuous}},
       {4, 5},
+      {2, 2},
   };
 
   cuminlp::backend::graph::GraphBackendFactory<double> const factory;

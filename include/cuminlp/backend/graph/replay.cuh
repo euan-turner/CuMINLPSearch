@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -206,19 +207,21 @@ public:
    * the recommendation has to be costed against. They differ exactly when
    * this is not the point graph.
    */
-  static backend::OverBudget over_budget_facts(const Composition& composition,
-                                               const FanOutSpec& fan_out,
-                                               std::size_t sample_points,
-                                               std::size_t n_buffers,
-                                               std::size_t needed,
-                                               std::size_t budget,
-                                               std::size_t solve_sample_points)
+  static backend::OverBudget over_budget_facts(
+      const Composition& composition,
+      std::size_t n_regions,
+      std::optional<FanOutSpec> fan_out,
+      std::size_t sample_points,
+      std::size_t n_buffers,
+      std::size_t needed,
+      std::size_t budget,
+      std::size_t solve_sample_points)
   {
     return backend::OverBudget {
         .role = std::string(graph_kind()) + " graph",
         .needed_bytes = needed,
         .budget_bytes = budget,
-        .n_regions = composition_fan_out(composition, fan_out),
+        .n_regions = n_regions,
         .elements_per_region = is_point ? sample_points : 1,
         .bytes_per_element = bytes_per_element(n_buffers),
         .element_breakdown = std::to_string(n_buffers) + " DAG-node buffers of "
@@ -234,9 +237,13 @@ public:
     };
   }
 
-  // `composition` fixes this replay's fan-out/shape for its whole lifetime;
-  // only which variables fill its slots (set_domain's `var_ids`) varies
-  // between launches.
+  // `composition` fixes this replay's shape (slot count/kinds) for its whole
+  // lifetime; which variables fill its slots and what fan-out each slot
+  // decodes against (set_domain's `var_ids`/`widths`) vary between launches
+  // (design/BUDGETED_PARTITION.md §3-4) -- `n_regions` is the total children
+  // this Composition produces under whichever policy built it
+  // (policy::CompositionPolicy::n_regions), the one number sizing needs
+  // before any box exists.
   //
   // `budget_bytes` caps what this build may allocate on the device; 0 means
   // "ask the driver for what's currently free". A composition whose fan-out
@@ -247,15 +254,20 @@ public:
   // evaluate exactly one element per region; only the sampling point graph
   // reads it.
   //
+  // `fan_out_for_report` is diagnostics only, forwarded into
+  // backend::OverBudget on an over-budget build -- nullopt for a policy
+  // (e.g. BisectionBudget) with no single uniform FanOutSpec to report.
+  //
   // `report_build` prints one GRAPH line (design/TELEMETRY.md §4.2) once this
   // build has every field final -- see that design doc's §3's rationale for
   // why here and not the destructor.
   static GraphReplay build(const Problem<T>& problem,
                            const Composition& composition,
-                           const FanOutSpec& fan_out,
+                           std::size_t n_regions,
                            std::size_t budget_bytes = 0,
                            std::size_t sample_points = 1,
-                           bool report_build = false)
+                           bool report_build = false,
+                           std::optional<FanOutSpec> fan_out_for_report = std::nullopt)
   {
     if (sample_points < 1) {
       throw cuminlp::InvalidConfiguration(
@@ -265,7 +277,7 @@ public:
 
     GraphReplay replay;
     replay.composition_ = composition;
-    replay.n_regions_ = composition_fan_out(composition, fan_out);
+    replay.n_regions_ = n_regions;
     replay.n_vars_ = problem.box_bounds.size();
     replay.sample_points_ = is_point && !Exact ? sample_points : 1;
     replay.slot_count_ = composition.size();
@@ -282,7 +294,8 @@ public:
     }
     if (needed > budget_bytes) {
       throw backend::OverBudgetError(over_budget_facts(composition,
-                                                       fan_out,
+                                                       n_regions,
+                                                       fan_out_for_report,
                                                        replay.sample_points_,
                                                        n_buffers,
                                                        needed,
@@ -300,27 +313,11 @@ public:
     replay.slot_kind_device_ = detail::alloc_device<SlotKind>(slot_count);
     replay.var_kinds_device_ = detail::alloc_device<VarKind>(replay.n_vars_);
 
-    // fan_out/prefix/kind are fixed by `composition`, and var_kinds by the
-    // problem, so they're all uploaded once here rather than on every
-    // set_domain() call like var_ids.
+    // slot_kind_ is fixed by `composition`, and var_kinds by the problem, so
+    // both are uploaded once here. fan_out/prefix are per-launch data now
+    // (design/BUDGETED_PARTITION.md §4) and move to set_domain(), alongside
+    // var_ids.
     if (slot_count > 0) {
-      std::vector<std::uint32_t> fan_out_host(slot_count);
-      for (std::size_t j = 0; j < slot_count; ++j) {
-        fan_out_host[j] =
-            static_cast<std::uint32_t>(slot_fan_out(composition[j], fan_out));
-      }
-      detail::check(cudaMemcpy(replay.slot_fan_out_device_,
-                               fan_out_host.data(),
-                               slot_count * sizeof(std::uint32_t),
-                               cudaMemcpyHostToDevice),
-                    "cudaMemcpy");
-      std::vector<std::size_t> const prefix_host =
-          slot_prefixes(composition, fan_out);
-      detail::check(cudaMemcpy(replay.slot_prefix_device_,
-                               prefix_host.data(),
-                               slot_count * sizeof(std::size_t),
-                               cudaMemcpyHostToDevice),
-                    "cudaMemcpy");
       detail::check(cudaMemcpy(replay.slot_kind_device_,
                                composition.data(),
                                slot_count * sizeof(SlotKind),
@@ -594,19 +591,25 @@ public:
 
   ~GraphReplay() { free_resources(); }
 
-  // Driver calls this before each launch to update the parent domain and
-  // which variable fills each slot. Both update via plain memcpy into fixed
-  // buffer addresses (slot_fan_out_/slot_prefix_/slot_kind_ don't need
-  // re-uploading -- they're fixed by this replay's composition); the kernel
-  // args for both the broadcast and apply nodes are re-baked via
-  // cudaGraphExecKernelNodeSetParams regardless, since the API requires the
-  // whole arg list on every update, not just what changed. `salt` seeds the
-  // point graph's sampler (see sample_from_interval); the interval graph
-  // takes no such argument and ignores it. `slot_count_ == 0` (a fully
-  // resolved box) has no apply node -- root_node_ == broadcast_node_, so
-  // only the broadcast rebake below runs.
+  // Driver calls this before each launch to update the parent domain, which
+  // variable fills each slot, and what fan-out each slot decodes against.
+  // All three update via plain memcpy into fixed buffer addresses
+  // (slot_kind_ doesn't need re-uploading -- it's fixed by this replay's
+  // composition); the kernel args for both the broadcast and apply nodes are
+  // re-baked via cudaGraphExecKernelNodeSetParams regardless, since the API
+  // requires the whole arg list on every update, not just what changed.
+  // `salt` seeds the point graph's sampler (see sample_from_interval); the
+  // interval graph takes no such argument and ignores it. `slot_count_ == 0`
+  // (a fully resolved box) has no apply node -- root_node_ == broadcast_node_,
+  // so only the broadcast rebake below runs.
+  //
+  // `widths` (design/BUDGETED_PARTITION.md §4) need not multiply out to this
+  // replay's own `n_regions_` for every launch that reuses this graph under
+  // BisectionBudget's rounded-up enumerate slots (§8) -- what must hold is
+  // `Π widths == n_regions_`, which the policy that produced them guarantees.
   void set_domain(std::span<const cu::interval<T>> domain,
                   std::span<const std::size_t> var_ids,
+                  std::span<const std::size_t> widths,
                   std::size_t salt = 0)
   {
     if (exec_ == nullptr) {
@@ -617,9 +620,10 @@ public:
           "set_domain: domain size does not match the problem's variable "
           "count");
     }
-    if (var_ids.size() != slot_count_) {
+    if (var_ids.size() != slot_count_ || widths.size() != slot_count_) {
       throw cuminlp::ShapeMismatch(
-          "set_domain: var_ids size does not match this replay's slot count");
+          "set_domain: var_ids/widths size does not match this replay's "
+          "slot count");
     }
     detail::check(cudaMemcpy(domain_buffer_,
                              domain.data(),
@@ -631,6 +635,24 @@ public:
                              slot_count_ * sizeof(std::size_t),
                              cudaMemcpyHostToDevice),
                   "cudaMemcpy");
+    if (slot_count_ > 0) {
+      std::vector<std::uint32_t> fan_out_host(slot_count_);
+      for (std::size_t j = 0; j < slot_count_; ++j) {
+        fan_out_host[j] = static_cast<std::uint32_t>(widths[j]);
+      }
+      detail::check(cudaMemcpy(slot_fan_out_device_,
+                               fan_out_host.data(),
+                               slot_count_ * sizeof(std::uint32_t),
+                               cudaMemcpyHostToDevice),
+                    "cudaMemcpy");
+      std::vector<std::size_t> const prefix_host =
+          region::slot_prefixes(widths);
+      detail::check(cudaMemcpy(slot_prefix_device_,
+                               prefix_host.data(),
+                               slot_count_ * sizeof(std::size_t),
+                               cudaMemcpyHostToDevice),
+                    "cudaMemcpy");
+    }
 
     cudaKernelNodeParams broadcast_params {};
     broadcast_params.gridDim = broadcast_grid_;
@@ -800,7 +822,7 @@ public:
 
   backend::BoundResult<T> bound(const backend::Region<T>& region)
   {
-    set_domain(region.box, region.assignment.var_ids);
+    set_domain(region.box, region.assignment.var_ids, region.assignment.widths);
     launch(/*stream=*/0);
     return backend::BoundResult<T> {feasible_host_, obj_lb_host_, n_regions_};
   }
@@ -808,14 +830,15 @@ public:
   backend::CandidateResult<T> sample(const backend::Region<T>& region,
                                      std::uint64_t salt)
   {
-    set_domain(region.box, region.assignment.var_ids, salt);
+    set_domain(
+        region.box, region.assignment.var_ids, region.assignment.widths, salt);
     launch(/*stream=*/0);
     return candidate_result();
   }
 
   backend::CandidateResult<T> enumerate(const backend::Region<T>& region)
   {
-    set_domain(region.box, region.assignment.var_ids);
+    set_domain(region.box, region.assignment.var_ids, region.assignment.widths);
     launch(/*stream=*/0);
     return candidate_result();
   }
