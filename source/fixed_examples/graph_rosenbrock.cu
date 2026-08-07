@@ -75,6 +75,7 @@ auto main() -> int
             0,
             0,
             cuminlp::search::FrontierPolicy::StopAtBudget,
+            false,
             reporter);
         drv.solve(problem);
       });

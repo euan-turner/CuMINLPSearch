@@ -87,7 +87,8 @@ public:
                                      composition,
                                      fan_out,
                                      budget.bytes,
-                                     budget.samples_per_region));
+                                     budget.samples_per_region,
+                                     budget.report_build));
     }
     // samples_per_region reaches the bounder and enumerator only so their
     // over-budget facts can cost a suggested cap against the sampler too;
@@ -99,7 +100,8 @@ public:
                                         composition,
                                         fan_out,
                                         budget.bytes,
-                                        budget.samples_per_region));
+                                        budget.samples_per_region,
+                                        budget.report_build));
     }
     if (roles.enumerator && is_fully_enumerable(composition)) {
       bundle.enumerator = std::make_unique<ExactGraphReplay<T>>(
@@ -107,7 +109,8 @@ public:
                                      composition,
                                      fan_out,
                                      budget.bytes,
-                                     budget.samples_per_region));
+                                     budget.samples_per_region,
+                                     budget.report_build));
     }
     return bundle;
   }

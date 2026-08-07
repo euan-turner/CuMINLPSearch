@@ -122,6 +122,7 @@ auto main(int argc, char* argv[]) -> int
               0,
               0,
               cuminlp::search::FrontierPolicy::StopAtBudget,
+              false,
               reporter);
           drv_212.solve(p212);
         } else if (problem == 219) {
@@ -138,6 +139,7 @@ auto main(int argc, char* argv[]) -> int
               0,
               0,
               cuminlp::search::FrontierPolicy::StopAtBudget,
+              false,
               reporter);
           drv_219.solve(p219);
         } else if (problem == 220) {
@@ -153,6 +155,7 @@ auto main(int argc, char* argv[]) -> int
             0,
             0,
             cuminlp::search::FrontierPolicy::StopAtBudget,
+            false,
             reporter);
           drv_219.solve(p219);
         }

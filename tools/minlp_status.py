@@ -781,35 +781,37 @@ ITER_RE = re.compile(r"^iter (?P<n>\d+):", re.MULTILINE)
 # other two fields don't already say.
 PARAMS_RE = re.compile(r"^PARAMS\t(?P<fields>\S.*)$", re.MULTILINE)
 
-# How many regions the search still had when it stopped, from the summary the
-# driver prints just above the RESULT line. Paired with `primal=none` this is
-# the whole discriminator between the two ways of finding no feasible point:
-# zero means the frontier emptied, nonzero means the run stopped with places
-# left to look.
-#
-# Preferred to the driver's "Search space exhausted" notice, which is printed
-# on exactly this branch and says the same thing, but is a sentence rather than
-# an interface. The notice is kept as a fallback only, for a log too old or too
-# truncated to carry the summary.
+# gams_solve prints this once, unconditionally, whenever no feasible point was
+# ever sampled -- the driver's own classification of the two ways that can
+# happen, computed from the same frontier/dropped state this tool used to
+# infer from PENDING_RE/DROPPED_RE below. Preferred over the older scrape: it
+# is the search's own answer rather than this tool's reconstruction of it, and
+# it needs no --verbose. The captured text is exactly INFEASIBLE/NO_SAMPLE's
+# own spelling (defined above), so no translation table sits between them.
+OUTCOME_RE = re.compile(r"^Outcome: (?P<outcome>infeasible|no sample)$", re.MULTILINE)
+
+# How many regions the search still had when it stopped. Was printed on every
+# plain run's summary; superseded by OUTCOME_RE, which says the same
+# conclusion outright instead of making this tool re-derive it. Kept only as a
+# fallback for a log written before OUTCOME_RE existed.
 PENDING_RE = re.compile(r"^Pending size: (?P<n>\d+)$", re.MULTILINE)
 
 # How many still-viable regions the search threw away to stay inside its host
-# memory budget, from the same summary. It is what stops an emptied frontier
-# from being read as a proof: a region evicted while it could still have held
-# the optimum is an unexplored place, not an excluded one, so a run that
-# emptied its frontier partly by eviction has not shown anything about the
-# instance. See design/BOUNDED_FRONTIER.md §4.
-#
-# Absent from a log written before the driver could drop anything, and that
-# reads correctly as zero -- those runs never dropped a region because they
-# had no mechanism to.
+# memory budget. It is what used to stop an emptied frontier from being read
+# as a proof: a region evicted while it could still have held the optimum is
+# an unexplored place, not an excluded one, so a run that emptied its frontier
+# partly by eviction had not shown anything about the instance -- OUTCOME_RE
+# now says so directly. See design/BOUNDED_FRONTIER.md §4. Kept as a fallback
+# alongside PENDING_RE, for the same reason.
 DROPPED_RE = re.compile(r"^Dropped viable regions: (?P<n>\d+)$", re.MULTILINE)
 
 # Two words, because the sentence after them has already been reworded once:
 # the old form went on "...with no feasible point sampled; either the problem
 # is infeasible or point sampling never satisfied the constraints", hedging
 # between the two outcomes this tool now separates. Logs of both vintages are
-# on disk and both mean the frontier emptied, which is all this is asked.
+# on disk and both mean the frontier emptied, which is all this is asked. The
+# weakest of the three readings -- kept as the last fallback, for a log too
+# old or too truncated to carry even PENDING_RE's summary.
 EXHAUSTED_RE = re.compile(r"^Search space exhausted", re.MULTILINE)
 
 # The experimental-override keys gams_solve's `overrides=` field can list, and
@@ -855,12 +857,22 @@ def scrape_policy(text):
     return cell
 
 
-def primal_outcome(primal, pending, said_exhausted, dropped=None):
+def primal_outcome(primal, pending, said_exhausted, dropped=None,
+                   explicit_outcome=None):
     """What a run with no primal bound found: INFEASIBLE, NO_SAMPLE, or None.
 
-    None when the log does not say -- no summary line and no exhaustion notice,
-    which is a log from a build before either existed. The two outcomes are far
-    enough apart that guessing between them is worse than recording neither.
+    None when the log does not say -- no Outcome: line, no summary line and no
+    exhaustion notice, which is a log from a build before any of them existed.
+    The two outcomes are far enough apart that guessing between them is worse
+    than recording neither.
+
+    `explicit_outcome` is OUTCOME_RE's own answer and wins outright when
+    present: it is the driver's classification, not this tool's
+    reconstruction of one, and gams_solve has printed it unconditionally
+    (no --verbose needed) since design/TELEMETRY.md's follow-up. The
+    `pending`/`dropped`/`said_exhausted` reconstruction below only runs for a
+    log written before that -- kept rather than deleted so those logs still
+    read exactly as they did.
 
     An empty frontier is only a proof when the search emptied it by *proving*
     every region held nothing. A memory-bounded run can also empty it by
@@ -871,6 +883,8 @@ def primal_outcome(primal, pending, said_exhausted, dropped=None):
     """
     if primal is not None:
         return None
+    if explicit_outcome is not None:
+        return explicit_outcome
     if pending is not None:
         return INFEASIBLE if pending == 0 and not dropped else NO_SAMPLE
     return INFEASIBLE if said_exhausted else None
@@ -890,9 +904,10 @@ def scrape_log(text):
     fitting in the root launch) yields None, which records as "no count" and
     not as zero.
 
-    The policy and the terminal summary are windowed the same way, and for the
-    same reason: gams_solve prints both around its own search, so the lines
-    inside the window belong to this run and not to the run before it.
+    The policy and the terminal summary (including the `Outcome:` line, when
+    present) are windowed the same way, and for the same reason: gams_solve
+    prints all three around its own search, so the lines inside the window
+    belong to this run and not to the run before it.
     """
     matches = list(RESULT_RE.finditer(text))
     if not matches:
@@ -902,9 +917,11 @@ def scrape_log(text):
     start = matches[-2].end() if len(matches) > 1 else 0
     window = text[start:m.start()]
     iters = [int(i["n"]) for i in ITER_RE.finditer(window)]
+    outcomes = [o["outcome"] for o in OUTCOME_RE.finditer(window)]
     pendings = [int(p["n"]) for p in PENDING_RE.finditer(window)]
     droppeds = [int(d["n"]) for d in DROPPED_RE.finditer(window)]
     primal = parse_number(m["primal"])
+    explicit_outcome = outcomes[-1] if outcomes else None
     pending = pendings[-1] if pendings else None
     dropped = droppeds[-1] if droppeds else None
     said_exhausted = EXHAUSTED_RE.search(window) is not None
@@ -919,7 +936,7 @@ def scrape_log(text):
               f"lines is now wrong", file=sys.stderr)
     return m["sense"], primal, parse_number(m["dual"]), \
         (max(iters) if iters else None), scrape_policy(window), \
-        primal_outcome(primal, pending, said_exhausted, dropped)
+        primal_outcome(primal, pending, said_exhausted, dropped, explicit_outcome)
 
 
 def better(kind, sense, new, old):

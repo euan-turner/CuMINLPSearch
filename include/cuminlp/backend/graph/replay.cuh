@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <span>
@@ -53,6 +54,7 @@ using cuminlp::region::FanOutSpec;
 using cuminlp::region::is_fully_enumerable;
 using cuminlp::region::slot_fan_out;
 using cuminlp::region::slot_prefixes;
+using cuminlp::region::spell;
 using cuminlp::region::SlotAssignment;
 using cuminlp::region::SlotKind;
 namespace decode = cuminlp::region::decode;
@@ -175,6 +177,20 @@ public:
     }
   }
 
+  /// Which backend role this instantiation plays, in `replay_role`'s own
+  /// terms -- the GRAPH line's `role=`, spelled from the same (V, Exact) pair
+  /// that selects the role at compile time (design/TELEMETRY.md §4.2).
+  static const char* role_name()
+  {
+    if constexpr (!is_point) {
+      return "bounder";
+    } else if constexpr (Exact) {
+      return "enumerator";
+    } else {
+      return "sampler";
+    }
+  }
+
   /**
    * @brief The facts about a build that would not fit in its budget.
    *
@@ -230,11 +246,16 @@ public:
   // `sample_points` is ignored by the interval and exact graphs, which
   // evaluate exactly one element per region; only the sampling point graph
   // reads it.
+  //
+  // `report_build` prints one GRAPH line (design/TELEMETRY.md §4.2) once this
+  // build has every field final -- see that design doc's §3's rationale for
+  // why here and not the destructor.
   static GraphReplay build(const Problem<T>& problem,
                            const Composition& composition,
                            const FanOutSpec& fan_out,
                            std::size_t budget_bytes = 0,
-                           std::size_t sample_points = 1)
+                           std::size_t sample_points = 1,
+                           bool report_build = false)
   {
     if (sample_points < 1) {
       throw cuminlp::InvalidConfiguration(
@@ -478,10 +499,26 @@ public:
     replay.root_node_ = builder.root_node();
     replay.broadcast_node_ = builder.broadcast_node();
     replay.var_buffers_device_ = builder.var_buffers_device();
+    replay.grid_ = builder.grid();
     replay.broadcast_grid_ = builder.broadcast_grid();
     replay.apply_grid_ = builder.apply_grid();
     replay.block_ = builder.block();
     replay.node_buffers_ = builder.take_node_buffers();
+
+    // One line per graph actually built (design/TELEMETRY.md §4.2/§5.1);
+    // `needed` is already computed above for the budget check, so this is
+    // its second reader rather than a recomputation. Gated on report_build
+    // since GRAPH is a parsed interface (tools/minlp_status.py, invariant
+    // register #16) and cannot be unconditional.
+    if (report_build) {
+      std::cout << "GRAPH\tcomposition=" << spell(replay.composition_)
+                << "\trole=" << role_name()
+                << "\tregions=" << replay.n_regions_
+                << "\telements=" << replay.n_elems_
+                << "\tthreads=" << replay.grid_.x * replay.block_.x
+                << "\tblock=" << replay.block_.x << "\tbytes=" << needed
+                << '\n';
+    }
 
     return replay;
   }
@@ -523,6 +560,7 @@ public:
     sample_points_ = other.sample_points_;
     slot_count_ = other.slot_count_;
     n_vars_ = other.n_vars_;
+    grid_ = other.grid_;
     broadcast_grid_ = other.broadcast_grid_;
     apply_grid_ = other.apply_grid_;
     block_ = other.block_;
@@ -936,6 +974,7 @@ private:
   std::size_t sample_points_ = 1;
   std::size_t slot_count_ = 0;
   std::size_t n_vars_ = 0;
+  dim3 grid_ {};  // the per-DAG-node grid; GRAPH's threads= is grid_.x * block_.x
   dim3 broadcast_grid_ {};
   dim3 apply_grid_ {};
   dim3 block_ {};

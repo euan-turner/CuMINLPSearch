@@ -47,7 +47,9 @@
 #include "cuminlp/policy/greedy_enum.hpp"
 #include "cuminlp/policy/policy.hpp"
 #include "cuminlp/region/fan_out.hpp"
+#include "cuminlp/report/fan.hpp"
 #include "cuminlp/report/observer.hpp"
+#include "cuminlp/report/telemetry.hpp"
 #include "cuminlp/search/driver.hpp"
 
 namespace
@@ -72,19 +74,29 @@ struct Solution
  *             MODULE_REFACTOR.md §7.1) -- `spec.calibration` is the one the
  *             policy is actually built against, distinct from the lighter
  *             calibration `config::resolve` fits the shape against
+ * @param verbose registers a report::TelemetryReporter alongside the console
+ *             one and asks the backend for a GRAPH line per graph built
+ *             (design/TELEMETRY.md) -- one flag drives both halves
  * @return Solution
  */
 auto solve_with(cuminlp::model::Problem<double> const& problem,
                 cuminlp::config::RunSpec const& spec,
-                std::optional<double> known_primal_bound) -> Solution
+                std::optional<double> known_primal_bound,
+                bool verbose) -> Solution
 {
   std::shared_ptr<const cuminlp::policy::CompositionPolicy<double>> policy =
       cuminlp::policy::make_policy<double>(
           spec.policy_kind, spec.fan_out, spec.calibration);
   auto backend = std::make_shared<
       const cuminlp::backend::graph::GraphBackendFactory<double>>();
-  auto reporter = std::make_shared<cuminlp::report::ConsoleReporter>(
-      cuminlp::config::profile_problem(problem));
+
+  auto fan = std::make_shared<cuminlp::report::ObserverFan>();
+  fan->add(std::make_shared<cuminlp::report::ConsoleReporter>(
+      cuminlp::config::profile_problem(problem)));
+  if (verbose) {
+    fan->add(std::make_shared<cuminlp::report::TelemetryReporter>());
+  }
+
   cuminlp::search::SearchDriver<double> driver(policy,
                                                backend,
                                                spec.iter_limit,
@@ -93,7 +105,8 @@ auto solve_with(cuminlp::model::Problem<double> const& problem,
                                                spec.budgets.device_bytes,
                                                spec.budgets.host_bytes,
                                                spec.frontier,
-                                               reporter,
+                                               verbose,
+                                               fan,
                                                known_primal_bound);
   cuminlp::search::SolveOutcome<double> const outcome = driver.solve(problem);
   return Solution {outcome.upper_bound,
@@ -186,10 +199,11 @@ void warn_on_implied_enumerate_cap(
  */
 auto solve(cuminlp::model::Problem<double> const& problem,
            cuminlp::config::RunSpec spec,
-           std::optional<double> known_primal_bound) -> Solution
+           std::optional<double> known_primal_bound,
+           bool verbose) -> Solution
 {
   spec.calibration = probe_calibration(spec.max_slots);
-  return solve_with(problem, spec, known_primal_bound);
+  return solve_with(problem, spec, known_primal_bound, verbose);
 }
 
 /// One line per roster row: name, rules, evidence, provisional marker.
@@ -249,7 +263,7 @@ auto main(int argc, char* argv[]) -> int
   {
     out << "usage: " << argv[0] << " [--policy=<name>] [--list-policies]"
         << " [--host-budget-bytes=<n>] [--bounded-frontier]"
-        << " [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
+        << " [--verbose] [--dump-dag[=infix|nodes]] [--dump-only] [-h|--help]"
         << " [--known-primal-bound=<n> ]"
         << " <model.gms> <iterations>\n";
   };
@@ -301,6 +315,18 @@ auto main(int argc, char* argv[]) -> int
            "                      stay sound and say what was discarded (see\n"
            "                      `Dropped ...` in the summary).\n"
            "\n"
+           "Diagnostics:\n"
+           "  --verbose           print a GRAPH line per device graph built and\n"
+           "                      a Telemetry block after the summary "
+           "(design/\n"
+           "                      TELEMETRY.md). --telemetry is an accepted "
+           "alias.\n"
+           "                      Off by default: nothing on this flag is "
+           "printed\n"
+           "                      otherwise, and every other line is "
+           "byte-for-byte\n"
+           "                      what it is without it.\n"
+           "\n"
            "Inspection:\n"
            "  --dump-dag[=infix|nodes]  print the lowered Problem before "
            "solving\n"
@@ -349,6 +375,7 @@ auto main(int argc, char* argv[]) -> int
   std::optional<double> known_primal_bound;
   std::size_t host_budget_bytes = 0;
   bool bounded_frontier = false;
+  bool verbose = false;
   std::vector<std::string> positional;
 
   // Shared by --partition-num/--enumerate-cap/--sample-points/--max-slots/
@@ -460,6 +487,10 @@ auto main(int argc, char* argv[]) -> int
     }
     if (arg == "--bounded-frontier") {
       bounded_frontier = true;
+      continue;
+    }
+    if (arg == "--verbose" || arg == "--telemetry") {
+      verbose = true;
       continue;
     }
     if (arg == "--dump-dag" || arg.rfind("--dump-dag=", 0) == 0) {
@@ -660,7 +691,8 @@ auto main(int argc, char* argv[]) -> int
     if (maximise && known_primal_bound) {
       known_primal_bound = std::optional(-*known_primal_bound);
     }
-    Solution const solution = solve(parsed.problem, spec, known_primal_bound);
+    Solution const solution =
+        solve(parsed.problem, spec, known_primal_bound, verbose);
 
     // The solver only minimises; a maximisation was negated on the way in.
     std::cout << "objective (" << (maximise ? "maximise" : "minimise")

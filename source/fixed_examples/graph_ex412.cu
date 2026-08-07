@@ -115,6 +115,7 @@ auto main(int argc, char* argv[]) -> int
             0,
             0,
             cuminlp::search::FrontierPolicy::StopAtBudget,
+            false,
             reporter);
         drv.solve(problem);
       });

@@ -32,4 +32,22 @@ inline const char* slot_kind_name(SlotKind kind)
   return "?";
 }
 
+/// One-character spelling, in `slot_kind_name`'s order -- a composition's
+/// compact form (design/TELEMETRY.md §4.6), e.g. `CCCPB` where five
+/// `slot_kind_name`s would not fit on a diagnostic line.
+inline char slot_kind_char(SlotKind kind)
+{
+  switch (kind) {
+    case SlotKind::Continuous:
+      return 'C';
+    case SlotKind::IntegerPartition:
+      return 'P';
+    case SlotKind::IntegerEnumerate:
+      return 'E';
+    case SlotKind::BinaryEnumerate:
+      return 'B';
+  }
+  return '?';
+}
+
 }  // namespace cuminlp::region

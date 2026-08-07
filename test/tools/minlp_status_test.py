@@ -2,14 +2,16 @@
 """Tests for the log scraper in tools/minlp_status.py.
 
 Only the reading half: `scrape_log` and `primal_outcome` are what stand
-between a driver's summary and a permanent row in MINLP_STATUS.md, and the
-bounded frontier (design/BOUNDED_FRONTIER.md §7) changed what one of those
-lines means. The rest of the tool writes files and runs subprocesses, which is
-a different kind of test and not this one.
+between a driver's summary and a permanent row in MINLP_STATUS.md, and both
+the bounded frontier (design/BOUNDED_FRONTIER.md §7) and the later
+`Outcome:` line (design/TELEMETRY.md follow-up) changed what stands behind
+that classification. The rest of the tool writes files and runs subprocesses,
+which is a different kind of test and not this one.
 
 Both directions of compatibility are the point of most of what follows: a log
-from a driver that could not drop regions must still read exactly as it did,
-and a new line an old tool never heard of must not break anything.
+from a driver that could not drop regions, or that predates `Outcome:`
+entirely, must still read exactly as it did, and a new line an old tool never
+heard of must not break anything.
 """
 
 import io
@@ -23,9 +25,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 import minlp_status as ms  # noqa: E402
 
 
-def log(*, pending=None, dropped=None, primal="none", dual="-3.5",
-        exhausted=False, iters=2):
-    """A gams_solve log, in the shape the driver actually prints one."""
+def log(*, outcome=None, pending=None, dropped=None, primal="none",
+        dual="-3.5", exhausted=False, iters=2):
+    """A gams_solve log, in the shape the driver actually prints one.
+
+    `outcome` ("infeasible" / "no sample") is the current build's line, always
+    present on a real log with no primal bound. `pending`/`dropped` reproduce
+    the older summary lines a pre-Outcome: log carried instead -- pass those
+    alone (outcome=None) to simulate one.
+    """
     lines = ["some/model.gms: 3 variables, 1 constraints, 9 DAG nodes",
              "PARAMS\tpolicy=discrete\tsource=auto\tpartition_num=4"]
     for i in range(1, iters + 1):
@@ -40,6 +48,8 @@ def log(*, pending=None, dropped=None, primal="none", dual="-3.5",
         lines.append(f"Pending size: {pending}")
         lines.append("Viable regions: 0")
         lines.append("Pruned as interval-infeasible: 7")
+    if outcome is not None:
+        lines.append(f"Outcome: {outcome}")
     if dropped is not None:
         lines.append(f"Dropped viable regions: {dropped}")
         lines.append("Dropped dominated regions: 12")
@@ -77,8 +87,34 @@ class PrimalOutcome(unittest.TestCase):
                          ms.INFEASIBLE)
         self.assertIsNone(ms.primal_outcome(None, None, False, None))
 
+    def test_explicit_outcome_wins_outright(self):
+        self.assertEqual(
+            ms.primal_outcome(None, None, False, None, ms.INFEASIBLE),
+            ms.INFEASIBLE)
+        self.assertEqual(
+            ms.primal_outcome(None, None, False, None, ms.NO_SAMPLE),
+            ms.NO_SAMPLE)
+
+    def test_explicit_outcome_overrules_a_disagreeing_reconstruction(self):
+        # The driver's own answer beats this tool's guess from pending/dropped,
+        # even when they would have disagreed -- Outcome: is authoritative.
+        self.assertEqual(
+            ms.primal_outcome(None, 0, False, 0, ms.NO_SAMPLE), ms.NO_SAMPLE)
+
+    def test_a_primal_bound_still_beats_an_explicit_outcome(self):
+        # Can't happen from a real log (gams_solve never prints both), but the
+        # gate's own contract holds regardless: a bound is not an outcome.
+        self.assertIsNone(ms.primal_outcome(1.5, None, False, None,
+                                            ms.INFEASIBLE))
+
 
 class ScrapeLog(unittest.TestCase):
+    """`pending=`/`dropped=` alone (no `outcome=`) simulate a log from before
+    the `Outcome:` line existed -- the legacy reconstruction this tool falls
+    back to. `CurrentFormat` below exercises the line current builds actually
+    print.
+    """
+
     def scrape(self, text):
         with redirect_stderr(io.StringIO()) as captured:
             result = ms.scrape_log(text)
@@ -123,6 +159,45 @@ class ScrapeLog(unittest.TestCase):
         with self.assertRaises(SystemExit):
             with redirect_stderr(io.StringIO()):
                 ms.scrape_log("iter 1: GUB = 1, Candidate: 1\n")
+
+
+class CurrentFormat(unittest.TestCase):
+    """A log carrying the `Outcome:` line current builds print -- no
+    `Pending size:`/`Dropped viable regions:` needed at all, since ConsoleReporter
+    stopped printing the former unconditionally and the classification no
+    longer has to be reconstructed from either (design/TELEMETRY.md follow-up).
+    """
+
+    def scrape(self, text):
+        with redirect_stderr(io.StringIO()) as captured:
+            result = ms.scrape_log(text)
+        return result, captured.getvalue()
+
+    def test_outcome_infeasible_needs_no_pending_or_dropped_line(self):
+        (_, _, _, _, _, outcome), stderr = self.scrape(
+            log(outcome="infeasible", exhausted=True))
+        self.assertEqual(outcome, ms.INFEASIBLE)
+        self.assertEqual(stderr, "")
+
+    def test_outcome_no_sample_needs_no_pending_or_dropped_line(self):
+        (_, _, _, _, _, outcome), _ = self.scrape(log(outcome="no sample"))
+        self.assertEqual(outcome, ms.NO_SAMPLE)
+
+    def test_outcome_wins_over_a_disagreeing_legacy_reading(self):
+        # A log that (hypothetically) carried both: the explicit line is
+        # believed over the pending/dropped reconstruction, which here would
+        # have said the opposite.
+        (_, _, _, _, _, outcome), _ = self.scrape(
+            log(outcome="no sample", pending=0, dropped=0))
+        self.assertEqual(outcome, ms.NO_SAMPLE)
+
+    def test_a_primal_bound_leaves_no_outcome_even_with_the_line_present(self):
+        # Can't happen from a real log, but scrape_log's own contract should
+        # hold: a bound found means there is nothing to classify.
+        (_, primal, _, _, _, outcome), _ = self.scrape(
+            log(outcome="infeasible", primal="1.25"))
+        self.assertEqual(primal, 1.25)
+        self.assertIsNone(outcome)
 
 
 if __name__ == "__main__":

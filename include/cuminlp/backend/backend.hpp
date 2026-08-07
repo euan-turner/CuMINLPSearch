@@ -148,6 +148,7 @@ struct BuildBudget
 {
   std::size_t bytes = 0;
   std::size_t samples_per_region = 1;  ///< leaves with the sampler (§5.2)
+  bool report_build = false;  ///< print one GRAPH line per graph built
 };
 
 /**

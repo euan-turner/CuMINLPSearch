@@ -23,6 +23,7 @@
 #include "cuminlp/region/composition.hpp"
 #include "cuminlp/region/fan_out.hpp"
 #include "cuminlp/report/observer.hpp"
+#include "cuminlp/report/telemetry.hpp"
 #include "cuminlp/search/budget.hpp"
 #include "cuminlp/search/cache.hpp"
 #include "cuminlp/search/epilogue.hpp"
@@ -31,19 +32,6 @@
 
 namespace cuminlp::search
 {
-
-/// What one solve() found, and what it proved. Everything a caller used to
-/// reach for through accessors on a shared base class, plus the counters the
-/// run's summary quotes.
-struct SearchCounters
-{
-  std::uint32_t iterations = 0;
-  std::size_t pending = 0;
-  std::size_t viable = 0;  ///< pending regions not proven suboptimal
-  std::size_t pruned_infeasible = 0;
-  DropAccounting dropped;
-  std::size_t cache_evictions = 0;
-};
 
 template<typename T>
 struct SolveOutcome
@@ -54,7 +42,10 @@ struct SolveOutcome
   StopReason stop_reason = StopReason::IterationLimit;
   bool proven_optimal = false;
   bool infeasible = false;
-  SearchCounters counters;
+  // What solve() counted along the way (design/TELEMETRY.md §3.1) -- the one
+  // counters record, populated once here and consumed by both
+  // report::TelemetryReporter and library callers.
+  report::RunTelemetry counters;
 
   bool found_incumbent() const
   {
@@ -91,6 +82,11 @@ public:
    * @param host_budget_bytes caps the pending frontier and live interval
    * history
    * @param frontier_policy policy for handling frontier growth
+   * @param report_build print one GRAPH line per graph BackendCache builds
+   *        (design/TELEMETRY.md §4.1) -- the one piece of telemetry plumbing
+   *        that travels down to the backend rather than up to report,
+   *        because the printing decision is the CLI's while the facts are
+   *        the backend's
    * @param observer where solve()'s progress narration goes; the base
    *        class's every override is a no-op, so the default is a silent
    *        driver (design/MODULE_REFACTOR.md §8)
@@ -107,6 +103,7 @@ public:
       std::size_t budget_bytes = 0,
       std::size_t host_budget_bytes = 0,
       FrontierPolicy frontier_policy = FrontierPolicy::StopAtBudget,
+      bool report_build = false,
       std::shared_ptr<report::SearchObserver> observer =
           std::make_shared<report::SearchObserver>(),
       std::optional<double> known_primal_bound = std::nullopt)
@@ -118,6 +115,7 @@ public:
       , budget_bytes_(budget_bytes)
       , host_budget_bytes_(host_budget_bytes)
       , frontier_policy_(frontier_policy)
+      , report_build_(report_build)
       , observer_(std::move(observer))
   {
     if (policy_ == nullptr) {
@@ -151,8 +149,13 @@ public:
     // Roles per Composition, built on first use and evicted under pressure
     // -- see search/cache.hpp for why that is the search layer's decision
     // and not the backend's.
-    search::BackendCache<T> cache(
-        backend_, problem, fan_out, budget_bytes_, sample_points_, *observer_);
+    search::BackendCache<T> cache(backend_,
+                                  problem,
+                                  fan_out,
+                                  budget_bytes_,
+                                  sample_points_,
+                                  report_build_,
+                                  *observer_);
 
     IntervalPQueue<T> pending(10000);
     IntervalHistory<T> history;
@@ -182,6 +185,17 @@ public:
 
     bool converged = false;
     std::size_t pruned_infeasible = 0;
+
+    // Telemetry locals (design/TELEMETRY.md §4.5): a handful of adds per
+    // iteration, folded into one report::RunTelemetry after the loop rather
+    // than reported per-event -- see report/observer.hpp's on_telemetry for
+    // why there is no per-prune event to raise instead.
+    std::uint64_t pruned_dominated = 0;
+    std::uint64_t bounded = 0;
+    std::uint64_t sampled = 0;
+    std::uint64_t enqueued = 0;
+    std::uint64_t fathomed = 0;
+    std::uint64_t fathomed_points = 0;
 
     // What the frontier gave up, and the floor that keeps giving it up sound.
     DropAccounting dropped;
@@ -249,6 +263,8 @@ public:
               observer_->on_incumbent(GUB_);
             }
           }
+          ++fathomed;
+          fathomed_points += enumerator->n_points();
           observer_->on_fathom(enumerator->n_points(), GUB_);
           continue;
         }
@@ -260,6 +276,7 @@ public:
         // Best sampled feasible value from this domain; iter_idx_ salts the
         // sampler so revisited/sibling boxes draw fresh points.
         auto const drawn = roles.sampler->sample(region, iter_idx_);
+        sampled += roles.sampler->n_samples();
         double cand = static_cast<double>(drawn.value);
         if (cand < GUB_) {
           GUB_ = cand;
@@ -269,6 +286,7 @@ public:
 
         // Interval analysis of sub-domains, then feasibility and GUB pruning
         auto const bounds = roles.bounder->bound(region);
+        bounded += bounds.n_regions;
         auto obj_lb = bounds.obj_lb;
         auto feasible = bounds.feasible;
         for (std::size_t tid = 0; tid < bounds.n_regions; ++tid) {
@@ -279,6 +297,7 @@ public:
             continue;
           }
           if (obj_lb[tid] > GUB_) {
+            ++pruned_dominated;
             continue;
           }
 
@@ -294,6 +313,7 @@ public:
           // This child now names box_idx as its parent, and holds the box alive
           // until it is itself dequeued or evicted.
           history.add_ref(box_idx);
+          ++enqueued;
         }
 
         history.release(box_idx);
@@ -418,18 +438,43 @@ public:
     bool const proven_optimal = outcome.proven_optimal;
     GLB_ = outcome.glb;
 
+    // Everything solve() counted, folded into one struct here rather than
+    // reported per-event (design/TELEMETRY.md §3.1, §4.5) -- populated once,
+    // consumed by both on_telemetry and the returned SolveOutcome.
+    report::RunTelemetry const telemetry {
+        .iterations = iter_idx_,
+        .fathomed = fathomed,
+        .fathomed_points = fathomed_points,
+        .bounded = bounded,
+        .sampled = sampled,
+        .enqueued = enqueued,
+        .pruned_infeasible = pruned_infeasible,
+        .pruned_dominated = pruned_dominated,
+        .dropped = dropped,
+        .pending = pending.size(),
+        .viable = viable,
+        .history_freed = history.freed_count(),
+        .history_peak_live = history.peak_live(),
+        .graphs_built = cache.graphs_built(),
+        .graphs_rebuilt = cache.graphs_rebuilt(),
+        .cache_evictions = cache.evictions(),
+    };
+    observer_->on_telemetry(telemetry);
+
     // outcome.infeasible: frontier emptied by feasibility pruning without
     // ever sampling a feasible point -- not convergence, so GLB_ is left
     // where the loop had it rather than collapsed onto GUB_. Eviction is the
     // third way to empty a frontier and proves nothing, so finalise_bounds
     // withholds this branch entirely once anything viable has been dropped.
     //
-    // stop_reason/pending/viable/pruned/dropped: not just a trace, an
-    // interface -- tools/minlp_status.py reads these to tell an infeasible
-    // instance (zero pending, no drops, no incumbent) from a run that
-    // stopped with places left to look, and records the two differently.
-    // ConsoleReporter prints them unconditionally, so an absent line means
-    // an old build rather than a zero.
+    // stop_reason/infeasible/dropped: not just a trace, an interface --
+    // tools/minlp_status.py reads ConsoleReporter's `Outcome:` line (derived
+    // from `infeasible`, printed whenever no incumbent was found) to tell an
+    // infeasible instance from a run that stopped with places left to look,
+    // and records the two differently. `pending`/`viable`/`pruned_infeasible`
+    // still travel through here for `RunTelemetry` (on_telemetry above), but
+    // ConsoleReporter no longer prints them -- that's the telemetry block's
+    // job now, under --verbose (design/TELEMETRY.md).
     observer_->on_finish(report::FinalReport {
         .glb = GLB_,
         .gub = GUB_,
@@ -452,15 +497,7 @@ public:
         .stop_reason = stop_reason,
         .proven_optimal = proven_optimal,
         .infeasible = outcome.infeasible,
-        .counters =
-            SearchCounters {
-                .iterations = iter_idx_,
-                .pending = pending.size(),
-                .viable = viable,
-                .pruned_infeasible = pruned_infeasible,
-                .dropped = dropped,
-                .cache_evictions = cache.evictions(),
-            },
+        .counters = telemetry,
     };
   }
 
@@ -473,6 +510,7 @@ private:
   std::size_t budget_bytes_;
   std::size_t host_budget_bytes_;
   FrontierPolicy frontier_policy_;
+  bool report_build_;
   std::shared_ptr<report::SearchObserver> observer_;
   std::optional<double> known_primal_bound_;
 

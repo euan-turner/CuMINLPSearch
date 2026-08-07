@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string_view>
 
 #include "cuminlp/backend/backend.hpp"
@@ -17,6 +18,12 @@
 // silent. ConsoleReporter is the one that gets today's lines back, verbatim.
 namespace cuminlp::report
 {
+
+// Defined in report/telemetry.hpp; forward-declared here so on_telemetry
+// below can take it by reference without this header including telemetry.hpp
+// back (telemetry.hpp's TelemetryReporter derives from SearchObserver, so
+// the include has to run the other way -- see that header's top comment).
+struct RunTelemetry;
 
 /// gub/candidate as reported by the ordinary (non-fathom) branch of one
 /// iteration.
@@ -107,12 +114,26 @@ struct SearchObserver
 
   virtual void on_mid_search_error([[maybe_unused]] std::string_view message) {}
 
+  /// Fires once, immediately before on_finish -- see report/telemetry.hpp's
+  /// RunTelemetry for the payload (design/TELEMETRY.md §3.2). Deliberately
+  /// the only telemetry event: there is no per-prune/per-graph event, since
+  /// the driver already accumulates those counts in a local and hands them
+  /// over once rather than paying a virtual call in the hottest loop in the
+  /// solver.
+  virtual void on_telemetry(const RunTelemetry&) {}
+
   virtual void on_finish(const FinalReport&) {}
 };
 
 /// Reproduces today's driver output, byte-for-byte (invariant register #16):
 /// tools/minlp_status.py and BOUNDED_FRONTIER.md §7 both depend on these
-/// exact spellings.
+/// exact spellings. Deliberately narrower than the full `FinalReport`: the
+/// subdomain counters (`pending_size`, `viable`, `pruned_infeasible`,
+/// `dropped.dominated`) are `report::RunTelemetry`'s job now
+/// (design/TELEMETRY.md) -- this prints only the bracket, why the run
+/// stopped, the `Outcome:` classification tools/minlp_status.py reads when
+/// no incumbent was found, and what `--bounded-frontier` cost the reported
+/// bound.
 class ConsoleReporter : public SearchObserver
 {
 public:
@@ -234,13 +255,18 @@ public:
     }
     std::cout << "Stop reason: " << search::to_string(report.stop_reason)
               << '\n';
-    std::cout << "Pending size: " << report.pending_size << '\n';
-    std::cout << "Viable regions: " << report.viable << '\n';
-    std::cout << "Pruned as interval-infeasible: " << report.pruned_infeasible
-              << '\n';
+    // Meaningful only when no feasible point was ever sampled -- an explicit,
+    // machine-readable classification of the two ways that can happen
+    // (tools/minlp_status.py's INFEASIBLE/NO_SAMPLE), printed unconditionally
+    // so a plain run needs no --verbose to be recorded correctly. Replaces
+    // inferring the same fact from `Pending size:`, which moved to the
+    // telemetry block along with the rest of the subdomain counters.
+    bool const found_incumbent = report.gub < std::numeric_limits<double>::max();
+    if (!found_incumbent) {
+      std::cout << "Outcome: " << (report.infeasible ? "infeasible" : "no sample")
+                << '\n';
+    }
     std::cout << "Dropped viable regions: " << report.dropped.viable << '\n';
-    std::cout << "Dropped dominated regions: " << report.dropped.dominated
-              << '\n';
     std::cout << "Dropped lb floor: ";
     if (report.dropped.lost_nothing()) {
       std::cout << "none\n";

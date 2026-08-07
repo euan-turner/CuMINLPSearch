@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "cuminlp/region/fan_out.hpp"
@@ -120,6 +121,19 @@ inline bool can_fathom_without_children(std::size_t live_count,
                                         const Composition& composition)
 {
   return live_count <= composition.size() && is_fully_enumerable(composition);
+}
+
+// A composition's compact spelling, one slot_kind_char per slot -- the form
+// diagnostics use (e.g. the GRAPH line, design/TELEMETRY.md §4.2). Lives here
+// rather than in backend::graph because a composition's spelling is region's
+// to define, and a second backend would want the same one.
+inline std::string spell(const Composition& composition)
+{
+  std::string out(composition.size(), '?');
+  for (std::size_t i = 0; i < composition.size(); ++i) {
+    out[i] = slot_kind_char(composition[i]);
+  }
+  return out;
 }
 
 }  // namespace cuminlp::region

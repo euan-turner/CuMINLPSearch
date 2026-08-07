@@ -2,7 +2,9 @@
 // TEST_EXTENSION.md. Requires an actual CUDA device.
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -33,6 +35,25 @@ using cuminlp::region::SlotKind;
 
 namespace
 {
+
+// Redirects std::cout to a string for the lifetime of the object -- same
+// technique test/source/report_test.cpp uses for ConsoleReporter.
+class CoutCapture
+{
+public:
+  CoutCapture()
+      : prev_(std::cout.rdbuf(buf_.rdbuf()))
+  {
+  }
+
+  ~CoutCapture() { std::cout.rdbuf(prev_); }
+
+  std::string str() const { return buf_.str(); }
+
+private:
+  std::ostringstream buf_;
+  std::streambuf* prev_;
+};
 
 // x in [0, 10], objective x*x, constraint x <= 5 (feasible over part of the
 // domain: [0,5] is feasible, (5,10] is not).
@@ -86,6 +107,54 @@ TEST_CASE(
   auto replay = IntervalGraphReplay<double>::build(p, comp, FanOutSpec {4});
   CHECK(replay.n_regions() == composition_fan_out(comp, FanOutSpec {4}));
   CHECK(replay.n_regions() == 4);
+}
+
+TEST_CASE("report_build prints one GRAPH line with the build's real geometry",
+          "[graph_replay][telemetry]")
+{
+  Problem<double> p = make_problem();
+  Composition comp {.kinds = {SlotKind::Continuous, SlotKind::Continuous}};
+  FanOutSpec const fan_out {4};
+
+  SECTION("off by default: no GRAPH line")
+  {
+    CoutCapture out;
+    auto replay = IntervalGraphReplay<double>::build(p, comp, fan_out);
+    (void)replay;
+    CHECK(out.str().find("GRAPH\t") == std::string::npos);
+  }
+
+  SECTION("the interval graph's line names role=bounder")
+  {
+    CoutCapture out;
+    auto replay = IntervalGraphReplay<double>::build(
+        p, comp, fan_out, /*budget_bytes=*/0, /*sample_points=*/1,
+        /*report_build=*/true);
+    std::string const line = out.str();
+
+    CHECK(line.starts_with("GRAPH\tcomposition=CC\trole=bounder"));
+    CHECK(line.find("regions=" + std::to_string(replay.n_regions()))
+          != std::string::npos);
+    CHECK(line.find("elements=" + std::to_string(replay.n_elems()))
+          != std::string::npos);
+    CHECK(line.find("bytes=") != std::string::npos);
+    CHECK(line.ends_with('\n'));
+    // Exactly one line: this build produced exactly one graph.
+    CHECK(std::count(line.begin(), line.end(), '\n') == 1);
+  }
+
+  SECTION("the point graph's line names role=sampler")
+  {
+    CoutCapture out;
+    auto replay = PointGraphReplay<double>::build(
+        p, comp, fan_out, /*budget_bytes=*/0, /*sample_points=*/8,
+        /*report_build=*/true);
+    std::string const line = out.str();
+
+    CHECK(line.starts_with("GRAPH\tcomposition=CC\trole=sampler"));
+    CHECK(line.find("elements=" + std::to_string(replay.n_elems()))
+          != std::string::npos);
+  }
 }
 
 TEST_CASE(

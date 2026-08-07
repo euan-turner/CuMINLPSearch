@@ -168,6 +168,22 @@ target_compile_features(cuminlp_report_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_report_test)
 
+# Host-only: search/cache.hpp's BackendCache names only backend/backend.hpp
+# (RegionBackendFactory and friends) and region::Composition/FanOutSpec, none
+# of them CUDA types, so its build/rebuild/eviction bookkeeping
+# (design/TELEMETRY.md §4.4) is testable against a fake, host-only
+# RegionBackendFactory<double> -- see source/cache_test.cpp's own top comment
+# for how the fake simulates a device-memory cap without a GPU.
+add_executable(cuminlp_cache_test source/cache_test.cpp)
+target_link_libraries(
+    cuminlp_cache_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_cache_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_cache_test)
+
 # Launches backend/graph/subregion_sampler.cuh's sample_points_kernel directly (bypassing
 # GraphBuilder/GraphReplay) to check Integer/Binary variables are always
 # sampled on the integer lattice, even when they aren't the slot being

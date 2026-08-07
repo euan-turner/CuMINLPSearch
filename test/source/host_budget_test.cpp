@@ -288,6 +288,60 @@ TEST_CASE("materialise resolves a child through a reused slot",
   CHECK(feq(history.intervals[fresh][0].ub, 6.0));
 }
 
+TEST_CASE("freed_count tallies slots that hit refcount zero",
+          "[history][telemetry]")
+{
+  IntervalHistory<double> history;
+  history.enqueue({});  // the root sentinel
+  CHECK(history.freed_count() == 0);
+
+  std::size_t const idx = history.enqueue({{0.0, 1.0}});
+  history.add_ref(idx);
+  history.release(idx);  // one reference remains: not freed yet
+  CHECK(history.freed_count() == 0);
+
+  history.release(idx);  // refcount hits zero
+  CHECK(history.freed_count() == 1);
+
+  // A slot reused via enqueue() and released again counts a second time.
+  std::size_t const reused = history.enqueue({{2.0, 3.0}});
+  REQUIRE(reused == idx);
+  history.release(reused);
+  CHECK(history.freed_count() == 2);
+}
+
+TEST_CASE("releasing the root sentinel never counts as freed",
+          "[history][telemetry]")
+{
+  IntervalHistory<double> history;
+  history.enqueue({});
+  history.release(0);
+  history.release(0);
+  CHECK(history.freed_count() == 0);
+}
+
+TEST_CASE("peak_live tracks the high-water mark of live_count",
+          "[history][telemetry]")
+{
+  IntervalHistory<double> history;
+  history.enqueue({});  // root: live_count() == 1
+  CHECK(history.peak_live() == 1);
+
+  std::size_t const a = history.enqueue({{0.0, 1.0}});  // live_count() == 2
+  std::size_t const b = history.enqueue({{1.0, 2.0}});  // live_count() == 3
+  CHECK(history.peak_live() == 3);
+
+  history.release(a);
+  history.release(b);  // live_count() drops back to 1
+  CHECK(history.live_count() == 1);
+  // The mark stays at the peak already reached; it isn't reset by later
+  // shrinkage.
+  CHECK(history.peak_live() == 3);
+
+  history.enqueue({{2.0, 3.0}});  // reuses a freed slot: live_count() == 2
+  CHECK(history.peak_live() == 3);
+}
+
 TEST_CASE("live_bytes returns to baseline over an expand/consume cycle",
           "[history][8.3]")
 {

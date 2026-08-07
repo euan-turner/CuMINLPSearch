@@ -263,9 +263,12 @@ run says what it discarded and the reported bounds account for it:
   emptied it.
 
 So a `--bounded-frontier` run gives up bound *quality*, gracefully and visibly,
-and never soundness. `tools/minlp_status.py` reads `Dropped viable regions:`
-for the same reason: without it, an emptied frontier would be recorded as
-`infeasible` on a run that merely ran out of memory.
+and never soundness. `tools/minlp_status.py` reads the driver's own `Outcome:`
+line for the same reason: without that distinction, an emptied frontier would
+be recorded as `infeasible` on a run that merely ran out of memory. (`Dropped
+viable regions:` is what a nonzero *viable* eviction is reported as; the tool
+falls back to reconstructing `Outcome:` from it on a log old enough to predate
+the line.)
 
 ```sh
 # cap the search at 2 GiB of host structures, and stop there
@@ -411,11 +414,7 @@ Host memory budget: 26416576512 bytes (measured)
 ------------ Finished ------------
 -29.45 <= min <= -15.9619
 Stop reason: iteration-limit
-Pending size: 8175
-Viable regions: 2417
-Pruned as interval-infeasible: 2021384
 Dropped viable regions: 0
-Dropped dominated regions: 0
 Dropped lb floor: none
 objective (minimise): -15.9619
 RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
@@ -448,26 +447,35 @@ RESULT	sense=min	primal=-15.961862397412036	dual=-29.450000000000074
   region. Negation does not swap the two: on a `max` model `primal` is still
   the attained value and `dual` still the bound, so the inequality reads
   `primal <= max <= dual`.
-- **Viable regions** are those not yet proven suboptimal. Non-zero means the
-  search was cut short, not that it failed. Zero, with an incumbent, means
-  optimality was proven — that is exactly the `Proven optimal` condition.
-- **Pending size** is the raw queue length and is *not* a measure of progress.
-  It can be large while `Viable regions` is zero: dominated regions stay
-  queued until they are dequeued and discarded.
 - **`Stop reason`** is why the loop ended, in one word:
   `converged` (the bracket closed to tolerance), `exhausted` (the frontier
   emptied), `iteration-limit`, `host-memory` (see
   [Host memory budget](#host-memory-budget)), or `allocation-failure` /
   `device-memory` for an allocation that threw. All six end in the same
   epilogue, so the bracket below is valid whichever one is printed.
-- **`Dropped viable regions` / `Dropped dominated regions` /
-  `Dropped lb floor`** are what `--bounded-frontier` discarded, and are all
-  zero and `none` without it. A nonzero *viable* count is the one to read: it
-  means `GLB` is capped at the floor and the run can no longer claim
-  optimality or infeasibility on its own.
+- **`Outcome: infeasible` / `Outcome: no sample`** appears in place of the
+  above only when no feasible point was ever sampled (`primal=none` on the
+  `RESULT` line). `infeasible` means the frontier emptied by *proving* every
+  region held nothing; `no sample` means the run stopped with places left to
+  look (still pending, or discarded to stay inside the host budget) with no
+  such proof. `tools/minlp_status.py` records the two differently — see
+  [Tracking a corpus](#tracking-a-corpus-minlp_statusmd). Absent whenever an
+  incumbent was found, since there is then nothing to classify.
+- **`Dropped viable regions` / `Dropped lb floor`** are what
+  `--bounded-frontier` discarded, and are `0` / `none` without it. A nonzero
+  *viable* count is the one to read: it means `GLB` is capped at the floor
+  and the run can no longer claim optimality or infeasibility on its own.
 - For a maximisation, the objective is negated on the way in and negated
   back on the way out; a `--dump-dag` shows what the solver actually
   minimises, and says so.
+
+**`--verbose`** (alias `--telemetry`) adds a `GRAPH` line per device graph
+built and, after the summary above, a `Telemetry` block: the subdomain
+counts that moved out of the plain summary (`Pending size`, `Viable
+regions`, `Pruned as interval-infeasible`, `Dropped dominated regions`
+among them), plus history/graph-cache counters and a `balance` self-check.
+See [design/TELEMETRY.md](design/TELEMETRY.md). Off by default: nothing on
+this flag changes a byte of the output above.
 
 > **Note on older logs.** Until recently, hitting the iteration limit set
 > `GLB` to the frontier's minimum without clamping it to the incumbent. When

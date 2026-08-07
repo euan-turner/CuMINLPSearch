@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include <cuinterval/interval.h>
@@ -39,18 +41,19 @@ struct IntervalHistory
   std::size_t enqueue(std::vector<cu::interval<T>> new_interval)
   {
     std::size_t const bytes = entry_bytes(new_interval.size());
+    std::size_t idx = 0;
     if (!free_slots_.empty()) {
-      std::size_t const idx = free_slots_.back();
+      idx = free_slots_.back();
       free_slots_.pop_back();
       intervals[idx] = std::move(new_interval);
       refs_[idx] = 1;
-      live_bytes_ += bytes;
-      return idx;
+    } else {
+      idx = intervals.size();
+      intervals.push_back(std::move(new_interval));
+      refs_.push_back(1);
     }
-    std::size_t const idx = intervals.size();
-    intervals.push_back(std::move(new_interval));
-    refs_.push_back(1);
     live_bytes_ += bytes;
+    peak_live_ = std::max(peak_live_, live_count());
     return idx;
   }
 
@@ -87,6 +90,7 @@ struct IntervalHistory
     // memory back.
     std::vector<cu::interval<T>>().swap(intervals[idx]);
     free_slots_.push_back(idx);
+    ++freed_;
   }
 
   // Host bytes the live entries hold, for the driver's memory budget
@@ -103,6 +107,16 @@ struct IntervalHistory
 
   std::size_t ref_count(std::size_t idx) const { return refs_[idx]; }
 
+  // Slots that hit refcount zero and joined the free list -- an entry that
+  // was reused still counts once per release, same as one that grew the
+  // vector instead. For the telemetry block's "history slots freed" line.
+  std::uint64_t freed_count() const { return freed_; }
+
+  // The high-water mark of live_count() over this history's lifetime. For
+  // the telemetry block's "peak live" line -- a slot count, not bytes; the
+  // byte figure is already the host budget's business (live_bytes()).
+  std::size_t peak_live() const { return peak_live_; }
+
 private:
   static constexpr std::size_t kRootSlot = 0;
 
@@ -118,6 +132,8 @@ private:
   std::vector<std::size_t> refs_;  // parallel to intervals
   std::vector<std::size_t> free_slots_;
   std::size_t live_bytes_ = 0;
+  std::uint64_t freed_ = 0;
+  std::size_t peak_live_ = 0;
 };
 
 }  // namespace cuminlp::search
