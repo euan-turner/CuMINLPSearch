@@ -23,6 +23,12 @@ enum class PolicyKind
   BisectionBudget, // per-slot widths under a fixed N = 2^B region budget
                    // (design/BUDGETED_PARTITION.md); opt-in only, see
                    // config::policy_roster and --policy=bisection-budget
+  RelativeBisectionBudget, // BisectionBudget's greedy heap compares each
+                   // candidate's live width against its own original
+                   // domain width, not the raw absolute width; opt-in via
+                   // --policy=relative-bisection-budget, for comparison
+                   // against BisectionBudget on problems whose variables
+                   // span different absolute scales
 };
 
 // Decides, for a search-tree node's current box, which variables to act on

@@ -94,7 +94,7 @@ auto solve_with(cuminlp::model::Problem<double> const& problem,
 
   auto fan = std::make_shared<cuminlp::report::ObserverFan>();
   fan->add(std::make_shared<cuminlp::report::ConsoleReporter>(
-      cuminlp::config::profile_problem(problem)));
+      cuminlp::config::profile_problem(problem), verbose));
   if (verbose) {
     fan->add(std::make_shared<cuminlp::report::TelemetryReporter>());
   }
@@ -314,13 +314,24 @@ auto main(int argc, char* argv[]) -> int
            "                    so a bound recorded under it is not "
            "comparable with one\n"
            "                    recorded under the default roster.\n"
-           "  --bisection-budget=B  B for --policy=bisection-budget "
-           "(bisections to\n"
-           "                    distribute per node, N = 2^B regions). 0 "
-           "(the default)\n"
-           "                    derives B from this device's free memory. "
-           "Ignored,\n"
-           "                    and an error, under any other policy.\n"
+           "  --policy=relative-bisection-budget  same as bisection-budget, "
+           "but the\n"
+           "                    per-node greedy split compares each "
+           "variable's live\n"
+           "                    width against its own original domain "
+           "width rather\n"
+           "                    than the raw absolute width -- for A/B "
+           "comparison on\n"
+           "                    problems whose variables span different "
+           "scales.\n"
+           "  --bisection-budget=B  B for --policy=bisection-budget/"
+           "relative-bisection-budget\n"
+           "                    (bisections to distribute per node, N = 2^B "
+           "regions).\n"
+           "                    0 (the default) derives B from this "
+           "device's free\n"
+           "                    memory. Ignored, and an error, under any "
+           "other policy.\n"
            "\n"
            "Memory:\n"
            "  --host-budget-bytes=N  cap the host memory the search's pending\n"
@@ -629,35 +640,39 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::config::SearchCalibration selection_calibration;
     selection_calibration.free_device_bytes = free_device_bytes();
 
-    bool const bisection_budget_policy =
-        policy_name && *policy_name == "bisection-budget";
+    bool const relative_bisection_budget_policy =
+        policy_name && *policy_name == "relative-bisection-budget";
+    bool const bisection_budget_policy = relative_bisection_budget_policy
+        || (policy_name && *policy_name == "bisection-budget");
 
-    // --policy=bisection-budget is not in policy_roster (never
-    // auto-selected, design/BUDGETED_PARTITION.md §11) and is not shaped by
-    // partition_num/enumerate_cap fitting at all, so it bypasses
-    // lookup_policy/select_policy/config::resolve entirely and builds its
-    // RunSpec directly. --partition-num and --max-slots/--max-cycle-size
-    // are errors under it rather than silently ignored, since both appear
-    // in recorded reproduction keys (tools/minlp_status.py) and a
-    // silently-ignored flag there would make two different runs look
-    // identical.
+    // --policy=bisection-budget/--policy=relative-bisection-budget are not
+    // in policy_roster (never auto-selected, design/BUDGETED_PARTITION.md
+    // §11) and are not shaped by partition_num/enumerate_cap fitting at
+    // all, so they bypass lookup_policy/select_policy/config::resolve
+    // entirely and build their RunSpec directly. --partition-num and
+    // --max-slots/--max-cycle-size are errors under them rather than
+    // silently ignored, since both appear in recorded reproduction keys
+    // (tools/minlp_status.py) and a silently-ignored flag there would make
+    // two different runs look identical.
     if (bisection_budget_policy) {
       if (partition_num) {
-        std::cerr << "--partition-num has no meaning under "
-                     "--policy=bisection-budget; use --bisection-budget "
-                     "instead\n";
+        std::cerr << "--partition-num has no meaning under --policy="
+                  << *policy_name << "; use --bisection-budget instead\n";
         return 2;
       }
       if (max_slots) {
         std::cerr << "--max-slots/--max-cycle-size is not a memory knob "
-                     "under --policy=bisection-budget (a slot needs "
+                     "under --policy="
+                  << *policy_name
+                  << " (a slot needs "
                      "b_j >= 1, so the budget already bounds the slot "
                      "count); use --bisection-budget instead\n";
         return 2;
       }
     } else if (bisection_budget) {
       std::cerr << "--bisection-budget only applies under "
-                   "--policy=bisection-budget\n";
+                   "--policy=bisection-budget or "
+                   "--policy=relative-bisection-budget\n";
       return 2;
     }
 
@@ -667,13 +682,19 @@ auto main(int argc, char* argv[]) -> int
     cuminlp::config::RunSpec spec {.fan_out = cuminlp::region::FanOutSpec {2}};
 
     if (bisection_budget_policy) {
-      spec.policy_kind = cuminlp::policy::PolicyKind::BisectionBudget;
-      spec.policy_name = "bisection-budget";
+      spec.policy_kind = relative_bisection_budget_policy
+          ? cuminlp::policy::PolicyKind::RelativeBisectionBudget
+          : cuminlp::policy::PolicyKind::BisectionBudget;
+      spec.policy_name = *policy_name;
       spec.source = cuminlp::config::Provenance::Named;
       // spec.fan_out keeps its placeholder value from construction above --
       // unused by this policy (BisectionBudgetCompositionPolicy has no
       // shared FanOutSpec, design/BUDGETED_PARTITION.md §14.3).
-      spec.sample_points = sample_points.value_or(1);
+      // 10 to match mixed-all-small's policy_roster pin -- the closed-form
+      // B fit below is against the same device-budget fraction that fit
+      // uses, so a mismatched sample_points here silently biases B relative
+      // to what a roster policy would have chosen at the same budget.
+      spec.sample_points = sample_points.value_or(10);
       spec.max_slots = cuminlp::config::kMaxSlots;
       spec.overrides.enumerate_cap = enumerate_cap;
       spec.overrides.sample_points = sample_points;

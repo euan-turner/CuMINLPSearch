@@ -214,7 +214,10 @@ std::unique_ptr<CompositionPolicy<T>> make_policy(
       return std::make_unique<WidthFirstCompositionPolicy<T>>(fan_out, calibration);
     case PolicyKind::BisectionBudget:
       return std::make_unique<BisectionBudgetCompositionPolicy<T>>(
-          bisection_budget, calibration);
+          bisection_budget, calibration, /*relative_width=*/false);
+    case PolicyKind::RelativeBisectionBudget:
+      return std::make_unique<BisectionBudgetCompositionPolicy<T>>(
+          bisection_budget, calibration, /*relative_width=*/true);
   }
   throw InvalidConfiguration("unknown PolicyKind");
 }

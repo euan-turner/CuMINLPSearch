@@ -33,11 +33,23 @@ public:
   // to exist at all, §8.2) and small enough that 2^B fits a 64-bit region
   // count with headroom -- 62 rather than 63/64 is a guard against
   // absurdity, the same spirit as config::kMaxSlots, not a measured limit.
+  // `relative_width` switches the greedy heap's comparison (§7 below) from
+  // each candidate's raw live width to live width / its own original domain
+  // width -- still exactly optimal for min-max by the same exchange
+  // argument, just for min-max *relative* remaining uncertainty instead of
+  // min-max *absolute* width. Absolute width is scale-sensitive: on a
+  // problem whose variables span different orders of magnitude, the plain
+  // heap spends a disproportionate share of B equalising absolute widths
+  // across variables before making relative progress on any of them
+  // (--policy=relative-bisection-budget vs --policy=bisection-budget is the
+  // A/B for this).
   explicit BisectionBudgetCompositionPolicy(
       std::size_t bisection_budget,
-      config::SearchCalibration calibration = {})
+      config::SearchCalibration calibration = {},
+      bool relative_width = false)
       : CompositionPolicy<T>(calibration)
       , B_(bisection_budget)
+      , relative_width_(relative_width)
   {
     if (B_ < 1 || B_ > 62) {
       throw InvalidConfiguration(
@@ -51,6 +63,8 @@ public:
   using CompositionPolicy<T>::max_cycle_size;
 
   std::size_t bisection_budget() const { return B_; }
+
+  bool relative_width() const { return relative_width_; }
 
   // A pure function of B alone: every composition this policy ever returns
   // costs exactly N regions (design/BUDGETED_PARTITION.md §3), which is the
@@ -96,6 +110,8 @@ public:
       std::size_t vid;
       region::SlotKind kind;
       T live_width;  // current live domain width; halved on each pick
+      T original_width;  // live_width at candidate creation; never changes
+                         // -- relative_width_'s denominator
       std::size_t bisections = 0;
     };
     std::vector<BisectCandidate> bisect_candidates;
@@ -126,13 +142,13 @@ public:
                 {vid, region::SlotKind::IntegerEnumerate, d, bits_for(d)});
           } else {
             bisect_candidates.push_back(
-                {vid, region::SlotKind::IntegerPartition, width(b)});
+                {vid, region::SlotKind::IntegerPartition, width(b), width(b)});
           }
           break;
         }
         case model::VarKind::Continuous:
           bisect_candidates.push_back(
-              {vid, region::SlotKind::Continuous, width(b)});
+              {vid, region::SlotKind::Continuous, width(b), width(b)});
           break;
       }
     }
@@ -165,20 +181,28 @@ public:
     for (std::size_t i = taken_count; i < enum_candidates.size(); ++i) {
       const EnumCandidate& c = enum_candidates[i];
       if (c.kind == region::SlotKind::IntegerEnumerate) {
-        bisect_candidates.push_back(
-            {c.vid, region::SlotKind::IntegerPartition, width(box[c.vid])});
+        bisect_candidates.push_back({c.vid,
+                                    region::SlotKind::IntegerPartition,
+                                    width(box[c.vid]),
+                                    width(box[c.vid])});
       }
     }
 
-    // §7: greedy max-heap by absolute live width, B times (here `remaining`
-    // times, since taking an enumerate slot already spent some of B).
-    // Exactly optimal for the min-max objective (the exchange argument in
-    // the design doc): moving one bisection from a non-maximal variable to
-    // the maximal one weakly improves it, so iterating settles on greedy.
+    // §7: greedy max-heap by live width (absolute, or relative to each
+    // candidate's own original width under relative_width_), B times (here
+    // `remaining` times, since taking an enumerate slot already spent some
+    // of B). Exactly optimal for the min-max objective (the exchange
+    // argument in the design doc): moving one bisection from a non-maximal
+    // variable to the maximal one weakly improves it, so iterating settles
+    // on greedy -- the argument holds identically for either metric, since
+    // it never depends on what "width" means, only that a pick halves it.
     std::vector<std::size_t> heap(bisect_candidates.size());
     std::iota(heap.begin(), heap.end(), 0);
-    auto by_live_width = [&bisect_candidates](std::size_t a, std::size_t b)
-    { return bisect_candidates[a].live_width < bisect_candidates[b].live_width; };
+    bool const relative = relative_width_;
+    auto key = [relative](const BisectCandidate& c) -> T
+    { return relative ? c.live_width / c.original_width : c.live_width; };
+    auto by_live_width = [&bisect_candidates, key](std::size_t a, std::size_t b)
+    { return key(bisect_candidates[a]) < key(bisect_candidates[b]); };
     std::make_heap(heap.begin(), heap.end(), by_live_width);
 
     std::size_t spent_bisecting = 0;
@@ -269,6 +293,7 @@ private:
 
   std::size_t B_;
   std::size_t N_;
+  bool relative_width_;
 };
 
 }  // namespace cuminlp::policy

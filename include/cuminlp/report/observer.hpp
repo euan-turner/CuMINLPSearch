@@ -142,8 +142,8 @@ public:
   /// error it explains carries none) -- the same profile solve.cu already
   /// computes once per parsed model, passed through here instead of
   /// recomputed.
-  explicit ConsoleReporter(config::ProblemProfile problem)
-      : problem_(problem)
+  explicit ConsoleReporter(config::ProblemProfile problem, bool verbose = true)
+      : problem_(problem), verbose_(verbose)
   {
   }
 
@@ -167,20 +167,27 @@ public:
   void on_dequeue(std::uint32_t iter, double lb) override
   {
     last_iter_ = iter;
-    std::cout << "Least pending lb (selected for sample+partition): " << lb
-              << '\n';
+    print_this_iter_ = (iter % 100 == 0);
+    if (verbose_ || print_this_iter_) {
+      std::cout << "Least pending lb (selected for sample+partition): " << lb
+                << std::endl;
+    }
   }
 
   void on_iteration(const IterationEvent& event) override
   {
-    std::cout << "iter " << last_iter_ << ": GUB = " << event.gub
-              << ", Candidate: " << event.candidate << '\n';
+    if (verbose_ || print_this_iter_) {
+      std::cout << "iter " << last_iter_ << ": GUB = " << event.gub
+                << ", Candidate: " << event.candidate << std::endl;
+    }
   }
 
   void on_fathom(std::size_t n_points, double gub) override
   {
-    std::cout << "iter " << last_iter_ << ": fully enumerated and fathomed ("
-              << n_points << " points), GUB = " << gub << '\n';
+    if (verbose_ || print_this_iter_) {
+      std::cout << "iter " << last_iter_ << ": fully enumerated and fathomed ("
+                << n_points << " points), GUB = " << gub << std::endl;
+    }
   }
 
   void on_cache_eviction() override
@@ -278,7 +285,9 @@ public:
 private:
   config::ProblemProfile problem_;
   std::uint32_t last_iter_ = 0;
+  bool print_this_iter_ = false;
   bool printed_cache_eviction_ = false;
+  bool verbose_ = true;
 };
 
 }  // namespace cuminlp::report
