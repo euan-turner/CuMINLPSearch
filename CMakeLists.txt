@@ -63,6 +63,20 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(gams_solve PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
+# Solves any parseable .gms through the aggregate-bounding backend
+# (design/AGGREGATE_BOUNDING.md). A separate binary from gams_solve, not a
+# flag on it: the two backends are compared rather than merged, and the
+# parameter families have nothing in common.
+add_executable(aggregate_solve source/gams/aggregate_solve.cu)
+
+target_link_libraries(aggregate_solve PRIVATE cuminlp::gams PRIVATE cuminlp::lib)
+
+target_compile_features(aggregate_solve PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(aggregate_solve PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 # ---- Examples ----
 
 # Rosenbrock instance solved via SearchDriver -- the DAG/CUDA-graph-replay

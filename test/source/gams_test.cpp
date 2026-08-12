@@ -9,12 +9,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "autocorr_bern20_03_problem.hpp"
+#include "cuminlp/model/eval.hpp"
 #include "cuminlp/model/problem.hpp"
-#include "dag_eval.hpp"
 
+using cuminlp::model::evaluate_objective;
 using cuminlp::model::Expr;
 using cuminlp::model::Problem;
-using cuminlp::testing::evaluate_objective;
 namespace gams = cuminlp::gams;
 
 namespace
@@ -440,7 +440,7 @@ TEST_CASE("a surviving objvar bound is stated in the file's own sense",
   CHECK(close(parsed.problem.constraints[0].rhs, 25.0));
   // f(3) = 9, not -9.
   CHECK(close(
-      cuminlp::testing::evaluate(
+      cuminlp::model::evaluate(
           parsed.problem.graph, parsed.problem.constraints[0].root_id, {3.0}),
       9.0));
 }
@@ -933,7 +933,7 @@ TEST_CASE("relations canonicalise into LE and EQ", "[gams][constraints]")
   // non-constant right-hand side, so it lowers to `6 - 3*x1 <= 0`.
   CHECK(parsed.problem.constraints[1].cmp == cuminlp::model::Cmp::LE);
   CHECK(close(parsed.problem.constraints[1].rhs, 0.0));
-  double const body = cuminlp::testing::evaluate(
+  double const body = cuminlp::model::evaluate(
       graph, parsed.problem.constraints[1].root_id, {5.0});
   CHECK(close(body, 6.0 - 15.0));
 }

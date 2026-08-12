@@ -1,8 +1,10 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "cuminlp/model/dag.hpp"
 
@@ -10,6 +12,7 @@
 #include <cuinterval/interval.h>
 
 #include "cuminlp/errors.hpp"
+#include "cuminlp/model/eval.hpp"
 #include "cuminlp/model/print.hpp"
 #include "cuminlp/model/problem.hpp"
 
@@ -426,4 +429,99 @@ TEST_CASE("print_problem prints an unset objective rather than reading past "
   cuminlp::model::PrintOptions options;
   options.style = cuminlp::model::PrintStyle::Nodes;
   REQUIRE(render(p, options).find("<unset>") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// model/eval.hpp -- the host reference oracle (design/AGGREGATE_BOUNDING.md
+// §12, stage 1). Host-only by construction, which is why these live in this
+// target rather than in a GPU one.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("evaluate_all agrees with evaluate on every root", "[dag][eval]")
+{
+  Problem<double> p;
+  auto x = p.var(-5.0, 5.0);
+  auto y = p.var(-5.0, 5.0);
+  auto shared = x * x + y;
+  p.set_objective(shared + y);
+  p.add_constraint(shared - x, cuminlp::model::Cmp::LE, 4.0);
+
+  std::vector<double> const point {2.0, 3.0};
+  std::vector<double> const all = cuminlp::model::evaluate_all(p.graph, point);
+
+  REQUIRE(all.size() == p.graph.nodes.size());
+  // The whole point of evaluate_all: one sweep, every root, same answers.
+  for (std::size_t i = 0; i < p.graph.nodes.size(); ++i) {
+    CHECK(feq(all[i], cuminlp::model::evaluate(p.graph, i, point)));
+  }
+  CHECK(feq(cuminlp::model::evaluate_objective(p, point), 10.0));  // 4+3+3
+  CHECK(feq(all[p.constraints[0].root_id], 5.0));  // 4+3-2
+}
+
+TEST_CASE("evaluate rejects an out-of-range root and a short point",
+          "[dag][eval]")
+{
+  Problem<double> p;
+  auto x = p.var(0.0, 1.0);
+  p.set_objective(x + x);
+
+  CHECK_THROWS_AS(
+      cuminlp::model::evaluate(p.graph, p.graph.nodes.size(), {0.5}),
+      std::runtime_error);
+  CHECK_THROWS_AS(cuminlp::model::evaluate_objective(p, {}),
+                  std::runtime_error);
+}
+
+TEST_CASE("satisfies mirrors the device's LE and EQ predicates", "[dag][eval]")
+{
+  using cuminlp::model::Cmp;
+  using cuminlp::model::satisfies;
+
+  // LE is exact, matching backend/graph/kernels.cuh's is_feasible(T, ...).
+  CHECK(satisfies(1.0, Cmp::LE, 1.0));
+  CHECK(satisfies(0.5, Cmp::LE, 1.0));
+  CHECK_FALSE(satisfies(1.0 + 1e-12, Cmp::LE, 1.0));
+
+  // EQ carries almost_equal's absolute-or-relative tolerance.
+  CHECK(satisfies(1.0, Cmp::EQ, 1.0));
+  CHECK(satisfies(1.0 + 1e-10, Cmp::EQ, 1.0));
+  CHECK_FALSE(satisfies(1.0 + 1e-3, Cmp::EQ, 1.0));
+  // Relative arm: 1e-4 absolute is way past abs_tol, but is within rel_tol
+  // of a value this large.
+  CHECK(satisfies(1e6 + 1e-4, Cmp::EQ, 1e6));
+
+  // NaN fails every comparison, so it reports infeasible -- the safe
+  // direction, and what the device does.
+  double const nan = std::numeric_limits<double>::quiet_NaN();
+  CHECK_FALSE(satisfies(nan, Cmp::LE, 1.0));
+  CHECK_FALSE(satisfies(nan, Cmp::EQ, 1.0));
+}
+
+TEST_CASE("first_violated_constraint names the failing constraint",
+          "[dag][eval]")
+{
+  Problem<double> p;
+  auto x = p.var(0.0, 10.0);
+  auto y = p.var(0.0, 10.0);
+  p.set_objective(x + y);
+  p.add_constraint(x + y, cuminlp::model::Cmp::LE, 100.0);  // slack
+  p.add_constraint(x - y, cuminlp::model::Cmp::EQ, 0.0);  // binds
+
+  CHECK(cuminlp::model::satisfies_constraints(p, {3.0, 3.0}));
+  CHECK_FALSE(cuminlp::model::first_violated_constraint(p, {3.0, 3.0}));
+
+  // Index, not a bare bool: it is the second constraint that fails.
+  auto const violated =
+      cuminlp::model::first_violated_constraint(p, {3.0, 4.0});
+  REQUIRE(violated);
+  CHECK(*violated == 1);
+}
+
+TEST_CASE("a model with no constraints is trivially satisfied", "[dag][eval]")
+{
+  Problem<double> p;
+  auto x = p.var(0.0, 1.0);
+  p.set_objective(x * x);
+
+  CHECK(cuminlp::model::satisfies_constraints(p, {0.5}));
 }

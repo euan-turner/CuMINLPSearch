@@ -242,3 +242,54 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 catch_discover_tests(cuminlp_backend_contract_test)
+
+# Host-only: aggregate/partition.hpp and aggregate/policy.hpp
+# (design/AGGREGATE_BOUNDING.md §5, §3.2) name region/, policy/ and model/ and
+# no CUDA type, so the branch/refine split's invariants -- the products, the
+# disjointness, and the "child_id = r / M" slot ordering the device epilogue
+# is built around -- are all decidable without a GPU. Stage 2's exit criteria.
+add_executable(cuminlp_aggregate_policy_test source/aggregate_policy_test.cpp)
+target_link_libraries(
+    cuminlp_aggregate_policy_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_aggregate_policy_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_aggregate_policy_test)
+
+# Host-only: aggregate/selection.hpp and aggregate/frontier.hpp
+# (design/AGGREGATE_BOUNDING.md §7) name no CUDA type. The load-bearing case is
+# the equivalence sweep -- least-lower-bound must reproduce IntervalPQueue's
+# pop order exactly, or the aggregate frontier is a different search and every
+# backend-to-backend comparison is confounded by it. Stage 3's exit criteria.
+add_executable(
+    cuminlp_aggregate_frontier_test source/aggregate_frontier_test.cpp
+)
+target_link_libraries(
+    cuminlp_aggregate_frontier_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_aggregate_frontier_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_aggregate_frontier_test)
+
+# The aggregate backend's device side (design/AGGREGATE_BOUNDING.md §3.2, §4):
+# the k-segment epilogue checked bitwise against a host reduction over the
+# existing IntervalGraphReplay's per-subregion verdicts, plus enclosure against
+# model/eval.hpp's real-valued oracle. Requires an actual CUDA device.
+add_executable(cuminlp_aggregate_backend_test source/aggregate_backend_test.cu)
+target_link_libraries(
+    cuminlp_aggregate_backend_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_aggregate_backend_test PRIVATE cxx_std_20)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_aggregate_backend_test PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
+catch_discover_tests(cuminlp_aggregate_backend_test)

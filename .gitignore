@@ -11,5 +11,6 @@ compile_commands.json
 env.bat
 env.ps1
 design
+.claude/
 *.log
 *.pyc

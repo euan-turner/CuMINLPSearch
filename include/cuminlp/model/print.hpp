@@ -6,7 +6,7 @@
  *
  * `Problem::validate()` proves a DAG is *well-formed*; nothing proved it was
  * the *right* DAG. The only semantic oracle in the repo is the CPU evaluator
- * in test/source/dag_eval.hpp, which compares a parsed Problem against a
+ * in cuminlp/model/eval.hpp, which compares a parsed Problem against a
  * hand-built one -- an oracle that exists for exactly two MINLPLib instances.
  * For everything else, reading the expression back is the only check there is,
  * so this header exists to make that possible without a debugger.
