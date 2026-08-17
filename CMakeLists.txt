@@ -151,6 +151,22 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 
+# Variable-count / subdomain-count vs. interval-hull tightness study.
+# Custom per-objective interval kernels called directly against cuinterval --
+# deliberately not the aggregate backend or CUDA-graph capture/replay, so it
+# stays independent of study/refinement's (design/REFINEMENT_STUDY.md)
+# instrumentation. Not yet implemented; this target only compiles the
+# placeholder in study/variable_subdomain/main.cu.
+add_executable(variable_subdomain_study study/variable_subdomain/main.cu)
+
+target_link_libraries(variable_subdomain_study PRIVATE cuminlp::lib)
+
+target_compile_features(variable_subdomain_study PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(variable_subdomain_study PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 # ---- Developer mode ----
 
 if(NOT cuminlp_DEVELOPER_MODE)
