@@ -192,6 +192,10 @@ public:
     bounds_host_ = std::move(o.bounds_host_);
     child_lb_host_ = std::move(o.child_lb_host_);
     child_ub_host_ = std::move(o.child_ub_host_);
+    retain_subregion_bounds_ = o.retain_subregion_bounds_;
+    subregion_lb_host_ = std::move(o.subregion_lb_host_);
+    subregion_ub_host_ = std::move(o.subregion_ub_host_);
+    subregion_feasible_host_ = std::move(o.subregion_feasible_host_);
     o.graph_ = nullptr;
     o.exec_ = nullptr;
     o.domain_buffer_ = nullptr;
@@ -224,7 +228,69 @@ public:
   /// What one launch copies back, in bytes. Independent of `N` by
   /// construction -- it is the whole point of the design, and stage 4's
   /// measurable asserts it directly.
-  std::size_t d2h_bytes_per_launch() const { return 2 * k_ * sizeof(T); }
+  ///
+  /// Unless `retain_subregion_bounds` is on, in which case it is deliberately
+  /// *not* independent of `N` and says so. See that setter.
+  std::size_t d2h_bytes_per_launch() const
+  {
+    std::size_t bytes = 2 * k_ * sizeof(T);
+    if (retain_subregion_bounds_) {
+      bytes += n_regions_ * (2 * sizeof(T) + sizeof(unsigned char));
+    }
+    return bytes;
+  }
+
+  /**
+   * @brief Also copy the `N` per-subregion bounds back on each launch.
+   *
+   * Off by default, and must stay off for any solve: the reduction's whole
+   * purpose is that only `2k` values cross PCIe regardless of `N`
+   * (design/AGGREGATE_BOUNDING.md §2), and copying `N` doubles per launch
+   * reintroduces exactly the cost that design exists to remove. The flag
+   * exists for design/REFINEMENT_STUDY.md, which measures the distribution
+   * of these values and is not a solve.
+   *
+   * `d2h_bytes_per_launch()` accounts for the extra traffic while this is on,
+   * so telemetry does not quietly under-report it.
+   */
+  void retain_subregion_bounds(bool retain)
+  {
+    retain_subregion_bounds_ = retain;
+    if (retain) {
+      subregion_lb_host_.resize(n_regions_);
+      subregion_ub_host_.resize(n_regions_);
+      subregion_feasible_host_.resize(n_regions_);
+    } else {
+      subregion_lb_host_.clear();
+      subregion_lb_host_.shrink_to_fit();
+      subregion_ub_host_.clear();
+      subregion_ub_host_.shrink_to_fit();
+      subregion_feasible_host_.clear();
+      subregion_feasible_host_.shrink_to_fit();
+    }
+  }
+
+  /// The `N` per-subregion objective bounds the reduction consumed, in
+  /// subregion order. Empty unless `retain_subregion_bounds(true)` was called
+  /// before the launch. Valid until the next launch.
+  ///
+  /// These are the *unmasked* values: `subregion_lb()[r]` is region `r`'s raw
+  /// interval lower bound whether or not `r` was excluded, so a caller
+  /// reproducing `AggregateBound::lb` must filter on `subregion_feasible()`
+  /// itself. That is deliberate -- REFINEMENT_STUDY.md §2.5 needs the masked
+  /// and unmasked hulls separately, and masking here would discard the
+  /// unmasked one irrecoverably.
+  std::span<const T> subregion_lb() const { return subregion_lb_host_; }
+
+  std::span<const T> subregion_ub() const { return subregion_ub_host_; }
+
+  /// 1 where region `r`'s relaxation did not prove it infeasible. Note that
+  /// "unexcluded" is weaker than "contains a feasible point"
+  /// (design/AGGREGATE_BOUNDING.md §1.1).
+  std::span<const unsigned char> subregion_feasible() const
+  {
+    return subregion_feasible_host_;
+  }
 
   /**
    * @brief Device bytes this instance actually requested.
@@ -339,6 +405,27 @@ public:
                              k_ * sizeof(T),
                              cudaMemcpyDeviceToHost),
                   "cudaMemcpy");
+
+    // Opt-in, and after the reductions have already consumed these buffers --
+    // so what lands on the host is exactly what was reduced, not a separate
+    // evaluation that could drift from it.
+    if (retain_subregion_bounds_) {
+      detail::check(cudaMemcpy(subregion_lb_host_.data(),
+                               obj_lb_buffer_,
+                               n_regions_ * sizeof(T),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy");
+      detail::check(cudaMemcpy(subregion_ub_host_.data(),
+                               obj_ub_buffer_,
+                               n_regions_ * sizeof(T),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy");
+      detail::check(cudaMemcpy(subregion_feasible_host_.data(),
+                               feasible_buffer_,
+                               n_regions_ * sizeof(unsigned char),
+                               cudaMemcpyDeviceToHost),
+                    "cudaMemcpy");
+    }
 
     for (std::size_t c = 0; c < k_; ++c) {
       T const lb = child_lb_host_[c];
@@ -686,6 +773,14 @@ private:
   std::vector<T> child_lb_host_;
   std::vector<T> child_ub_host_;
   std::vector<AggregateBound<T>> bounds_host_;
+
+  /// design/REFINEMENT_STUDY.md stage 1; empty unless opted in. Host-side
+  /// only, so they cost nothing on a solve and are not counted in
+  /// allocated_bytes(), which reports *device* bytes.
+  bool retain_subregion_bounds_ = false;
+  std::vector<T> subregion_lb_host_;
+  std::vector<T> subregion_ub_host_;
+  std::vector<unsigned char> subregion_feasible_host_;
 
   Composition composition_ {};
   std::size_t n_regions_ = 0;

@@ -62,6 +62,37 @@ target_compile_features(cuminlp_composition_policy_test PRIVATE cxx_std_20)
 
 catch_discover_tests(cuminlp_composition_policy_test)
 
+# Host-only: study::UniformCompositionPolicy (design/REFINEMENT_STUDY.md
+# §7.2) is plain templated C++ over cu::interval<T>/VarKind, like the
+# policies above -- no CUDA device needed. Used only by
+# source/gams/refinement_study.cu; nothing under include/cuminlp/policy/
+# changes.
+add_executable(cuminlp_uniform_partition_test source/uniform_partition_test.cpp)
+target_link_libraries(
+    cuminlp_uniform_partition_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_uniform_partition_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_uniform_partition_test)
+
+# Host-only: study::draw_fixed_width_box (design/REFINEMENT_STUDY.md §7.3)
+# lives in the same header as draw_parent_box and shares its reasoning --
+# plain templated C++ over cu::interval<T>/VarKind, no CUDA device needed.
+add_executable(
+    cuminlp_parent_box_fixed_width_test
+    source/parent_box_fixed_width_test.cpp
+)
+target_link_libraries(
+    cuminlp_parent_box_fixed_width_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_parent_box_fixed_width_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_parent_box_fixed_width_test)
+
 # Host-only: dag.hpp/Problem::validate() is deliberately device-free (see
 # TEST_EXTENSION.md's "Problem::validate()" section), so §1-2's invariants
 # are all testable without a CUDA device.
@@ -293,3 +324,56 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 catch_discover_tests(cuminlp_aggregate_backend_test)
+
+# End-to-end invariants on refinement_study's CSV (design/REFINEMENT_STUDY.md
+# §3.2): the hull must tighten monotonically in N *within one parent box*,
+# which is only true if every budget is measured on the same boxes. That is a
+# property of how the sweep is wired, invisible to the unit tests below --
+# each individual launch can be correct while the ladder is confounded with
+# placement. Needs the binary and a CUDA device.
+if(Python3_Interpreter_FOUND)
+  add_test(
+      NAME refinement_sweep_check
+      COMMAND Python3::Interpreter
+              "${PROJECT_SOURCE_DIR}/study/refinement/check_sweep.py"
+              "$<TARGET_FILE:refinement_study>"
+              "${CMAKE_CURRENT_SOURCE_DIR}/data/gams/ex7_2_1.gms"
+  )
+else()
+  message(STATUS "No Python 3 interpreter: skipping refinement_study_test")
+endif()
+
+# The refinement study's distribution summary (design/REFINEMENT_STUDY.md
+# §2.2): whether a set of per-subregion bounds is all alike or has isolated
+# outliers. Pure host arithmetic over planted arrays -- ordinary statistics,
+# pinned as such -- so it needs no CUDA device and no solve.
+add_executable(cuminlp_study_distribution_test source/study_distribution_test.cpp)
+target_link_libraries(
+    cuminlp_study_distribution_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_study_distribution_test PRIVATE cxx_std_20)
+
+catch_discover_tests(cuminlp_study_distribution_test)
+
+# The refinement study (design/REFINEMENT_STUDY.md): the N=1 baseline, the
+# masked/unmasked hull reductions, and the Q1 gain metrics. Its central check
+# is soundness against model/eval.hpp's point evaluator -- there is no host
+# interval arithmetic to compare against (§3.3), so a bound that is too tight
+# is caught by enclosure at sampled points rather than by a second oracle.
+# Requires an actual CUDA device.
+add_executable(cuminlp_refinement_study_test source/refinement_study_test.cu)
+target_link_libraries(
+    cuminlp_refinement_study_test
+    PRIVATE cuminlp::lib
+    PRIVATE Catch2::Catch2WithMain
+)
+target_compile_features(cuminlp_refinement_study_test PRIVATE cxx_std_20)
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(
+      cuminlp_refinement_study_test PROPERTIES CUDA_ARCHITECTURES native
+  )
+endif()
+
+catch_discover_tests(cuminlp_refinement_study_test)

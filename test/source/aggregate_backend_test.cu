@@ -473,3 +473,128 @@ TEST_CASE("The budget split and fan-out fit agree with each other",
   CHECK(fit_power_of_two(per_element, per_element - 1) == 0);
   CHECK(fit_power_of_two(per_element, per_element) == 1);
 }
+
+// ---- design/REFINEMENT_STUDY.md stage 1 ------------------------------------
+//
+// The retained per-subregion arrays are the study's entire raw material, so
+// what they must be pinned to is not "plausible interval bounds" but "exactly
+// the values the reduction consumed". Both tests below check that pinning
+// from a different direction: the first that opting out costs nothing, the
+// second that opting in reproduces the device's own aggregate.
+
+TEST_CASE("Per-subregion bounds are not retained unless asked for",
+          "[aggregate][backend][study]")
+{
+  Fixture fx;
+  auto const kinds = fx.kinds();
+  constexpr std::size_t k = 4;
+  constexpr std::size_t n = 4096;
+
+  WidestBranchPolicy<double> const policy(k, n);
+  AggregatePartition const part = policy.partition(fx.root, kinds, 0);
+  AggregateBackendFactory<double> factory;
+  auto bounder =
+      factory.build_bounder(fx.problem, part.launch.composition, n, k, 0);
+
+  // The default must be off, and off must be indistinguishable from before
+  // the flag existed -- a solve that silently started copying N doubles per
+  // launch would undo §2.2 without failing anything else in this file.
+  CHECK(bounder->d2h_bytes_per_launch() == 2 * k * sizeof(double));
+
+  AggregateRegion<double> const agg {fx.root, part};
+  auto const bounds = bounder->bound_children(one(agg));
+  REQUIRE(bounds.size() == k);
+
+  CHECK(bounder->subregion_lb().empty());
+  CHECK(bounder->subregion_ub().empty());
+  CHECK(bounder->subregion_feasible().empty());
+
+  // And turning it on is reflected in the reported traffic rather than
+  // hidden: telemetry that under-reported this would make the study's launches
+  // look as cheap as a solve's.
+  bounder->retain_subregion_bounds(true);
+  CHECK(bounder->d2h_bytes_per_launch()
+        == 2 * k * sizeof(double)
+            + n * (2 * sizeof(double) + sizeof(unsigned char)));
+
+  bounder->retain_subregion_bounds(false);
+  CHECK(bounder->d2h_bytes_per_launch() == 2 * k * sizeof(double));
+}
+
+TEST_CASE("Retained per-subregion bounds reproduce the device's aggregate",
+          "[aggregate][backend][study]")
+{
+  // The load-bearing one. REFINEMENT_STUDY.md computes its hulls on the host
+  // from these arrays rather than from AggregateBound, so if the arrays ever
+  // drifted from what the reduction consumed the study would report a hull no
+  // solver would ever see -- and nothing else in the suite would notice.
+  Fixture fx;
+  auto const kinds = fx.kinds();
+  constexpr std::size_t k = 4;
+
+  for (std::size_t n : {std::size_t {64}, std::size_t {4096}}) {
+    WidestBranchPolicy<double> const policy(k, n);
+    AggregatePartition const part = policy.partition(fx.root, kinds, 0);
+    AggregateBackendFactory<double> factory;
+    auto bounder =
+        factory.build_bounder(fx.problem, part.launch.composition, n, k, 0);
+    bounder->retain_subregion_bounds(true);
+
+    AggregateRegion<double> const agg {fx.root, part};
+    auto const bounds = bounder->bound_children(one(agg));
+    REQUIRE(bounds.size() == k);
+
+    auto const lb = bounder->subregion_lb();
+    auto const ub = bounder->subregion_ub();
+    auto const feas = bounder->subregion_feasible();
+    REQUIRE(lb.size() == n);
+    REQUIRE(ub.size() == n);
+    REQUIRE(feas.size() == n);
+
+    std::size_t const m = part.refine_fan_out;
+    for (std::size_t c = 0; c < k; ++c) {
+      double want_lb = std::numeric_limits<double>::infinity();
+      double want_ub = -std::numeric_limits<double>::infinity();
+      bool any = false;
+      for (std::size_t i = c * m; i < (c + 1) * m; ++i) {
+        if (!feas[i]) {
+          continue;
+        }
+        any = true;
+        want_lb = std::min(want_lb, lb[i]);
+        want_ub = std::max(want_ub, ub[i]);
+      }
+
+      INFO("N = " << n << ", child " << c);
+      CHECK(bounds[c].feasible == any);
+      if (any) {
+        // Bitwise: both sides are a min/max over the same doubles, so any
+        // difference at all is a real disagreement, not rounding.
+        CHECK(feq(bounds[c].lb, want_lb));
+        CHECK(feq(bounds[c].hull_ub, want_ub));
+      }
+    }
+
+    // The unmasked hull the study also needs (§2.5) must bracket the masked
+    // one -- masking can only ever discard values from the extremes inward.
+    double raw_lb = std::numeric_limits<double>::infinity();
+    double raw_ub = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < n; ++i) {
+      raw_lb = std::min(raw_lb, lb[i]);
+      raw_ub = std::max(raw_ub, ub[i]);
+    }
+    for (std::size_t c = 0; c < k; ++c) {
+      if (bounds[c].feasible) {
+        INFO("N = " << n << ", child " << c);
+        CHECK(raw_lb <= bounds[c].lb);
+        CHECK(raw_ub >= bounds[c].hull_ub);
+      }
+    }
+
+    // Every retained subregion bound must be an interval, masked or not.
+    for (std::size_t i = 0; i < n; ++i) {
+      INFO("N = " << n << ", subregion " << i);
+      REQUIRE(lb[i] <= ub[i]);
+    }
+  }
+}

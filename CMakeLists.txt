@@ -77,6 +77,22 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set_target_properties(aggregate_solve PROPERTIES CUDA_ARCHITECTURES native)
 endif()
 
+# Measures what subdivision buys, rather than using it: the interval hull over
+# N subdomains against interval analysis on the parent box alone, swept over
+# parent-box width (design/REFINEMENT_STUDY.md). Reuses the aggregate backend's
+# graph at k = 1 with per-subregion bounds retained -- a mode no solve enables.
+# Writes CSV, not the PARAMS/RESULT grammar, because a designed sweep is not a
+# solver verdict.
+add_executable(refinement_study source/gams/refinement_study.cu)
+
+target_link_libraries(refinement_study PRIVATE cuminlp::gams PRIVATE cuminlp::lib)
+
+target_compile_features(refinement_study PRIVATE cxx_std_20)
+
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  set_target_properties(refinement_study PROPERTIES CUDA_ARCHITECTURES native)
+endif()
+
 # ---- Examples ----
 
 # Rosenbrock instance solved via SearchDriver -- the DAG/CUDA-graph-replay
