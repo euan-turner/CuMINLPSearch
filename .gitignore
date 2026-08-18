@@ -15,3 +15,6 @@ design
 *.log
 *.pyc
 **/results
+**/.venv
+**/__pycache__
+*.png
